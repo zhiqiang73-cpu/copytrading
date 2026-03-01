@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+{% block title %}设置 — BitgetFollow{% endblock %}
+
+{% block content %}
+<div class="max-w-xl mx-auto">
+
+    <!-- 标题 -->
+    <div class="mb-6">
+        <h1 class="text-2xl font-bold text-white">API 配置</h1>
+        <p class="text-gray-400 mt-1 text-sm">填入 Bitget 只读 API Key，系统不会下单，仅读取数据。</p>
+    </div>
+
+    {% if msg %}
+    <div class="mb-4 px-4 py-3 rounded-lg text-sm
+        {% if msg_type == 'success' %}bg-green-500/10 text-green-400 border border-green-500/20
+        {% else %}bg-red-500/10 text-red-400 border border-red-500/20{% endif %}">
+        {{ msg }}
+    </div>
+    {% endif %}
+
+    <!-- 首次提示 -->
+    {% if not configured %}
+    <div class="mb-6 p-4 bg-blue-500/10 border border-blue-500/20 rounded-lg">
+        <p class="text-blue-400 text-sm font-medium mb-2">首次使用，请先配置 API</p>
+        <ol class="text-blue-300/70 text-sm space-y-1 list-decimal list-inside">
+            <li>登录 <a href="https://www.bitget.com/account/newapi" target="_blank" class="text-blue-400 underline">Bitget API 管理</a></li>
+            <li>创建 API Key，权限仅勾选 <strong>Read-Only（只读）</strong></li>
+            <li>将 API Key、Secret Key、Passphrase 填入下方</li>
+        </ol>
+    </div>
+    {% endif %}
+
+    <!-- 配置表单 -->
+    <form method="POST" class="space-y-5">
+        <div>
+            <label class="block text-sm font-medium text-gray-300 mb-1.5">API Key</label>
+            <input type="text" name="api_key" value="{{ current.api_key }}"
+                   placeholder="bg_xxxxxxxxxxxxxxxx"
+                   class="w-full bg-dark-card border border-dark-border rounded-lg px-4 py-2.5 text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-colors font-mono text-sm">
+        </div>
+
+        <div>
+            <label class="block text-sm font-medium text-gray-300 mb-1.5">Secret Key</label>
+            <input type="password" name="secret_key" value="{{ current.secret_key }}" id="secret_input"
+                   placeholder="xxxxxxxxxxxxxxxxxxxxxxxx"
+                   class="w-full bg-dark-card border border-dark-border rounded-lg px-4 py-2.5 text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-colors font-mono text-sm">
+            <button type="button" onclick="toggleSecret()" class="text-xs text-gray-500 hover:text-gray-300 mt-1">显示/隐藏</button>
+        </div>
+
+        <div>
+            <label class="block text-sm font-medium text-gray-300 mb-1.5">Passphrase</label>
+            <input type="password" name="passphrase" value="{{ current.passphrase }}" id="pass_input"
+                   placeholder="你设置的 passphrase"
+                   class="w-full bg-dark-card border border-dark-border rounded-lg px-4 py-2.5 text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-colors font-mono text-sm">
+            <button type="button" onclick="togglePass()" class="text-xs text-gray-500 hover:text-gray-300 mt-1">显示/隐藏</button>
+        </div>
+
+        <div>
+            <label class="block text-sm font-medium text-gray-300 mb-1.5">轮询间隔（秒）</label>
+            <input type="number" name="poll_interval" value="{{ current.poll_interval }}" min="3" max="60"
+                   class="w-32 bg-dark-card border border-dark-border rounded-lg px-4 py-2.5 text-white focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-colors text-sm">
+            <span class="text-gray-500 text-xs ml-2">建议 5 秒，最低 3 秒</span>
+        </div>
+
+        <div class="pt-2">
+            <button type="submit"
+                    class="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-2.5 rounded-lg transition-colors">
+                保存配置
+            </button>
+        </div>
+    </form>
+
+    <!-- 安全提示 -->
+    <div class="mt-8 p-4 bg-dark-card border border-dark-border rounded-lg">
+        <p class="text-gray-400 text-sm font-medium mb-2">安全说明</p>
+        <ul class="text-gray-500 text-xs space-y-1">
+            <li>API Key 保存在本地 .env 文件中，不会上传到任何服务器</li>
+            <li>请确保只授予 <strong>只读（Read-Only）</strong> 权限</li>
+            <li>建议绑定固定 IP 地址以提高安全性</li>
+            <li>本系统 MVP 阶段不会执行任何交易操作</li>
+        </ul>
+    </div>
+
+    {% if configured %}
+    <div class="mt-4 text-center">
+        <a href="/" class="text-blue-400 hover:text-blue-300 text-sm">← 返回仪表盘</a>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function toggleSecret() {
+    const el = document.getElementById('secret_input');
+    el.type = el.type === 'password' ? 'text' : 'password';
+}
+function togglePass() {
+    const el = document.getElementById('pass_input');
+    el.type = el.type === 'password' ? 'text' : 'password';
+}
+</script>
+{% endblock %}

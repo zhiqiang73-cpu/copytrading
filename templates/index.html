@@ -1,0 +1,760 @@
+{% extends "base.html" %}
+{% block title %}仪表盘 — BitgetFollow{% endblock %}
+
+{% block content %}
+
+<!-- ══ 每日日报区 ═══════════════════════════════════════════════════════════ -->
+{% if report.recommendations %}
+<div class="mb-8">
+    <div class="flex items-center justify-between mb-4">
+        <div>
+            <h2 class="text-xl font-bold text-white">📊 每日分析日报</h2>
+            <p class="text-gray-500 text-xs mt-0.5">{{ report.date }} · 共追踪 {{ report.total_traders }} 人 · {{ report.pass_count }} 人通过筛选</p>
+        </div>
+        <button onclick="refreshReport()" class="text-gray-500 hover:text-blue-400 text-xs transition-colors">刷新</button>
+    </div>
+
+    <!-- 预警条（如有） -->
+    {% if report.alerts %}
+    <div class="mb-4 space-y-2">
+        {% for alert in report.alerts %}
+        <div class="flex items-center space-x-2 px-4 py-2.5 bg-red-500/8 border border-red-500/20 rounded-lg">
+            <span class="text-red-400 text-sm">⚠️</span>
+            <span class="text-red-300 text-sm font-medium">{{ alert.name }}</span>
+            <span class="text-red-400/70 text-sm">{{ alert.msg }}</span>
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    <!-- 推荐卡片横排 -->
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+        {% for rec in report.recommendations[:3] %}
+        <div class="bg-dark-card border rounded-xl p-4 cursor-pointer hover:border-blue-500/40 transition-all
+            {% if rec.rank == 1 %}border-yellow-500/40 bg-yellow-500/3
+            {% elif rec.rank == 2 %}border-gray-500/40
+            {% else %}border-dark-border{% endif %}"
+             onclick="window.location='/trader/{{ rec.uid }}'">
+            <div class="flex items-start justify-between mb-3">
+                <div class="flex items-center space-x-2">
+                    <span class="text-lg {% if rec.rank == 1 %}text-yellow-400{% elif rec.rank == 2 %}text-gray-300{% else %}text-amber-600{% endif %}">
+                        {% if rec.rank == 1 %}🥇{% elif rec.rank == 2 %}🥈{% else %}🥉{% endif %}
+                    </span>
+                    <div>
+                        <div class="text-white font-semibold text-sm">{{ rec.name }}</div>
+                        <span class="text-xs px-1.5 py-0.5 rounded font-medium
+                            {% if rec.grade == 'PASS' %}bg-green-500/15 text-green-400
+                            {% elif rec.grade == 'WATCH' %}bg-yellow-500/15 text-yellow-400
+                            {% else %}bg-red-500/15 text-red-400{% endif %}">
+                            {{ rec.grade }}
+                        </span>
+                    </div>
+                </div>
+                <div class="text-right">
+                    {% set roi_val = rec.key_metrics["近7天ROI"] %}
+                    <div class="text-lg font-bold {% if '+' in roi_val %}text-profit{% else %}text-loss{% endif %}">
+                        {{ roi_val }}
+                    </div>
+                    <div class="text-gray-500 text-xs">近7天</div>
+                </div>
+            </div>
+
+            <!-- 关键指标迷你格 -->
+            <div class="grid grid-cols-3 gap-2 mb-3">
+                {% for k, v in rec.key_metrics.items() %}
+                {% if k != "近7天ROI" %}
+                <div class="bg-dark-bg/60 rounded-lg p-2 text-center">
+                    <div class="text-gray-400 text-xs">{{ k }}</div>
+                    <div class="text-white text-xs font-medium mt-0.5">{{ v }}</div>
+                </div>
+                {% endif %}
+                {% endfor %}
+            </div>
+
+            <!-- 推荐理由 -->
+            {% if rec.reasons %}
+            <div class="space-y-1">
+                {% for r in rec.reasons %}
+                <div class="flex items-center space-x-1.5 text-xs text-green-400/80">
+                    <span>✓</span><span>{{ r }}</span>
+                </div>
+                {% endfor %}
+            </div>
+            {% endif %}
+            {% if rec.risks %}
+            <div class="mt-1 space-y-1">
+                {% for r in rec.risks %}
+                <div class="flex items-center space-x-1.5 text-xs text-yellow-500/80">
+                    <span>△</span><span>{{ r }}</span>
+                </div>
+                {% endfor %}
+            </div>
+            {% endif %}
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}
+
+<!-- ══ 操作栏 ══════════════════════════════════════════════════════════════ -->
+<div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 mb-5">
+    <div class="flex items-center space-x-3">
+        <h2 class="text-lg font-bold text-white">所有交易专家</h2>
+        <span class="text-gray-500 text-sm">共 {{ report.total_traders }} 人</span>
+    </div>
+    <div class="flex items-center space-x-3">
+        <!-- 采集开关 -->
+        <button id="btn-collector" onclick="toggleCollector()"
+                class="px-4 py-2 rounded-lg text-sm font-medium transition-colors border
+                {% if collector_running %}
+                    bg-red-600/10 text-red-400 border-red-500/30 hover:bg-red-600/20
+                {% else %}
+                    bg-green-600/10 text-green-400 border-green-500/30 hover:bg-green-600/20
+                {% endif %}">
+            {% if collector_running %}⏹ 停止采集{% else %}▶ 启动采集{% endif %}
+        </button>
+        <button onclick="openAddModal()"
+                class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors">
+            + 添加交易员
+        </button>
+    </div>
+</div>
+
+<!-- ══ 6项筛选标准说明条 ════════════════════════════════════════════════════ -->
+<div class="mb-6 p-3 bg-dark-card border border-dark-border rounded-xl">
+    <div class="flex flex-wrap items-center gap-x-6 gap-y-2">
+        <span class="text-gray-400 text-xs font-medium shrink-0">筛选标准：</span>
+        <div class="flex flex-wrap gap-3 text-xs">
+            <span class="flex items-center space-x-1"><span class="text-blue-400">①</span><span class="text-gray-400">7天内有交易</span></span>
+            <span class="flex items-center space-x-1"><span class="text-blue-400">②</span><span class="text-gray-400">回撤 &lt;25%</span></span>
+            <span class="flex items-center space-x-1"><span class="text-blue-400">③</span><span class="text-gray-400">期望值 &gt;0</span></span>
+            <span class="flex items-center space-x-1"><span class="text-blue-400">④</span><span class="text-gray-400">笔数 ≥30</span></span>
+            <span class="flex items-center space-x-1"><span class="text-blue-400">⑤</span><span class="text-gray-400">连亏 &lt;5次</span></span>
+            <span class="flex items-center space-x-1"><span class="text-blue-400">⑥</span><span class="text-gray-400">持仓 &gt;30min</span></span>
+        </div>
+        <span class="text-gray-600 text-xs ml-auto hidden sm:block">夏普/Calmar/盈亏比仅供参考，不作硬性过滤</span>
+    </div>
+</div>
+
+{% if report.all_results %}
+<!-- ══ 交易员卡片网格 ════════════════════════════════════════════════════════ -->
+<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+    {% for r in report.all_results %}
+    <div class="bg-dark-card border border-dark-border rounded-xl overflow-hidden
+                hover:border-blue-500/30 hover:shadow-lg hover:shadow-blue-500/5
+                transition-all duration-200 cursor-pointer group"
+         onclick="window.location='/trader/{{ r.trader_uid }}'">
+
+        <!-- 卡片顶部：头部信息 + 评级 -->
+        <div class="p-4 pb-3">
+            <div class="flex items-start justify-between mb-3">
+                <div class="flex-1 min-w-0">
+                    <div class="font-semibold text-white text-sm truncate group-hover:text-blue-300 transition-colors">
+                        {{ r.nickname }}
+                    </div>
+                    <div class="flex items-center space-x-2 mt-1">
+                        <span class="text-xs px-1.5 py-0.5 rounded font-medium
+                            {% if r.score.grade == 'PASS' %}bg-green-500/15 text-green-400
+                            {% elif r.score.grade == 'WATCH' %}bg-yellow-500/15 text-yellow-400
+                            {% else %}bg-red-500/15 text-red-400{% endif %}">
+                            {{ r.score.grade }} {{ r.score.passed }}/{{ r.score.total }}
+                        </span>
+                        {% if r.days_since_last <= 1 %}
+                        <span class="text-xs text-green-400 flex items-center space-x-0.5">
+                            <span class="w-1.5 h-1.5 bg-green-400 rounded-full animate-pulse inline-block"></span>
+                            <span>今日活跃</span>
+                        </span>
+                        {% elif r.days_since_last <= 3 %}
+                        <span class="text-xs text-yellow-500">{{ r.days_since_last|int }}天前</span>
+                        {% else %}
+                        <span class="text-xs text-gray-600">{{ r.days_since_last|int }}天前</span>
+                        {% endif %}
+                    </div>
+                </div>
+                <!-- 30日ROI -->
+                <div class="text-right ml-2 shrink-0">
+                    <div class="text-xl font-bold {% if r.recent_30d_roi >= 0 %}text-profit{% else %}text-loss{% endif %}">
+                        {{ "%+.1f"|format(r.recent_30d_roi) }}%
+                    </div>
+                    <div class="text-gray-500 text-xs">近30天</div>
+                </div>
+            </div>
+
+            <!-- 迷你折线占位（用色条代替，后续可加 sparkline） -->
+            <div class="h-1 rounded-full bg-dark-bg overflow-hidden mb-3">
+                {% set pct = [[(r.recent_30d_roi + 50) / 100 * 100, 0]|max, 100]|min %}
+                <div class="h-full rounded-full {% if r.recent_30d_roi >= 0 %}bg-profit{% else %}bg-loss{% endif %}"
+                     style="width: {{ pct }}%"></div>
+            </div>
+
+            <!-- 核心数据行 -->
+            <div class="grid grid-cols-2 gap-2 text-xs mb-3">
+                <div class="bg-dark-bg/50 rounded-lg p-2">
+                    <div class="text-gray-500 mb-0.5">近30天收益</div>
+                    <div class="font-semibold {% if r.recent_30d_roi >= 0 %}text-profit{% else %}text-loss{% endif %}">
+                        {{ "%+.2f"|format(r.recent_30d_roi) }}%
+                    </div>
+                </div>
+                <div class="bg-dark-bg/50 rounded-lg p-2">
+                    <div class="text-gray-500 mb-0.5">胜率</div>
+                    <div class="font-semibold {% if r.win_rate >= 60 %}text-profit{% elif r.win_rate < 45 %}text-loss{% else %}text-white{% endif %}">
+                        {{ "%.1f"|format(r.win_rate) }}%
+                    </div>
+                </div>
+                <div class="bg-dark-bg/50 rounded-lg p-2">
+                    <div class="text-gray-500 mb-0.5">最大回撤</div>
+                    <div class="font-semibold {% if r.max_drawdown_pct > 25 %}text-loss{% elif r.max_drawdown_pct < 15 %}text-profit{% else %}text-yellow-400{% endif %}">
+                        {{ "%.1f"|format(r.max_drawdown_pct) }}%
+                    </div>
+                </div>
+                <div class="bg-dark-bg/50 rounded-lg p-2">
+                    <div class="text-gray-500 mb-0.5">跟单人数</div>
+                    <div class="font-semibold text-white">
+                        {{ r.follower_count or '-' }}
+                    </div>
+                </div>
+            </div>
+
+            <!-- 次要指标行（Sharpe / Calmar / 盈亏比 — 仅展示） -->
+            <div class="flex items-center justify-between text-xs text-gray-500 border-t border-dark-border/50 pt-2.5">
+                <div class="text-center">
+                    <div>夏普</div>
+                    <div class="text-gray-300 font-medium">{{ "%.2f"|format(r.sharpe_ratio) }}</div>
+                </div>
+                <div class="text-center">
+                    <div>Calmar</div>
+                    <div class="text-gray-300 font-medium">{{ "%.2f"|format(r.calmar_ratio) }}</div>
+                </div>
+                <div class="text-center">
+                    <div>盈亏比</div>
+                    <div class="text-gray-300 font-medium">{{ "%.2f"|format(r.avg_rr_ratio) }}</div>
+                </div>
+                <div class="text-center">
+                    <div>期望值</div>
+                    <div class="font-medium {% if r.expected_value > 0 %}text-profit{% else %}text-loss{% endif %}">
+                        {{ "%.2f"|format(r.expected_value) }}
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 6项筛选通过条 -->
+        <div class="px-4 py-2.5 border-t border-dark-border/50 bg-dark-bg/30">
+            <div class="flex items-center justify-between mb-1.5">
+                <span class="text-gray-500 text-xs">筛选项 {{ r.score.passed }}/{{ r.score.total }}</span>
+                <div class="flex space-x-1">
+                    {% for k, ok in r.score.checks.items() %}
+                    <span title="{{ r.score.labels[k] }}"
+                          class="w-4 h-4 rounded text-center text-xs leading-4
+                          {% if ok %}bg-green-500/20 text-green-400{% else %}bg-red-500/15 text-red-400{% endif %}">
+                        {% if ok %}✓{% else %}✗{% endif %}
+                    </span>
+                    {% endfor %}
+                </div>
+            </div>
+            <!-- 最近交易 -->
+            {% if r.recent_trades %}
+            <div class="space-y-0.5">
+                {% for t in r.recent_trades[:3] %}
+                <div class="flex items-center justify-between text-xs">
+                    <div class="flex items-center space-x-1.5">
+                        <span class="w-1 h-1 rounded-full {% if t.direction == 'long' %}bg-profit{% else %}bg-loss{% endif %}"></span>
+                        <span class="text-gray-400 font-mono">{{ t.symbol.replace('USDT','') }}</span>
+                        <span class="text-gray-600">{{ t.leverage }}x</span>
+                    </div>
+                    <span class="font-medium {% if t.is_win %}text-profit{% else %}text-loss{% endif %}">
+                        {{ "%+.2f"|format(t.pnl_pct * 100) }}%
+                    </span>
+                </div>
+                {% endfor %}
+            </div>
+            {% endif %}
+        </div>
+
+        <!-- 操作按钮 -->
+        <div class="px-4 py-2 border-t border-dark-border/30 flex items-center justify-between">
+            <span class="text-gray-600 text-xs">{{ r.total_trades }} 笔 · {{ r.copy_trade_days or '-' }}天</span>
+            <button onclick="event.stopPropagation(); removeTrader('{{ r.trader_uid }}', '{{ r.nickname }}')"
+                    class="text-gray-600 hover:text-red-400 transition-colors text-xs">删除</button>
+        </div>
+    </div>
+    {% endfor %}
+</div>
+
+{% else %}
+<!-- 空状态 -->
+<div class="flex flex-col items-center justify-center py-24 text-center">
+    <div class="text-5xl mb-4">📈</div>
+    <p class="text-gray-300 text-lg font-medium mb-2">还没有追踪任何交易员</p>
+    <p class="text-gray-500 text-sm mb-6">粘贴 Bitget 交易员链接即可一键添加</p>
+    <button onclick="openAddModal()"
+            class="px-6 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-medium transition-colors">
+        + 添加第一个交易员
+    </button>
+</div>
+{% endif %}
+
+<!-- ══ 统一添加弹窗（自动识别输入类型） ═══════════════════════════════════ -->
+<div id="add-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+     onclick="if(event.target===this)closeAddModal()">
+    <div class="bg-dark-card border border-dark-border rounded-2xl w-full max-w-3xl mx-4 shadow-2xl max-h-[90vh] flex flex-col">
+
+        <!-- 头部：输入框 -->
+        <div class="p-5 border-b border-dark-border">
+            <div class="flex items-start justify-between mb-3">
+                <div>
+                    <h2 class="text-lg font-bold text-white" id="modal-title">添加交易员</h2>
+                    <p class="text-gray-400 text-xs mt-0.5" id="modal-hint">粘贴交易员个人主页链接，立即预览并添加</p>
+                </div>
+                <button onclick="closeAddModal()" class="text-gray-500 hover:text-white mt-0.5">✕</button>
+            </div>
+
+            <!-- 输入行 -->
+            <div class="flex space-x-2">
+                <input type="text" id="unified-input"
+                       placeholder="粘贴 Bitget 交易员主页链接，如 bitget.com/.../trader/xxxx/futures"
+                       class="flex-1 bg-dark-bg border border-dark-border rounded-lg px-4 py-2.5 text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 text-sm"
+                       oninput="onUnifiedInputChange()"
+                       onkeydown="if(event.key==='Enter')handleUnifiedInput()"
+                       onpaste="onUnifiedPaste()">
+                <button onclick="handleUnifiedInput()" id="btn-unified"
+                        class="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors whitespace-nowrap">
+                    确认
+                </button>
+            </div>
+
+            <!-- 模式提示标签 -->
+            <div id="mode-tag" class="mt-2 text-xs text-gray-500">
+                粘贴链接后自动识别 — 无需跟单即可添加任意交易员
+            </div>
+        </div>
+
+        <!-- 内容区：搜索结果 / 扫描结果 -->
+        <div class="flex-1 overflow-y-auto p-5">
+
+            <!-- 默认占位 -->
+            <div id="modal-placeholder" class="text-gray-600 text-sm text-center py-10">
+                <div class="text-3xl mb-3">🔗</div>
+                <div class="text-gray-400">粘贴交易员个人主页链接</div>
+                <div class="mt-4 text-xs text-gray-600 space-y-1">
+                    <div>① 在 Bitget 找到想追踪的交易员</div>
+                    <div>② 打开其个人主页，复制浏览器地址栏 URL</div>
+                    <div>③ 粘贴到上方输入框 → 立即预览数据 → 点击「添加」</div>
+                </div>
+                <div class="mt-4 px-3 py-2 bg-green-500/10 border border-green-500/20 rounded-lg text-xs text-green-400">
+                    ✓ 无需跟单 / 无需关注 — 任意公开交易员均可追踪
+                </div>
+            </div>
+
+            <!-- 加载中 -->
+            <div id="modal-loading" class="hidden text-center py-12">
+                <div class="flex justify-center items-center space-x-2 text-gray-400 text-sm">
+                    <div class="spinner"></div>
+                    <span id="loading-text">处理中…</span>
+                </div>
+            </div>
+
+            <!-- 搜索结果（单人列表） -->
+            <div id="search-result-area" class="hidden space-y-2"></div>
+
+            <!-- 批量扫描结果 -->
+            <div id="scan-result-area" class="hidden">
+                <div class="flex items-center justify-between mb-3">
+                    <div id="scan-summary" class="text-gray-300 text-sm"></div>
+                    <button onclick="addAllPass()" id="btn-add-all"
+                            class="hidden px-4 py-1.5 bg-green-600 hover:bg-green-700 text-white rounded-lg text-xs font-medium transition-colors">
+                        添加全部 PASS
+                    </button>
+                </div>
+                <div id="scan-list" class="space-y-2"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+let collectorRunning = {{ 'true' if collector_running else 'false' }};
+
+async function toggleCollector() {
+    const btn = document.getElementById('btn-collector');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span>';
+    const url = collectorRunning ? '/api/collector/stop' : '/api/collector/start';
+    const data = await apiPost(url);
+    if (data.ok) {
+        collectorRunning = !collectorRunning;
+        location.reload();
+    } else {
+        alert(data.error || '操作失败');
+        btn.disabled = false;
+        btn.textContent = collectorRunning ? '⏹ 停止采集' : '▶ 启动采集';
+    }
+}
+
+async function refreshReport() {
+    location.reload();
+}
+
+// ─── 统一弹窗控制 ────────────────────────────────────────────────────────────
+function openAddModal() {
+    document.getElementById('add-modal').classList.remove('hidden');
+    setTimeout(() => document.getElementById('unified-input').focus(), 80);
+}
+function closeAddModal() {
+    document.getElementById('add-modal').classList.add('hidden');
+}
+
+// 检测输入类型（前端快速判断，与后端逻辑一致）
+function detectInputType(text) {
+    if (!text) return 'empty';
+    const isLeaderboard = /copy-?trading\/futures\/(all|leaderboard|top)/i.test(text)
+        || (/copy-?trading/i.test(text) && /[?&](rule|sort)=\d/.test(text));
+    if (isLeaderboard) return 'leaderboard';
+    if (/copy-?trading\/trader\/[a-zA-Z0-9]+/i.test(text) || /traderUid=[a-zA-Z0-9]+/.test(text))
+        return 'profile';
+    if (text.startsWith('http')) return 'unknown_url';
+    return 'nickname';
+}
+
+// 根据输入更新弹窗 UI 提示
+function onUnifiedInputChange() {
+    const val  = document.getElementById('unified-input').value.trim();
+    const tag  = document.getElementById('mode-tag');
+    const btnEl = document.getElementById('btn-unified');
+    const type = detectInputType(val);
+    if (type === 'profile') {
+        tag.innerHTML = '<span class="text-green-400">✔ 已识别个人主页链接 — 点击查看交易员数据</span>';
+        btnEl.textContent = '查看数据';
+        btnEl.className = 'px-5 py-2.5 bg-green-600 hover:bg-green-700 text-white rounded-lg text-sm font-medium transition-colors whitespace-nowrap';
+    } else if (val && type !== 'empty') {
+        tag.innerHTML = '<span class="text-yellow-400">请粘贴个人主页链接，格式：bitget.com/.../trader/xxxx/futures</span>';
+        btnEl.textContent = '确认';
+        btnEl.className = 'px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors whitespace-nowrap';
+    } else {
+        tag.innerHTML = '粘贴链接后自动识别 — 无需跟单即可添加任意交易员';
+        btnEl.textContent = '确认';
+        btnEl.className = 'px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors whitespace-nowrap';
+    }
+}
+
+// 粘贴时自动触发（个人主页链接自动查询）
+function onUnifiedPaste() {
+    setTimeout(() => {
+        onUnifiedInputChange();
+        const type = detectInputType(document.getElementById('unified-input').value.trim());
+        if (type === 'profile') {
+            handleUnifiedInput();
+        }
+    }, 100);
+}
+
+function showModalSection(section) {
+    // section: 'placeholder' | 'loading' | 'search' | 'scan'
+    document.getElementById('modal-placeholder').classList.toggle('hidden', section !== 'placeholder');
+    document.getElementById('modal-loading').classList.toggle('hidden', section !== 'loading');
+    document.getElementById('search-result-area').classList.toggle('hidden', section !== 'search');
+    document.getElementById('scan-result-area').classList.toggle('hidden', section !== 'scan');
+}
+
+// 统一入口处理函数
+async function handleUnifiedInput() {
+    const val = document.getElementById('unified-input').value.trim();
+    if (!val) return;
+    await doSearch(val);
+}
+
+// ─── 搜索（仅个人主页 URL）────────────────────────────────────────────────
+async function doSearch(inputVal) {
+    const nickname = inputVal || document.getElementById('unified-input').value.trim();
+    if (!nickname) return;
+    const btn = document.getElementById('btn-unified');
+    btn.disabled = true;
+
+    showModalSection('loading');
+    document.getElementById('loading-text').textContent = '正在获取交易员数据…';
+
+    try {
+        const data = await apiPost('/api/search', {nickname});
+
+        if (data.error) {
+            showModalSection('search');
+            document.getElementById('search-result-area').innerHTML =
+                `<div class="p-4 bg-yellow-500/10 border border-yellow-500/30 rounded-xl">
+                    <p class="text-yellow-300 text-sm whitespace-pre-line">⚠ ${data.error}</p>
+                </div>`;
+            return;
+        }
+
+        // 新：preview 模式 —— 显示交易员卡片预览，让用户确认后再添加
+        if (data.preview) {
+            showModalSection('search');
+            const roi = data.roi >= 0
+                ? `<span class="text-green-400">+${data.roi.toFixed(2)}%</span>`
+                : `<span class="text-red-400">${data.roi.toFixed(2)}%</span>`;
+            const p7d = data.profit_7d >= 0
+                ? `<span class="text-green-400">+$${Math.abs(data.profit_7d).toLocaleString()}</span>`
+                : `<span class="text-red-400">-$${Math.abs(data.profit_7d).toLocaleString()}</span>`;
+            const alreadyBadge = data.already
+                ? '<span class="px-2 py-0.5 bg-gray-500/20 text-gray-400 text-xs rounded-full">已追踪</span>'
+                : '';
+            document.getElementById('search-result-area').innerHTML = `
+                <div class="bg-dark-bg border border-blue-500/30 rounded-xl p-4 space-y-3">
+                    <!-- 头像 + 名字 -->
+                    <div class="flex items-center space-x-3">
+                        <img src="${data.avatar}" onerror="this.src='/static/avatar-default.png'"
+                             class="w-12 h-12 rounded-full object-cover bg-gray-700">
+                        <div>
+                            <div class="flex items-center space-x-2">
+                                <span class="text-white font-bold text-base">${data.name}</span>
+                                ${alreadyBadge}
+                            </div>
+                            <div class="text-gray-500 text-xs font-mono mt-0.5">${data.uid.substring(0,20)}…</div>
+                        </div>
+                    </div>
+                    <!-- 核心指标 -->
+                    <div class="grid grid-cols-3 gap-2 text-center">
+                        <div class="bg-dark-card rounded-lg p-2">
+                            <div class="text-xs text-gray-500 mb-0.5">ROI</div>
+                            <div class="text-sm font-bold">${roi}</div>
+                        </div>
+                        <div class="bg-dark-card rounded-lg p-2">
+                            <div class="text-xs text-gray-500 mb-0.5">胜率</div>
+                            <div class="text-sm font-bold text-white">${data.win_rate.toFixed(1)}%</div>
+                        </div>
+                        <div class="bg-dark-card rounded-lg p-2">
+                            <div class="text-xs text-gray-500 mb-0.5">最大回撤</div>
+                            <div class="text-sm font-bold text-orange-400">${data.max_drawdown.toFixed(1)}%</div>
+                        </div>
+                        <div class="bg-dark-card rounded-lg p-2">
+                            <div class="text-xs text-gray-500 mb-0.5">总收益</div>
+                            <div class="text-sm font-bold text-white">$${data.total_profit.toLocaleString(undefined,{maximumFractionDigits:0})}</div>
+                        </div>
+                        <div class="bg-dark-card rounded-lg p-2">
+                            <div class="text-xs text-gray-500 mb-0.5">近7天</div>
+                            <div class="text-sm font-bold">${p7d}</div>
+                        </div>
+                        <div class="bg-dark-card rounded-lg p-2">
+                            <div class="text-xs text-gray-500 mb-0.5">跟单人数</div>
+                            <div class="text-sm font-bold text-white">${data.follower_count.toLocaleString()}</div>
+                        </div>
+                    </div>
+                    <!-- 添加按钮 -->
+                    ${data.already
+                        ? `<div class="text-center text-gray-500 text-sm py-2">该交易员已在追踪列表中</div>`
+                        : `<button onclick="addTrader('${data.uid}','${data.name.replace(/'/g,"\\'")}')"
+                             class="add-btn w-full py-2.5 bg-green-600 hover:bg-green-700 text-white rounded-lg text-sm font-medium transition-colors">
+                             ➕ 确认添加：${data.name}
+                           </button>`
+                    }
+                </div>`;
+            return;
+        }
+    } catch(e) {
+        showModalSection('search');
+        document.getElementById('search-result-area').innerHTML =
+            `<p class="text-red-400 text-sm">请求失败：${e.message}</p>`;
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+async function addTrader(uid, name) {
+    document.querySelectorAll('.add-btn').forEach(b => b.disabled = true);
+    showModalSection('loading');
+    document.getElementById('loading-text').textContent = '正在初始化（拉取历史数据），请稍候约 30 秒…';
+    try {
+        const data = await apiPost('/api/add_trader', {uid, name});
+        if (data.ok) {
+            location.reload();
+        } else {
+            showModalSection('search');
+            document.getElementById('search-result-area').innerHTML =
+                `<p class="text-red-400 text-sm">添加失败：${data.error || '未知错误'}</p>`;
+        }
+    } catch(e) {
+        showModalSection('search');
+        document.getElementById('search-result-area').innerHTML =
+            `<p class="text-red-400 text-sm">请求失败：${e.message}</p>`;
+    }
+}
+
+async function removeTrader(uid, name) {
+    if (!confirm(`确定删除 ${name}？所有历史数据将被清除。`)) return;
+    const data = await apiPost('/api/remove_trader', {uid});
+    if (data.ok) location.reload();
+    else alert(data.error || '删除失败');
+}
+
+// ─── 批量扫描 ────────────────────────────────────────────────────────────────
+let scanPassList = [];
+
+const GRADE_STYLE = {
+    PASS:  'bg-green-500/20 text-green-300 border border-green-500/40',
+    WATCH: 'bg-yellow-500/20 text-yellow-300 border border-yellow-500/40',
+    FAIL:  'bg-red-500/20 text-red-400 border border-red-500/40',
+};
+
+async function doScan(urlVal) {
+    const url   = urlVal || document.getElementById('unified-input').value.trim();
+    const pages = document.getElementById('scan-pages').value || '5';
+    const btn   = document.getElementById('btn-unified');
+
+    btn.disabled = true;
+    showModalSection('loading');
+    document.getElementById('loading-text').textContent =
+        `正在拉取排行榜（最多 ${parseInt(pages)*20} 人），请稍候…`;
+    scanPassList = [];
+
+    try {
+        const data = await apiPost('/api/batch_scan', {url});
+        if (data.error) {
+            showModalSection('search');
+            document.getElementById('search-result-area').innerHTML =
+                `<p class="text-red-400 text-sm">❌ ${data.error}</p>`;
+            return;
+        }
+
+        const list = data.candidates || [];
+
+        if (data.mode === 'followed') {
+            // V2 模式：展示已跟单的交易员
+            const newItems = list.filter(c => !c.already);
+            const addedItems = list.filter(c => c.already);
+
+            scanPassList = newItems.map(c => ({uid: c.uid, name: c.name}));
+
+            document.getElementById('scan-summary').innerHTML =
+                `你在 Bitget 上共跟单 <b class="text-white">${data.total}</b> 位交易员。
+                 <span class="text-green-400">新增 ${newItems.length} 人</span>，
+                 <span class="text-gray-500">已追踪 ${addedItems.length} 人</span>`;
+
+            const addAllBtn = document.getElementById('btn-add-all');
+            if (newItems.length > 0) {
+                addAllBtn.textContent = `导入全部 ${newItems.length} 位新交易员`;
+                addAllBtn.classList.remove('hidden');
+            } else {
+                addAllBtn.classList.add('hidden');
+            }
+
+            document.getElementById('scan-list').innerHTML = list.map(c => {
+                const safeName = c.name.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+                return `
+                <div class="flex items-center justify-between bg-dark-bg rounded-xl p-3 border border-dark-border ${c.already ? 'opacity-50' : 'hover:border-blue-500/40'} transition-colors" data-uid="${c.uid}">
+                    <div class="flex-1 min-w-0">
+                        <div class="flex items-center space-x-2 mb-1">
+                            <span class="text-white text-sm font-medium truncate">${c.name}</span>
+                            ${c.already ? '<span class="px-2 py-0.5 rounded-full text-xs bg-gray-500/20 text-gray-400">已追踪</span>' : ''}
+                        </div>
+                        <div class="flex flex-wrap gap-x-4 gap-y-0.5 text-xs text-gray-500">
+                            <span>胜率 <b class="text-white">${c.win_rate}%</b></span>
+                            <span>回撤 <b class="text-white">${c.max_dd}%</b></span>
+                            <span>笔数 <b class="text-white">${c.total}</b></span>
+                            <span>ROI <b class="text-white">${c.roi}</b></span>
+                        </div>
+                    </div>
+                    ${c.already
+                        ? '<span class="ml-3 text-gray-600 text-xs">已导入</span>'
+                        : `<button onclick="addTraderFromScan('${c.uid}','${safeName}',this)"
+                                   class="ml-3 shrink-0 px-4 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-medium transition-colors">
+                               导入
+                           </button>`
+                    }
+                </div>`;
+            }).join('');
+
+            showModalSection('scan');
+            return;
+        }
+
+        // 兜底：旧格式（不太可能走到）
+        const passItems  = list.filter(c => c.pre_grade === 'PASS');
+        const watchItems = list.filter(c => c.pre_grade === 'WATCH');
+        const failItems  = list.filter(c => c.pre_grade === 'FAIL');
+        scanPassList = passItems.map(c => ({uid: c.uid, name: c.name}));
+        document.getElementById('scan-summary').innerHTML =
+            `共 ${data.total} 人，PASS ${passItems.length} / WATCH ${watchItems.length} / FAIL ${failItems.length}`;
+        document.getElementById('btn-add-all').classList.toggle('hidden', passItems.length === 0);
+        document.getElementById('scan-list').innerHTML =
+            [...passItems, ...watchItems, ...failItems].map(renderScanCard).join('');
+        showModalSection('scan');
+    } catch(e) {
+        showModalSection('search');
+        document.getElementById('search-result-area').innerHTML =
+            `<p class="text-red-400 text-sm">请求失败：${e.message}</p>`;
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+function renderScanCard(c) {
+    const checks = Object.entries(c.pre_checks).map(([k, v]) =>
+        `<span class="text-xs ${v ? 'text-green-400' : 'text-red-400'}">${v ? '✔' : '✘'} ${k}</span>`
+    ).join('');
+    const safeName = c.name.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+    return `
+    <div class="flex items-center justify-between bg-dark-bg rounded-xl p-3 border border-dark-border hover:border-blue-500/40 transition-colors" data-uid="${c.uid}">
+        <div class="flex-1 min-w-0">
+            <div class="flex items-center space-x-2 mb-1">
+                <span class="text-white text-sm font-medium truncate">${c.name}</span>
+                <span class="px-2 py-0.5 rounded-full text-xs font-bold ${GRADE_STYLE[c.pre_grade]}">${c.pre_grade}</span>
+            </div>
+            <div class="flex flex-wrap gap-2 mb-1">${checks}</div>
+            <div class="flex flex-wrap gap-x-4 gap-y-0.5 text-xs text-gray-500">
+                <span>胜率 <b class="text-white">${c.win_rate}%</b></span>
+                <span>回撤 <b class="text-white">${c.max_dd}%</b></span>
+                <span>笔数 <b class="text-white">${c.total}</b></span>
+                <span>ROI <b class="text-white">${c.roi}</b></span>
+                <span>跟单人数 <b class="text-white">${c.followers}</b></span>
+            </div>
+        </div>
+        <button onclick="addTraderFromScan('${c.uid}','${safeName}',this)"
+                class="ml-3 shrink-0 px-4 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-medium transition-colors">
+            添加
+        </button>
+    </div>`;
+}
+
+async function addTraderFromScan(uid, name, btn) {
+    btn.disabled = true;
+    btn.textContent = '添加中…';
+    try {
+        const data = await apiPost('/api/add_trader', {uid, name});
+        if (data.ok) {
+            btn.textContent = '✔ 已添加';
+            btn.className = 'ml-3 shrink-0 px-4 py-1.5 bg-green-700 text-white rounded-lg text-xs font-medium cursor-default';
+        } else {
+            btn.disabled = false;
+            btn.textContent = '添加';
+            alert(data.error || '添加失败');
+        }
+    } catch(e) {
+        btn.disabled = false;
+        btn.textContent = '添加';
+    }
+}
+
+async function addAllPass() {
+    if (!scanPassList.length) return;
+    if (!confirm(`确定导入全部 ${scanPassList.length} 位交易员？系统将自动开始监控。`)) return;
+    const btn = document.getElementById('btn-add-all');
+    btn.disabled = true;
+    btn.textContent = '添加中…';
+    for (const {uid, name} of scanPassList) {
+        const card = document.querySelector(`[data-uid="${uid}"] button`);
+        if (card) { card.disabled = true; card.textContent = '添加中…'; }
+        try {
+            const data = await apiPost('/api/add_trader', {uid, name});
+            if (data.ok && card) {
+                card.textContent = '✔ 已添加';
+                card.className = 'ml-3 shrink-0 px-4 py-1.5 bg-green-700 text-white rounded-lg text-xs font-medium cursor-default';
+            }
+        } catch(e) { /* 忽略单个失败 */ }
+    }
+    btn.textContent = '✔ 完成';
+    setTimeout(() => location.reload(), 1500);
+}
+</script>
+{% endblock %}

@@ -1,0 +1,354 @@
+{% extends "base.html" %}
+{% block title %}{{ trader.nickname }} — BitgetFollow{% endblock %}
+
+{% block content %}
+
+<!-- 头部：头像 + 名字 + 刷新 -->
+<div class="mb-6">
+    <a href="/" class="text-gray-500 hover:text-gray-300 text-sm transition-colors">← 返回总览</a>
+    <div class="flex items-center justify-between mt-3 gap-4">
+        <div class="flex items-center space-x-4">
+            {% if trader.avatar %}
+            <img src="{{ trader.avatar }}" onerror="this.style.display='none'"
+                 class="w-14 h-14 rounded-full object-cover bg-dark-border">
+            {% endif %}
+            <div>
+                <h1 class="text-2xl font-bold text-white">{{ trader.nickname }}</h1>
+                <p class="text-gray-600 text-xs mt-0.5 font-mono">{{ trader.trader_uid }}</p>
+                <a href="https://www.bitget.com/zh-CN/copy-trading/trader/{{ trader.trader_uid }}/futures"
+                   target="_blank"
+                   class="text-blue-400/70 hover:text-blue-400 text-xs">Bitget 主页 ↗</a>
+            </div>
+        </div>
+        <button onclick="refreshTrader()" id="btn-refresh"
+                class="px-4 py-2 bg-dark-card border border-dark-border hover:border-blue-500/40 text-gray-300 rounded-lg text-sm transition-colors">
+            刷新数据
+        </button>
+    </div>
+</div>
+
+{% if result.get('error') %}
+<div class="p-8 bg-dark-card border border-dark-border rounded-xl text-center">
+    <div class="text-gray-500 text-3xl mb-3">📭</div>
+    <p class="text-gray-400">{{ result.error }}</p>
+    <p class="text-gray-600 text-xs mt-2">数据将在下次采集时同步</p>
+</div>
+{% else %}
+
+<!-- 评级卡片 -->
+{% set grade = result.score.get('grade','?') if result.score else '?' %}
+<div class="mb-6 p-4 rounded-xl border
+    {% if grade == 'PASS' %}bg-green-500/5 border-green-500/20
+    {% elif grade == 'WATCH' %}bg-yellow-500/5 border-yellow-500/20
+    {% else %}bg-red-500/5 border-red-500/20{% endif %}">
+    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div class="flex items-center space-x-3">
+            <span class="text-3xl font-bold {% if grade == 'PASS' %}text-green-400{% elif grade == 'WATCH' %}text-yellow-400{% else %}text-red-400{% endif %}">
+                {{ grade }}
+            </span>
+            <div>
+                <div class="text-gray-300 text-sm">{{ result.score.passed }}/{{ result.score.total }} 项通过筛选</div>
+                <div class="text-gray-500 text-xs mt-0.5">夏普/Calmar 仅供参考</div>
+            </div>
+        </div>
+        <div class="flex flex-wrap gap-2">
+            {% for k, ok in result.score.checks.items() %}
+            <span class="px-2.5 py-1 rounded-lg text-xs font-medium
+                {% if ok %}bg-green-500/10 text-green-400 border border-green-500/20
+                {% else %}bg-red-500/10 text-red-400 border border-red-500/20{% endif %}">
+                {% if ok %}✓{% else %}✗{% endif %} {{ result.score.labels[k] }}
+            </span>
+            {% endfor %}
+        </div>
+    </div>
+</div>
+
+<!-- 官方关键指标行 -->
+<div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
+    <div class="bg-dark-card border border-dark-border rounded-xl p-3 text-center">
+        <div class="text-gray-500 text-xs mb-1">官方胜率</div>
+        <div class="text-xl font-bold text-white">{{ "%.1f"|format(trader.win_rate or 0) }}%</div>
+    </div>
+    <div class="bg-dark-card border border-dark-border rounded-xl p-3 text-center">
+        <div class="text-gray-500 text-xs mb-1">最大回撤</div>
+        <div class="text-xl font-bold {% if (trader.max_drawdown or 0) > 30 %}text-loss{% elif (trader.max_drawdown or 0) < 15 %}text-profit{% else %}text-yellow-400{% endif %}">
+            {{ "%.1f"|format(trader.max_drawdown or 0) }}%
+        </div>
+    </div>
+    <div class="bg-dark-card border border-dark-border rounded-xl p-3 text-center">
+        <div class="text-gray-500 text-xs mb-1">总收益</div>
+        <div class="text-xl font-bold {% if (trader.total_profit or 0) >= 0 %}text-profit{% else %}text-loss{% endif %}">
+            ${{ "{:,.0f}".format(trader.total_profit or 0) }}
+        </div>
+    </div>
+    <div class="bg-dark-card border border-dark-border rounded-xl p-3 text-center">
+        <div class="text-gray-500 text-xs mb-1">跟单人数</div>
+        <div class="text-xl font-bold text-white">{{ "{:,}".format(trader.follower_count or 0) }}</div>
+    </div>
+</div>
+
+<!-- 近期 ROI 行 -->
+<div class="grid grid-cols-3 gap-3 mb-6">
+    <div class="bg-dark-card border border-dark-border rounded-xl p-4 text-center">
+        <div class="text-gray-500 text-xs mb-1">近 7 天跟单盈亏</div>
+        {% set p7 = trader.profit_7d or 0 %}
+        <div class="text-2xl font-bold {% if p7 >= 0 %}text-profit{% else %}text-loss{% endif %}">
+            {% if p7 >= 0 %}+{% endif %}${{ "{:,.0f}".format(p7) }}
+        </div>
+        <div class="text-gray-600 text-xs mt-1">{{ result.recent_7d_trades }} 笔</div>
+    </div>
+    <div class="bg-dark-card border border-dark-border rounded-xl p-4 text-center">
+        <div class="text-gray-500 text-xs mb-1">近 30 天跟单盈亏</div>
+        {% set p30 = trader.profit_30d or 0 %}
+        <div class="text-2xl font-bold {% if p30 >= 0 %}text-profit{% else %}text-loss{% endif %}">
+            {% if p30 >= 0 %}+{% endif %}${{ "{:,.0f}".format(p30) }}
+        </div>
+    </div>
+    <div class="bg-dark-card border border-dark-border rounded-xl p-4 text-center">
+        <div class="text-gray-500 text-xs mb-1">上次交易</div>
+        <div class="text-xl font-bold {% if result.days_since_last <= 1 %}text-profit{% elif result.days_since_last <= 7 %}text-yellow-400{% else %}text-loss{% endif %}">
+            {% if result.days_since_last < 1 %}今天{% elif result.days_since_last < 2 %}昨天{% else %}{{ result.days_since_last|int }} 天前{% endif %}
+        </div>
+    </div>
+</div>
+
+<!-- 量化指标 -->
+<div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 mb-6">
+    <div class="bg-dark-card border border-dark-border rounded-xl p-3">
+        <div class="text-gray-500 text-xs mb-1">本地追踪笔数</div>
+        <div class="text-white text-lg font-bold">{{ result.total_trades }}</div>
+    </div>
+    <div class="bg-dark-card border border-dark-border rounded-xl p-3">
+        <div class="text-gray-500 text-xs mb-1">本地胜率</div>
+        <div class="text-lg font-bold {% if result.win_rate >= 55 %}text-profit{% elif result.win_rate < 45 %}text-loss{% else %}text-white{% endif %}">
+            {{ "%.1f"|format(result.win_rate) }}%
+        </div>
+    </div>
+    <div class="bg-dark-card border border-dark-border rounded-xl p-3">
+        <div class="text-gray-500 text-xs mb-1">盈亏比</div>
+        <div class="text-lg font-bold {% if result.avg_rr_ratio >= 1.5 %}text-profit{% elif result.avg_rr_ratio < 1 %}text-loss{% else %}text-white{% endif %}">
+            {{ "%.2f"|format(result.avg_rr_ratio) }}
+        </div>
+    </div>
+    <div class="bg-dark-card border border-dark-border rounded-xl p-3">
+        <div class="text-gray-500 text-xs mb-1">夏普比率</div>
+        <div class="text-lg font-bold {% if result.sharpe_ratio >= 1.5 %}text-profit{% elif result.sharpe_ratio < 1 %}text-loss{% else %}text-white{% endif %}">
+            {{ "%.2f"|format(result.sharpe_ratio) }}
+        </div>
+    </div>
+    <div class="bg-dark-card border border-dark-border rounded-xl p-3">
+        <div class="text-gray-500 text-xs mb-1">平均持仓</div>
+        <div class="text-white text-lg font-bold">
+            {% if result.avg_hold_h < 1 %}{{ (result.avg_hold_h * 60)|int }}m
+            {% else %}{{ "%.1f"|format(result.avg_hold_h) }}h{% endif %}
+        </div>
+    </div>
+    <div class="bg-dark-card border border-dark-border rounded-xl p-3">
+        <div class="text-gray-500 text-xs mb-1">交易频率</div>
+        <div class="text-white text-lg font-bold">{{ "%.1f"|format(result.trade_freq) }}<span class="text-xs text-gray-500 ml-1">笔/天</span></div>
+    </div>
+    <div class="bg-dark-card border border-dark-border rounded-xl p-3">
+        <div class="text-gray-500 text-xs mb-1">连胜 / 连亏</div>
+        <div class="text-lg font-bold">
+            <span class="text-profit">{{ result.max_win_streak }}</span>
+            <span class="text-gray-500 text-sm">/</span>
+            <span class="{% if result.max_loss_streak >= 5 %}text-loss{% else %}text-gray-300{% endif %}">{{ result.max_loss_streak }}</span>
+        </div>
+    </div>
+    <div class="bg-dark-card border border-dark-border rounded-xl p-3">
+        <div class="text-gray-500 text-xs mb-1">杠杆 均/最大</div>
+        <div class="text-white text-lg font-bold">{{ result.leverage.avg }}x <span class="text-yellow-400">/ {{ result.leverage.max }}x</span></div>
+    </div>
+    <div class="bg-dark-card border border-dark-border rounded-xl p-3">
+        <div class="text-gray-500 text-xs mb-1">方向偏好</div>
+        <div class="text-sm font-medium">
+            {% for dir, cnt in result.direction_split.items() %}
+            <span class="{% if dir == 'long' %}text-profit{% else %}text-loss{% endif %}">{{ dir.upper() }} {{ cnt }}</span>{% if not loop.last %} / {% endif %}
+            {% endfor %}
+        </div>
+    </div>
+    <div class="bg-dark-card border border-dark-border rounded-xl p-3">
+        <div class="text-gray-500 text-xs mb-1">偏好标的</div>
+        <div class="text-xs space-y-0.5">
+            {% for sym, pct in result.symbol_dist.items() %}{% if loop.index <= 3 %}
+            <div class="flex justify-between"><span class="text-gray-300 font-mono">{{ sym }}</span><span class="text-gray-500">{{ pct }}%</span></div>
+            {% endif %}{% endfor %}
+        </div>
+    </div>
+</div>
+
+<!-- ═══ 当前持仓 ═══ -->
+<div class="bg-dark-card border border-dark-border rounded-xl overflow-hidden mb-6">
+    <div class="px-4 py-3 border-b border-dark-border flex items-center justify-between">
+        <h2 class="text-white font-semibold text-sm">📍 当前持仓
+            <span class="ml-1 text-gray-500 font-normal">({{ snaps|length }} 个)</span>
+        </h2>
+        {% if snaps %}
+        <span class="text-xs text-gray-500">实时数据，每 5s 自动更新</span>
+        {% endif %}
+    </div>
+    {% if snaps %}
+    <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+            <thead>
+                <tr class="text-gray-500 text-xs border-b border-dark-border/50 bg-dark-bg/40">
+                    <th class="text-left px-4 py-2.5">品种</th>
+                    <th class="text-center px-3 py-2.5">方向</th>
+                    <th class="text-right px-3 py-2.5">杠杆</th>
+                    <th class="text-right px-3 py-2.5">保证金模式</th>
+                    <th class="text-right px-3 py-2.5">开仓价</th>
+                    <th class="text-right px-3 py-2.5">仓位大小</th>
+                    <th class="text-right px-3 py-2.5">保证金(U)</th>
+                    <th class="text-right px-3 py-2.5">未实现盈亏</th>
+                    <th class="text-right px-3 py-2.5">跟单人数</th>
+                    <th class="text-right px-3 py-2.5">已持仓</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for s in snaps %}
+                {% set hold_h = ((now_ms - (s.open_time or now_ms)) / 3600000) %}
+                {% set upnl = s.unrealized_pnl or 0 %}
+                <tr class="border-b border-dark-border/30 hover:bg-dark-hover transition-colors">
+                    <td class="px-4 py-3 text-white font-bold font-mono">{{ s.symbol }}</td>
+                    <td class="text-center px-3 py-3">
+                        <span class="px-2.5 py-1 rounded-lg text-xs font-bold
+                            {% if s.hold_side == 'long' %}bg-green-500/15 text-green-400 border border-green-500/30
+                            {% else %}bg-red-500/15 text-red-400 border border-red-500/30{% endif %}">
+                            {{ '做多 ▲' if s.hold_side == 'long' else '做空 ▼' }}
+                        </span>
+                    </td>
+                    <td class="text-right px-3 py-3 text-yellow-400 font-bold">{{ s.leverage }}x</td>
+                    <td class="text-right px-3 py-3 text-gray-400 text-xs">{{ '逐仓' if s.margin_mode == 'isolated' else '全仓' }}</td>
+                    <td class="text-right px-3 py-3 text-white font-mono font-medium">{{ "%.4g"|format(s.open_price) }}</td>
+                    <td class="text-right px-3 py-3 text-gray-300 font-mono text-xs">{{ "%.4g"|format(s.position_size or 0) }}</td>
+                    <td class="text-right px-3 py-3 text-gray-300 font-mono text-xs">{{ "%.2f"|format(s.open_amount or 0) }}</td>
+                    <td class="text-right px-3 py-3 font-medium font-mono
+                        {% if upnl >= 0 %}text-profit{% else %}text-loss{% endif %}">
+                        {% if upnl >= 0 %}+{% endif %}{{ "%.4f"|format(upnl) }}
+                    </td>
+                    <td class="text-right px-3 py-3 text-blue-400 text-xs font-medium">
+                        {% if s.follow_count %}{{ s.follow_count }} 人{% else %}-{% endif %}
+                    </td>
+                    <td class="text-right px-3 py-3 text-gray-400 text-xs">
+                        {% if hold_h < 1 %}{{ (hold_h * 60)|int }}m{% else %}{{ "%.1f"|format(hold_h) }}h{% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <div class="px-4 py-10 text-center">
+        <div class="text-3xl mb-2">💤</div>
+        <div class="text-gray-500 text-sm">当前无持仓</div>
+    </div>
+    {% endif %}
+</div>
+
+<!-- ═══ 历史订单 ═══ -->
+<div class="bg-dark-card border border-dark-border rounded-xl overflow-hidden">
+    <div class="px-4 py-3 border-b border-dark-border flex items-center justify-between">
+        <h2 class="text-white font-semibold text-sm">📋 历史订单
+            <span class="ml-1 text-gray-500 font-normal">({{ trades|length }} 笔)</span>
+        </h2>
+        <span class="text-xs text-gray-500">按平仓时间排序</span>
+    </div>
+    {% if trades %}
+    <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+            <thead>
+                <tr class="text-gray-500 text-xs border-b border-dark-border/50 bg-dark-bg/40">
+                    <th class="text-left px-4 py-2.5">平仓时间</th>
+                    <th class="text-left px-3 py-2.5">品种</th>
+                    <th class="text-center px-3 py-2.5">方向</th>
+                    <th class="text-right px-3 py-2.5">杠杆</th>
+                    <th class="text-right px-3 py-2.5">模式</th>
+                    <th class="text-right px-3 py-2.5">开仓价</th>
+                    <th class="text-right px-3 py-2.5">平仓价</th>
+                    <th class="text-right px-3 py-2.5">仓位</th>
+                    <th class="text-right px-3 py-2.5">保证金(U)</th>
+                    <th class="text-right px-3 py-2.5">净盈亏(U)</th>
+                    <th class="text-right px-3 py-2.5">收益率</th>
+                    <th class="text-right px-3 py-2.5">手续费(U)</th>
+                    <th class="text-right px-3 py-2.5">持仓时长</th>
+                    <th class="text-right px-3 py-2.5">跟单人</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for t in trades %}
+                {% set total_fee = (t.open_fee or 0) + (t.close_fee or 0) + (t.funding_fee or 0) %}
+                <tr class="border-b border-dark-border/20 hover:bg-dark-hover transition-colors
+                    {% if not t.is_win %}opacity-70{% endif %}">
+                    <td class="px-4 py-2.5 text-gray-400 text-xs whitespace-nowrap">{{ fmt_ts(t.close_time) }}</td>
+                    <td class="px-3 py-2.5 text-white font-mono text-xs font-bold">{{ t.symbol }}</td>
+                    <td class="text-center px-3 py-2.5">
+                        <span class="px-2 py-0.5 rounded text-xs font-bold
+                            {% if t.direction == 'long' %}bg-green-500/10 text-green-400{% else %}bg-red-500/10 text-red-400{% endif %}">
+                            {{ '多▲' if t.direction == 'long' else '空▼' }}
+                        </span>
+                    </td>
+                    <td class="text-right px-3 py-2.5 text-yellow-400 text-xs font-bold">{{ t.leverage }}x</td>
+                    <td class="text-right px-3 py-2.5 text-gray-500 text-xs">{{ '逐' if t.margin_mode == 'isolated' else '全' }}</td>
+                    <td class="text-right px-3 py-2.5 text-gray-300 font-mono text-xs">{{ "%.4g"|format(t.open_price) }}</td>
+                    <td class="text-right px-3 py-2.5 text-gray-300 font-mono text-xs">{{ "%.4g"|format(t.close_price) }}</td>
+                    <td class="text-right px-3 py-2.5 text-gray-400 font-mono text-xs">
+                        {{ "%.4g"|format(t.position_size or 0) if t.position_size else '-' }}
+                    </td>
+                    <td class="text-right px-3 py-2.5 text-gray-400 font-mono text-xs">
+                        {{ "%.2f"|format(t.margin_amount or 0) }}
+                    </td>
+                    <td class="text-right px-3 py-2.5 font-bold font-mono text-xs
+                        {% if t.is_win %}text-profit{% else %}text-loss{% endif %}">
+                        {% set np = t.net_profit or 0 %}
+                        {% if np >= 0 %}+{% endif %}{{ "%.4f"|format(np) }}
+                    </td>
+                    <td class="text-right px-3 py-2.5 font-bold text-xs
+                        {% if t.is_win %}text-profit{% else %}text-loss{% endif %}">
+                        {% set pct = t.pnl_pct or 0 %}
+                        {% if pct >= 0 %}+{% endif %}{{ "%.1f"|format(pct) }}%
+                    </td>
+                    <td class="text-right px-3 py-2.5 text-gray-500 font-mono text-xs">
+                        {{ "%.4f"|format(total_fee) if total_fee else '-' }}
+                    </td>
+                    <td class="text-right px-3 py-2.5 text-gray-400 text-xs">{{ fmt_h(t.hold_duration) }}</td>
+                    <td class="text-right px-3 py-2.5 text-blue-400/70 text-xs">
+                        {{ t.follow_count if t.follow_count else '-' }}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <div class="px-4 py-10 text-center">
+        <div class="text-3xl mb-2">📭</div>
+        <div class="text-gray-500 text-sm">暂无历史订单记录</div>
+    </div>
+    {% endif %}
+</div>
+
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function refreshTrader() {
+    const btn = document.getElementById('btn-refresh');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> 刷新中…';
+    try {
+        const data = await apiPost('/api/refresh/{{ trader.trader_uid }}');
+        if (data.ok) {
+            location.reload();
+        } else {
+            alert(data.error || '刷新失败');
+        }
+    } catch(e) {
+        alert('请求失败：' + e.message);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '刷新数据';
+    }
+}
+</script>
+{% endblock %}

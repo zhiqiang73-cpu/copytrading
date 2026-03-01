@@ -1,0 +1,453 @@
+{% extends "base.html" %}
+{% block title %}我的持仓 — BitgetFollow{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+
+    <div class="flex items-center justify-between">
+        <div>
+            <h1 class="text-2xl font-bold text-white">我的持仓</h1>
+            <p class="text-gray-400 mt-1 text-sm">配置交易 API，选择跟单对象，实时监控并自动下单。</p>
+        </div>
+        <!-- 引擎状态指示 -->
+        <div id="engine-badge" class="flex items-center space-x-2 px-4 py-2 rounded-lg border text-sm font-medium border-gray-600 bg-dark-card text-gray-400">
+            <span class="w-2 h-2 rounded-full bg-gray-500"></span>
+            <span>引擎已停止</span>
+        </div>
+    </div>
+
+    <div id="page-msg" class="hidden px-4 py-3 rounded-lg text-sm font-medium"></div>
+
+    <!-- ① API 密钥配置 -->
+    <section class="bg-dark-card border border-dark-border rounded-xl p-5">
+        <div class="flex items-center justify-between mb-4">
+            <h2 class="text-lg font-semibold text-white">① 交易 API 密钥</h2>
+            <span class="text-xs text-gray-500 bg-dark-bg px-2 py-1 rounded">仅存本地数据库，不上传任何服务器</span>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div>
+                <label class="block text-sm text-gray-300 mb-1.5">API Key</label>
+                <input id="api_key" type="text" autocomplete="off"
+                       class="w-full bg-dark-bg border border-dark-border rounded-lg px-4 py-2.5 text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 text-sm font-mono"
+                       placeholder="bg_xxxxxxxxxxxxxxxx">
+            </div>
+            <div>
+                <label class="block text-sm text-gray-300 mb-1.5">Secret Key</label>
+                <input id="api_secret" type="password" autocomplete="new-password"
+                       class="w-full bg-dark-bg border border-dark-border rounded-lg px-4 py-2.5 text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 text-sm font-mono"
+                       placeholder="••••••••••••••••">
+            </div>
+            <div>
+                <label class="block text-sm text-gray-300 mb-1.5">Passphrase</label>
+                <input id="api_passphrase" type="password" autocomplete="new-password"
+                       class="w-full bg-dark-bg border border-dark-border rounded-lg px-4 py-2.5 text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 text-sm"
+                       placeholder="你在 Bitget 设置的 passphrase">
+            </div>
+        </div>
+        <div class="flex items-center space-x-3 mt-4">
+            <button id="btn-test" onclick="testApi()"
+                    class="bg-dark-bg border border-dark-border hover:border-blue-500/50 text-gray-200 px-4 py-2 rounded-lg text-sm transition-colors">
+                测试连接
+            </button>
+            <button id="btn-save" onclick="saveSettings()"
+                    class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm transition-colors">
+                保存配置
+            </button>
+            <span id="api-status" class="text-xs text-gray-500"></span>
+        </div>
+    </section>
+
+    <!-- ② 跟单参数 -->
+    <section class="bg-dark-card border border-dark-border rounded-xl p-5">
+        <h2 class="text-lg font-semibold text-white mb-4">② 资金 & 风控参数</h2>
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <div>
+                <label class="block text-sm text-gray-300 mb-1.5">总分配资金（USDT）</label>
+                <input id="total_capital" type="number" min="0" step="10" onchange="computeAllocation()"
+                       class="w-full bg-dark-bg border border-dark-border rounded-lg px-4 py-2.5 text-white focus:outline-none focus:border-blue-500 text-sm"
+                       placeholder="例如 500">
+                <p class="text-xs text-gray-500 mt-1">从你账户拿出多少 USDT 用于跟单</p>
+            </div>
+            <div>
+                <label class="block text-sm text-gray-300 mb-1.5">
+                    单笔保证金上限 —— <span id="max_margin_pct_label" class="text-blue-400 font-medium">20%</span>
+                </label>
+                <input id="max_margin_pct" type="range" min="5" max="50" step="1" value="20"
+                       oninput="document.getElementById('max_margin_pct_label').textContent = this.value + '%'; computeAllocation();"
+                       class="w-full accent-blue-500">
+                <div class="flex justify-between text-xs text-gray-600 mt-1"><span>5%</span><span>50%</span></div>
+            </div>
+            <div>
+                <label class="block text-sm text-gray-300 mb-1.5">价差容忍度（%）</label>
+                <input id="price_tolerance" type="number" min="0" step="0.001"
+                       class="w-full bg-dark-bg border border-dark-border rounded-lg px-4 py-2.5 text-white focus:outline-none focus:border-blue-500 text-sm"
+                       placeholder="0.02">
+                <p class="text-xs text-gray-500 mt-1">当前价与入场价的最大偏差，BTC 65000 时约 <span class="text-gray-400" id="price-abs-hint">13 USDT</span></p>
+            </div>
+        </div>
+        <div class="mt-4 p-3 bg-dark-bg rounded-lg">
+            <div class="text-sm text-gray-300" id="allocation-summary">跟 <strong class="text-white">0</strong> 人，每人分配 <strong class="text-blue-400">0 USDT</strong>，单笔保证金上限 <strong class="text-yellow-400">0 USDT</strong></div>
+        </div>
+    </section>
+
+    <!-- ③ 跟单对象 -->
+    <section class="bg-dark-card border border-dark-border rounded-xl p-5">
+        <div class="flex items-center justify-between mb-4">
+            <h2 class="text-lg font-semibold text-white">③ 跟单对象</h2>
+            <button onclick="saveSettings()" class="text-xs text-blue-400 hover:text-blue-300 border border-blue-500/30 px-3 py-1.5 rounded-lg">保存选择</button>
+        </div>
+        <div id="trader-list" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3"></div>
+        <div id="trader-empty" class="text-sm text-gray-500 py-4 hidden">暂无追踪交易员，请先在首页添加。</div>
+    </section>
+
+    <!-- ④ 控制面板 + 实时持仓 + 历史记录 -->
+    <section class="bg-dark-card border border-dark-border rounded-xl p-5 space-y-6">
+
+        <!-- 控制按钮 -->
+        <div class="flex items-center space-x-3">
+            <button id="btn-start" onclick="toggleEngine(true)"
+                    class="flex items-center space-x-2 bg-green-600 hover:bg-green-700 disabled:opacity-40 text-white px-5 py-2.5 rounded-lg text-sm font-medium transition-colors">
+                <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20"><path d="M6.3 2.841A1.5 1.5 0 004 4.11V15.89a1.5 1.5 0 002.3 1.269l9.344-5.89a1.5 1.5 0 000-2.538L6.3 2.84z"/></svg>
+                <span>启动跟单引擎</span>
+            </button>
+            <button id="btn-stop" onclick="toggleEngine(false)"
+                    class="flex items-center space-x-2 bg-red-600/80 hover:bg-red-600 text-white px-5 py-2.5 rounded-lg text-sm font-medium transition-colors">
+                <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20"><path d="M5 4a1 1 0 00-1 1v10a1 1 0 001 1h3a1 1 0 001-1V5a1 1 0 00-1-1H5zm7 0a1 1 0 00-1 1v10a1 1 0 001 1h3a1 1 0 001-1V5a1 1 0 00-1-1h-3z"/></svg>
+                <span>停止引擎</span>
+            </button>
+            <div class="flex-1 text-xs text-gray-500">
+                引擎每 2.5 秒检测持仓变化，价差在容忍度内自动下市价单
+            </div>
+        </div>
+
+        <!-- 当前持仓 -->
+        <div>
+            <div class="flex items-center justify-between mb-3">
+                <h3 class="text-sm font-semibold text-gray-200">📍 我的当前持仓</h3>
+                <button onclick="refreshPositions()" class="text-xs text-blue-400 hover:text-blue-300 flex items-center space-x-1">
+                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+                    <span>刷新</span>
+                </button>
+            </div>
+            <div class="overflow-x-auto rounded-lg border border-dark-border">
+                <table class="w-full text-sm">
+                    <thead class="bg-dark-bg/60 text-gray-500 text-xs">
+                        <tr>
+                            <th class="text-left px-4 py-2.5">品种</th>
+                            <th class="text-center px-3 py-2.5">方向</th>
+                            <th class="text-right px-3 py-2.5">杠杆</th>
+                            <th class="text-right px-3 py-2.5">开仓价</th>
+                            <th class="text-right px-3 py-2.5">保证金(U)</th>
+                            <th class="text-right px-3 py-2.5">浮盈亏</th>
+                            <th class="text-right px-3 py-2.5">来源交易员</th>
+                        </tr>
+                    </thead>
+                    <tbody id="positions-body" class="divide-y divide-dark-border/50"></tbody>
+                </table>
+            </div>
+            <p id="positions-empty" class="text-xs text-gray-500 text-center py-4 hidden">暂无持仓</p>
+        </div>
+
+        <!-- 跟单历史 -->
+        <div>
+            <div class="flex items-center justify-between mb-3">
+                <h3 class="text-sm font-semibold text-gray-200">📋 跟单执行记录</h3>
+                <button onclick="refreshOrders()" class="text-xs text-blue-400 hover:text-blue-300 flex items-center space-x-1">
+                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+                    <span>刷新</span>
+                </button>
+            </div>
+            <div class="overflow-x-auto rounded-lg border border-dark-border">
+                <table class="w-full text-sm">
+                    <thead class="bg-dark-bg/60 text-gray-500 text-xs">
+                        <tr>
+                            <th class="text-left px-4 py-2.5">时间</th>
+                            <th class="text-left px-3 py-2.5">品种</th>
+                            <th class="text-center px-3 py-2.5">操作</th>
+                            <th class="text-center px-3 py-2.5">方向</th>
+                            <th class="text-right px-3 py-2.5">杠杆</th>
+                            <th class="text-right px-3 py-2.5">保证金</th>
+                            <th class="text-right px-3 py-2.5">来源价</th>
+                            <th class="text-right px-3 py-2.5">成交价</th>
+                            <th class="text-right px-3 py-2.5">价差</th>
+                            <th class="text-center px-3 py-2.5">状态</th>
+                            <th class="text-left px-3 py-2.5">备注</th>
+                        </tr>
+                    </thead>
+                    <tbody id="orders-body" class="divide-y divide-dark-border/30"></tbody>
+                </table>
+            </div>
+            <p id="orders-empty" class="text-xs text-gray-500 text-center py-4 hidden">暂无记录</p>
+        </div>
+
+    </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const state = { settings: null, traders: [] };
+
+function setMsg(text, type) {
+    const box = document.getElementById('page-msg');
+    if (!text) { box.classList.add('hidden'); return; }
+    box.className = 'px-4 py-3 rounded-lg text-sm font-medium ' + (type === 'error'
+        ? 'bg-red-500/10 text-red-400 border border-red-500/20'
+        : 'bg-green-500/10 text-green-400 border border-green-500/20');
+    box.textContent = text;
+    box.classList.remove('hidden');
+    setTimeout(() => box.classList.add('hidden'), 5000);
+}
+
+function computeAllocation() {
+    const total = parseFloat(document.getElementById('total_capital').value || '0');
+    const pct = parseFloat(document.getElementById('max_margin_pct').value || '20') / 100;
+    const tol = parseFloat(document.getElementById('price_tolerance').value || '0') / 100;
+    const n = document.querySelectorAll('.trader-toggle:checked').length;
+    const perTrader = n ? total / n : 0;
+    const maxMargin = perTrader * pct;
+
+    document.getElementById('allocation-summary').innerHTML =
+        `跟 <strong class="text-white">${n}</strong> 人，每人分配 <strong class="text-blue-400">${perTrader.toFixed(2)} USDT</strong>，单笔保证金上限 <strong class="text-yellow-400">${maxMargin.toFixed(2)} USDT</strong>`;
+
+    // BTC 参考价差（65000 * tol）
+    const absHint = (65000 * tol).toFixed(2);
+    document.getElementById('price-abs-hint').textContent = `${absHint} USDT`;
+}
+
+function renderTraders() {
+    const list = document.getElementById('trader-list');
+    const empty = document.getElementById('trader-empty');
+    list.innerHTML = '';
+    if (!state.traders.length) { empty.classList.remove('hidden'); return; }
+    empty.classList.add('hidden');
+    const rawEnabled = state.settings.enabled_traders;
+    const enabledArr = Array.isArray(rawEnabled) ? rawEnabled
+        : (typeof rawEnabled === 'string' ? JSON.parse(rawEnabled || '[]') : []);
+    const enabledSet = new Set(enabledArr);
+    state.traders.forEach(t => {
+        const card = document.createElement('label');
+        const checked = enabledSet.has(t.uid);
+        card.className = `flex items-start space-x-3 bg-dark-bg border rounded-xl p-4 cursor-pointer transition-all ${checked ? 'border-blue-500/50 bg-blue-500/5' : 'border-dark-border hover:border-gray-500'}`;
+        card.innerHTML = `
+            <input type="checkbox" class="trader-toggle mt-0.5 w-4 h-4 accent-blue-500 rounded"
+                   data-uid="${t.uid}" ${checked ? 'checked' : ''}>
+            <div class="flex-1 min-w-0">
+                <div class="flex items-center space-x-2">
+                    <span class="text-white font-medium text-sm truncate">${t.name}</span>
+                    <span class="text-xs text-gray-600 font-mono">${t.uid.slice(0,6)}…</span>
+                </div>
+                <div class="text-xs text-gray-500 mt-1 space-x-3">
+                    <span>胜率 <span class="text-green-400">${t.win_rate}%</span></span>
+                    <span>回撤 <span class="text-red-400">${t.max_drawdown}%</span></span>
+                    <span>持仓 <span class="text-blue-400">${t.positions}</span></span>
+                </div>
+            </div>`;
+        list.appendChild(card);
+    });
+    document.querySelectorAll('.trader-toggle').forEach(el => {
+        el.addEventListener('change', (e) => {
+            const label = e.target.closest('label');
+            label.className = label.className.replace(/border-blue-500\/50 bg-blue-500\/5|border-dark-border hover:border-gray-500/g, '');
+            label.className += e.target.checked ? ' border-blue-500/50 bg-blue-500/5' : ' border-dark-border hover:border-gray-500';
+            computeAllocation();
+        });
+    });
+}
+
+async function loadSettings() {
+    const res = await fetch('/api/copy/settings');
+    const data = await res.json();
+    state.settings = data;
+    state.traders = data.traders || [];
+
+    document.getElementById('api_key').value = data.api_key || '';
+    document.getElementById('api_secret').value = data.api_secret ? '••••••••' : '';
+    document.getElementById('api_passphrase').value = data.api_passphrase ? '••••••••' : '';
+    document.getElementById('total_capital').value = data.total_capital || '';
+    const pctVal = Math.round((data.max_margin_pct || 0.2) * 100);
+    document.getElementById('max_margin_pct').value = pctVal;
+    document.getElementById('max_margin_pct_label').textContent = pctVal + '%';
+    document.getElementById('price_tolerance').value = ((data.price_tolerance || 0.0002) * 100).toFixed(4);
+
+    renderTraders();
+    computeAllocation();
+    updateEngineBadge(data.engine_enabled);
+}
+
+async function saveSettings() {
+    const enabled = Array.from(document.querySelectorAll('.trader-toggle:checked')).map(el => el.dataset.uid);
+    const apiKey = document.getElementById('api_key').value.trim();
+    const apiSecret = document.getElementById('api_secret').value.trim();
+    const apiPass = document.getElementById('api_passphrase').value.trim();
+
+    const payload = {
+        api_key: apiKey,
+        api_secret: apiSecret === '••••••••' ? '' : apiSecret,
+        api_passphrase: apiPass === '••••••••' ? '' : apiPass,
+        total_capital: parseFloat(document.getElementById('total_capital').value || '0'),
+        max_margin_pct: parseFloat(document.getElementById('max_margin_pct').value || '20') / 100,
+        price_tolerance: parseFloat(document.getElementById('price_tolerance').value || '0') / 100,
+        enabled_traders: enabled,
+    };
+    const res = await apiPost('/api/copy/settings', payload);
+    if (res.error) { setMsg(res.error, 'error'); return; }
+    setMsg('配置已保存', 'success');
+    await loadSettings();
+}
+
+async function testApi() {
+    const apiKey = document.getElementById('api_key').value.trim();
+    const apiSecret = document.getElementById('api_secret').value.trim();
+    const apiPass = document.getElementById('api_passphrase').value.trim();
+    const status = document.getElementById('api-status');
+    status.textContent = '测试中…';
+    status.className = 'text-xs text-gray-400';
+    const res = await apiPost('/api/copy/test_api', {
+        api_key: apiKey,
+        api_secret: apiSecret === '••••••••' ? '' : apiSecret,
+        api_passphrase: apiPass === '••••••••' ? '' : apiPass,
+    });
+    if (res.error) {
+        status.textContent = '✗ ' + res.error;
+        status.className = 'text-xs text-red-400';
+        return;
+    }
+    status.textContent = '✓ ' + (res.msg || '连接成功');
+    status.className = 'text-xs text-green-400';
+}
+
+function updateEngineBadge(running) {
+    const badge = document.getElementById('engine-badge');
+    if (running) {
+        badge.className = 'flex items-center space-x-2 px-4 py-2 rounded-lg border text-sm font-medium border-green-500/40 bg-green-500/10 text-green-400';
+        badge.innerHTML = '<span class="w-2 h-2 rounded-full bg-green-400 animate-pulse"></span><span>引擎运行中</span>';
+    } else {
+        badge.className = 'flex items-center space-x-2 px-4 py-2 rounded-lg border text-sm font-medium border-gray-600 bg-dark-card text-gray-400';
+        badge.innerHTML = '<span class="w-2 h-2 rounded-full bg-gray-500"></span><span>引擎已停止</span>';
+    }
+}
+
+async function toggleEngine(start) {
+    const res = await apiPost(start ? '/api/copy/start' : '/api/copy/stop', {});
+    if (res.error) { setMsg(res.error, 'error'); return; }
+    setMsg(res.msg || '操作成功', 'success');
+    updateEngineBadge(start);
+    if (start) { setTimeout(refreshPositions, 3000); }
+}
+
+function fmtTs(ts) {
+    if (!ts) return '-';
+    const d = new Date(ts);
+    return `${d.getMonth()+1}-${String(d.getDate()).padStart(2,'0')} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}`;
+}
+
+function statusBadge(s) {
+    const map = {
+        filled:  'bg-green-500/10 text-green-400 border-green-500/20',
+        skipped: 'bg-yellow-500/10 text-yellow-400 border-yellow-500/20',
+        failed:  'bg-red-500/10 text-red-400 border-red-500/20',
+    };
+    const cls = map[s] || 'bg-gray-500/10 text-gray-400 border-gray-500/20';
+    const label = { filled: '成交', skipped: '跳过(价差)', failed: '失败' }[s] || s;
+    return `<span class="px-2 py-0.5 rounded text-xs font-medium border ${cls}">${label}</span>`;
+}
+
+async function refreshPositions() {
+    const body = document.getElementById('positions-body');
+    const empty = document.getElementById('positions-empty');
+    body.innerHTML = '<tr><td colspan="7" class="px-4 py-4 text-center text-gray-600 text-xs">加载中…</td></tr>';
+    const res = await fetch('/api/copy/positions');
+    const data = await res.json();
+    body.innerHTML = '';
+    if (data.error) {
+        empty.textContent = data.error;
+        empty.classList.remove('hidden');
+        return;
+    }
+    const items = data.items || [];
+    if (!items.length) {
+        empty.textContent = '暂无持仓';
+        empty.classList.remove('hidden');
+        return;
+    }
+    empty.classList.add('hidden');
+    items.forEach(p => {
+        const pnl = parseFloat(p.pnl) || 0;
+        const tr = document.createElement('tr');
+        tr.className = 'hover:bg-dark-hover transition-colors';
+        tr.innerHTML = `
+            <td class="px-4 py-3 text-white font-bold font-mono text-sm">${p.symbol}</td>
+            <td class="text-center px-3 py-3">
+                <span class="px-2 py-0.5 rounded text-xs font-bold ${p.direction === 'long' ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400'}">
+                    ${p.direction === 'long' ? '多▲' : '空▼'}
+                </span>
+            </td>
+            <td class="text-right px-3 py-3 text-yellow-400 font-bold">${p.leverage}x</td>
+            <td class="text-right px-3 py-3 text-gray-300 font-mono text-xs">${p.open_price}</td>
+            <td class="text-right px-3 py-3 text-gray-400 font-mono text-xs">${parseFloat(p.margin || 0).toFixed(2)}</td>
+            <td class="text-right px-3 py-3 font-medium font-mono text-xs ${pnl >= 0 ? 'text-profit' : 'text-loss'}">${pnl >= 0 ? '+' : ''}${pnl.toFixed(4)}</td>
+            <td class="text-right px-3 py-3 text-gray-500 text-xs">${p.source || '-'}</td>`;
+        body.appendChild(tr);
+    });
+}
+
+async function refreshOrders() {
+    const body = document.getElementById('orders-body');
+    const empty = document.getElementById('orders-empty');
+    body.innerHTML = '<tr><td colspan="11" class="px-4 py-4 text-center text-gray-600 text-xs">加载中…</td></tr>';
+    const res = await fetch('/api/copy/orders?page=1&page_size=30');
+    const data = await res.json();
+    body.innerHTML = '';
+    const items = data.items || [];
+    if (!items.length) {
+        empty.textContent = '暂无记录';
+        empty.classList.remove('hidden');
+        return;
+    }
+    empty.classList.add('hidden');
+    items.forEach(o => {
+        const dev = o.deviation_pct != null ? (o.deviation_pct * 100).toFixed(4) + '%' : '-';
+        const pnl = o.pnl != null ? (o.pnl >= 0 ? '+' : '') + parseFloat(o.pnl).toFixed(4) : '-';
+        const pnlCls = o.pnl != null ? (o.pnl >= 0 ? 'text-profit' : 'text-loss') : 'text-gray-400';
+        const actionBadge = o.action === 'open'
+            ? '<span class="text-green-400 text-xs font-bold">开仓</span>'
+            : '<span class="text-red-400 text-xs font-bold">平仓</span>';
+        const dirBadge = o.direction
+            ? `<span class="px-1.5 py-0.5 rounded text-xs ${o.direction === 'long' ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400'}">${o.direction === 'long' ? '多' : '空'}</span>`
+            : '-';
+        const tr = document.createElement('tr');
+        tr.className = 'hover:bg-dark-hover transition-colors';
+        tr.innerHTML = `
+            <td class="px-4 py-2.5 text-gray-500 text-xs whitespace-nowrap">${fmtTs(o.timestamp)}</td>
+            <td class="px-3 py-2.5 text-white font-mono text-xs font-bold">${o.symbol || '-'}</td>
+            <td class="text-center px-3 py-2.5">${actionBadge}</td>
+            <td class="text-center px-3 py-2.5">${dirBadge}</td>
+            <td class="text-right px-3 py-2.5 text-yellow-400 text-xs">${o.leverage ? o.leverage + 'x' : '-'}</td>
+            <td class="text-right px-3 py-2.5 text-gray-400 font-mono text-xs">${o.margin_usdt ? parseFloat(o.margin_usdt).toFixed(2) : '-'}</td>
+            <td class="text-right px-3 py-2.5 text-gray-400 font-mono text-xs">${o.source_price || '-'}</td>
+            <td class="text-right px-3 py-2.5 text-gray-300 font-mono text-xs">${o.exec_price || '-'}</td>
+            <td class="text-right px-3 py-2.5 text-gray-400 text-xs">${dev}</td>
+            <td class="text-center px-3 py-2.5">${statusBadge(o.status)}</td>
+            <td class="px-3 py-2.5 text-gray-600 text-xs truncate max-w-xs">${o.notes || ''}</td>`;
+        body.appendChild(tr);
+    });
+}
+
+// 轮询引擎状态（每 5s）
+async function pollEngineStatus() {
+    try {
+        const res = await fetch('/api/status');
+        const data = await res.json();
+        updateEngineBadge(data.copy_engine_running);
+    } catch(e) {}
+}
+
+document.getElementById('price_tolerance').addEventListener('input', computeAllocation);
+document.getElementById('total_capital').addEventListener('input', computeAllocation);
+
+loadSettings().then(() => { refreshPositions(); refreshOrders(); });
+setInterval(pollEngineStatus, 5000);
+setInterval(refreshOrders, 15000);
+</script>
+{% endblock %}
