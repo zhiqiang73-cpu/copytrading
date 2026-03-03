@@ -1,0 +1,435 @@
+/Users/wangzhiqiang/Library/Python/3.9/lib/python/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020
+  warnings.warn(
+23:01:54  INFO     database  数据库就绪：/Users/wangzhiqiang/My Ai/bitgetfollow/data/tracker.db
+23:01:54  INFO     web  启动 Web 仪表盘：http://127.0.0.1:8080
+23:01:54  INFO     web  心跳监控启动（首次收到心跳后，60秒无响应将提示网页关闭）
+ * Serving Flask app 'web'
+ * Debug mode: off
+23:01:54  INFO     werkzeug  [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on http://127.0.0.1:8080
+23:01:54  INFO     werkzeug  [33mPress CTRL+C to quit[0m
+23:01:56  INFO     web  启动补全 + 采集，共 5 名交易员
+23:01:56  INFO     collector  初始化交易员 woshiguaizi (b1b64874)…
+23:01:56  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:01:56] "GET / HTTP/1.1" 200 -
+23:01:57  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:01:57] "POST /api/heartbeat HTTP/1.1" 200 -
+23:01:57  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:01:57] "GET /api/status HTTP/1.1" 200 -
+23:01:57  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:01:57] "GET /api/copy/settings HTTP/1.1" 200 -
+23:01:57  INFO     copy_engine  加载内存快照 [b1b64874]: 17 个
+23:01:57  INFO     copy_engine  跟单引擎启动 (高并发精准防重模式 + 币安信号源)
+23:01:57  INFO     web  跟单引擎已自动恢复
+23:01:57  INFO     copy_engine  币安交易员 491471998592 首次初始化信号时间戳，跳过历史信号
+23:01:57  INFO     copy_engine  币安交易员 492954655263 首次初始化信号时间戳，跳过历史信号
+23:01:57  INFO     copy_engine  币安交易员 475183830208 首次初始化信号时间戳，跳过历史信号
+23:01:58  INFO     collector  当前持仓 17 个 [b1b64874]
+23:01:58  INFO     collector  初始化完成：woshiguaizi
+23:01:58  INFO     collector  初始化交易员 ecocycle (b1bc4c70)…
+23:01:58  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:01:58] "GET / HTTP/1.1" 200 -
+23:02:00  INFO     collector  当前持仓 0 个 [b1bc4c70]
+23:02:00  INFO     collector  初始化完成：ecocycle
+23:02:00  INFO     collector  初始化交易员 Tradease-Lucas (bfb74771)…
+23:02:01  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:02:01  INFO     collector  交易员 bfb74771 开启了持仓保护或获取失败，跳过本次快照更新
+23:02:01  INFO     collector  初始化完成：Tradease-Lucas
+23:02:01  INFO     collector  初始化交易员 Karina_espar (bab24675)…
+23:02:02  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:02:02] "POST /api/heartbeat HTTP/1.1" 200 -
+23:02:02  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:02:02] "GET /api/status HTTP/1.1" 200 -
+23:02:03  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:02:03  INFO     collector  交易员 bab24675 开启了持仓保护或获取失败，跳过本次快照更新
+23:02:03  INFO     collector  初始化完成：Karina_espar
+23:02:03  INFO     collector  初始化交易员 Team_Redheal (beb24f70)…
+23:02:04  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:02:04  INFO     collector  交易员 beb24f70 开启了持仓保护或获取失败，跳过本次快照更新
+23:02:04  INFO     collector  初始化完成：Team_Redheal
+23:02:04  INFO     collector  采集器启动，轮询间隔 5s
+23:02:04  INFO     web  采集器已自动启动
+23:02:06  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:02:06  INFO     collector  交易员 beb24f70 开启了持仓保护或获取失败，跳过本次快照更新
+23:02:06  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:02:06] "GET /my-positions HTTP/1.1" 200 -
+23:02:07  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:02:07] "POST /api/heartbeat HTTP/1.1" 200 -
+23:02:07  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:02:07] "GET /api/status HTTP/1.1" 200 -
+23:02:07  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:02:07] "GET /api/copy/settings HTTP/1.1" 200 -
+23:02:07  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:02:07] "GET /api/copy/orders?page=1&page_size=30 HTTP/1.1" 200 -
+23:02:07  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:02:07] "GET /api/copy/positions HTTP/1.1" 200 -
+23:02:07  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:02:07  INFO     collector  交易员 bab24675 开启了持仓保护或获取失败，跳过本次快照更新
+23:02:09  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:02:09  INFO     collector  交易员 bfb74771 开启了持仓保护或获取失败，跳过本次快照更新
+23:02:10  INFO     collector  当前持仓 0 个 [b1bc4c70]
+23:02:12  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:02:12] "POST /api/heartbeat HTTP/1.1" 200 -
+23:02:12  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:02:12] "GET /api/status HTTP/1.1" 200 -
+23:02:12  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:02:12] "GET /api/status HTTP/1.1" 200 -
+23:02:12  INFO     collector  当前持仓 17 个 [b1b64874]
+23:02:13  INFO     collector  当前持仓 17 个 [b1b64874]
+23:02:15  INFO     collector  当前持仓 0 个 [b1bc4c70]
+23:02:17  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:02:17  INFO     collector  交易员 bfb74771 开启了持仓保护或获取失败，跳过本次快照更新
+23:02:17  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:02:17] "POST /api/heartbeat HTTP/1.1" 200 -
+23:02:17  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:02:17] "GET /api/status HTTP/1.1" 200 -
+23:02:17  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:02:17] "GET /api/status HTTP/1.1" 200 -
+23:02:18  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:02:18  INFO     collector  交易员 bab24675 开启了持仓保护或获取失败，跳过本次快照更新
+23:02:20  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:02:20  INFO     collector  交易员 beb24f70 开启了持仓保护或获取失败，跳过本次快照更新
+23:02:21  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:02:21  INFO     collector  交易员 beb24f70 开启了持仓保护或获取失败，跳过本次快照更新
+23:02:22  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:02:22] "POST /api/heartbeat HTTP/1.1" 200 -
+23:02:22  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:02:22] "GET /api/status HTTP/1.1" 200 -
+23:02:22  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:02:22] "GET /api/copy/orders?page=1&page_size=30 HTTP/1.1" 200 -
+23:02:22  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:02:22] "GET /api/status HTTP/1.1" 200 -
+23:02:23  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:02:23  INFO     collector  交易员 bab24675 开启了持仓保护或获取失败，跳过本次快照更新
+23:02:24  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:02:24  INFO     collector  交易员 bfb74771 开启了持仓保护或获取失败，跳过本次快照更新
+23:02:26  INFO     collector  当前持仓 0 个 [b1bc4c70]
+23:02:27  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:02:27] "POST /api/heartbeat HTTP/1.1" 200 -
+23:02:27  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:02:27] "GET /api/status HTTP/1.1" 200 -
+23:02:27  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:02:27] "GET /api/status HTTP/1.1" 200 -
+23:02:28  INFO     collector  当前持仓 17 个 [b1b64874]
+23:02:29  INFO     collector  当前持仓 17 个 [b1b64874]
+23:02:31  INFO     collector  当前持仓 0 个 [b1bc4c70]
+23:02:32  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:02:32] "POST /api/heartbeat HTTP/1.1" 200 -
+23:02:32  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:02:32] "GET /api/status HTTP/1.1" 200 -
+23:02:32  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:02:32] "GET /api/status HTTP/1.1" 200 -
+23:02:33  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:02:33  INFO     collector  交易员 bfb74771 开启了持仓保护或获取失败，跳过本次快照更新
+23:02:34  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:02:34  INFO     collector  交易员 bab24675 开启了持仓保护或获取失败，跳过本次快照更新
+23:02:34  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:02:34] "POST /api/heartbeat HTTP/1.1" 200 -
+23:02:34  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:02:34] "GET /api/status HTTP/1.1" 200 -
+23:02:34  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:02:34] "GET /api/copy/orders?page=1&page_size=30 HTTP/1.1" 200 -
+23:02:34  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:02:34] "GET /api/status HTTP/1.1" 200 -
+23:02:36  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:02:36  INFO     collector  交易员 beb24f70 开启了持仓保护或获取失败，跳过本次快照更新
+23:02:37  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:02:37  INFO     collector  交易员 beb24f70 开启了持仓保护或获取失败，跳过本次快照更新
+23:02:37  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:02:37] "POST /api/heartbeat HTTP/1.1" 200 -
+23:02:37  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:02:37] "GET /api/status HTTP/1.1" 200 -
+23:02:37  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:02:37] "GET /api/copy/orders?page=1&page_size=30 HTTP/1.1" 200 -
+23:02:37  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:02:37] "GET /api/status HTTP/1.1" 200 -
+23:02:39  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:02:39  INFO     collector  交易员 bab24675 开启了持仓保护或获取失败，跳过本次快照更新
+23:02:40  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:02:40  INFO     collector  交易员 bfb74771 开启了持仓保护或获取失败，跳过本次快照更新
+23:02:42  INFO     collector  当前持仓 0 个 [b1bc4c70]
+23:02:42  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:02:42] "POST /api/heartbeat HTTP/1.1" 200 -
+23:02:42  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:02:42] "GET /api/status HTTP/1.1" 200 -
+23:02:42  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:02:42] "GET /api/status HTTP/1.1" 200 -
+23:02:44  INFO     collector  当前持仓 17 个 [b1b64874]
+23:02:46  INFO     collector  当前持仓 17 个 [b1b64874]
+23:02:47  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:02:47] "POST /api/heartbeat HTTP/1.1" 200 -
+23:02:47  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:02:47] "GET /api/status HTTP/1.1" 200 -
+23:02:47  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:02:47] "GET /api/status HTTP/1.1" 200 -
+23:02:47  INFO     collector  当前持仓 0 个 [b1bc4c70]
+23:02:49  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:02:49  INFO     collector  交易员 bfb74771 开启了持仓保护或获取失败，跳过本次快照更新
+23:02:51  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:02:51  INFO     collector  交易员 bab24675 开启了持仓保护或获取失败，跳过本次快照更新
+23:02:52  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:02:52  INFO     collector  交易员 beb24f70 开启了持仓保护或获取失败，跳过本次快照更新
+23:02:52  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:02:52] "POST /api/heartbeat HTTP/1.1" 200 -
+23:02:52  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:02:52] "GET /api/copy/orders?page=1&page_size=30 HTTP/1.1" 200 -
+23:02:52  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:02:52] "GET /api/status HTTP/1.1" 200 -
+23:02:52  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:02:52] "GET /api/status HTTP/1.1" 200 -
+23:02:55  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:02:55  INFO     collector  交易员 beb24f70 开启了持仓保护或获取失败，跳过本次快照更新
+23:02:56  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:02:56  INFO     collector  交易员 bab24675 开启了持仓保护或获取失败，跳过本次快照更新
+23:02:57  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:02:57] "POST /api/heartbeat HTTP/1.1" 200 -
+23:02:57  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:02:57] "GET /api/status HTTP/1.1" 200 -
+23:02:57  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:02:57] "GET /api/status HTTP/1.1" 200 -
+23:02:58  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:02:58  INFO     collector  交易员 bfb74771 开启了持仓保护或获取失败，跳过本次快照更新
+23:02:59  INFO     collector  当前持仓 0 个 [b1bc4c70]
+23:03:01  INFO     collector  当前持仓 17 个 [b1b64874]
+23:03:02  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:03:02] "POST /api/heartbeat HTTP/1.1" 200 -
+23:03:02  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:03:02] "GET /api/status HTTP/1.1" 200 -
+23:03:02  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:03:02] "GET /api/status HTTP/1.1" 200 -
+23:03:02  INFO     collector  当前持仓 17 个 [b1b64874]
+23:03:04  INFO     collector  当前持仓 0 个 [b1bc4c70]
+23:03:06  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:03:06  INFO     collector  交易员 bfb74771 开启了持仓保护或获取失败，跳过本次快照更新
+23:03:07  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:03:07  INFO     collector  交易员 bab24675 开启了持仓保护或获取失败，跳过本次快照更新
+23:03:07  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:03:07] "POST /api/heartbeat HTTP/1.1" 200 -
+23:03:07  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:03:07] "GET /api/status HTTP/1.1" 200 -
+23:03:07  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:03:07] "GET /api/copy/orders?page=1&page_size=30 HTTP/1.1" 200 -
+23:03:07  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:03:07] "GET /api/status HTTP/1.1" 200 -
+23:03:09  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:03:09  INFO     collector  交易员 beb24f70 开启了持仓保护或获取失败，跳过本次快照更新
+23:03:10  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:03:10  INFO     collector  交易员 beb24f70 开启了持仓保护或获取失败，跳过本次快照更新
+23:03:12  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:03:12  INFO     collector  交易员 bab24675 开启了持仓保护或获取失败，跳过本次快照更新
+23:03:12  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:03:12] "POST /api/heartbeat HTTP/1.1" 200 -
+23:03:12  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:03:12] "GET /api/status HTTP/1.1" 200 -
+23:03:12  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:03:12] "GET /api/status HTTP/1.1" 200 -
+23:03:13  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:03:13  INFO     collector  交易员 bfb74771 开启了持仓保护或获取失败，跳过本次快照更新
+23:03:15  INFO     collector  当前持仓 0 个 [b1bc4c70]
+23:03:17  INFO     collector  当前持仓 17 个 [b1b64874]
+23:03:18  INFO     collector  当前持仓 17 个 [b1b64874]
+23:03:20  INFO     collector  当前持仓 0 个 [b1bc4c70]
+23:03:21  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:03:21  INFO     collector  交易员 bfb74771 开启了持仓保护或获取失败，跳过本次快照更新
+23:03:22  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:03:22] "GET /api/copy/orders?page=1&page_size=30 HTTP/1.1" 200 -
+23:03:24  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:03:24  INFO     collector  交易员 bab24675 开启了持仓保护或获取失败，跳过本次快照更新
+23:03:25  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:03:25  INFO     collector  交易员 beb24f70 开启了持仓保护或获取失败，跳过本次快照更新
+23:03:27  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:03:27  INFO     collector  交易员 beb24f70 开启了持仓保护或获取失败，跳过本次快照更新
+23:03:29  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:03:29  INFO     collector  交易员 bab24675 开启了持仓保护或获取失败，跳过本次快照更新
+23:03:30  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:03:30  INFO     collector  交易员 bfb74771 开启了持仓保护或获取失败，跳过本次快照更新
+23:03:32  INFO     collector  当前持仓 0 个 [b1bc4c70]
+23:03:33  INFO     collector  当前持仓 17 个 [b1b64874]
+23:03:34  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:03:34] "POST /api/heartbeat HTTP/1.1" 200 -
+23:03:34  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:03:34] "POST /api/heartbeat HTTP/1.1" 200 -
+23:03:34  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:03:34] "GET /api/status HTTP/1.1" 200 -
+23:03:34  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:03:34] "GET /api/copy/orders?page=1&page_size=30 HTTP/1.1" 200 -
+23:03:34  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:03:34] "GET /api/status HTTP/1.1" 200 -
+23:03:34  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:03:34] "GET /api/status HTTP/1.1" 200 -
+23:03:34  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:03:34] "GET /api/status HTTP/1.1" 200 -
+23:03:35  INFO     collector  当前持仓 17 个 [b1b64874]
+23:03:36  INFO     collector  当前持仓 0 个 [b1bc4c70]
+23:03:37  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:03:37] "GET /api/copy/orders?page=1&page_size=30 HTTP/1.1" 200 -
+23:03:38  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:03:38  INFO     collector  交易员 bfb74771 开启了持仓保护或获取失败，跳过本次快照更新
+23:03:39  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:03:39  INFO     collector  交易员 bab24675 开启了持仓保护或获取失败，跳过本次快照更新
+23:03:41  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:03:41  INFO     collector  交易员 beb24f70 开启了持仓保护或获取失败，跳过本次快照更新
+23:03:42  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:03:42  INFO     collector  交易员 beb24f70 开启了持仓保护或获取失败，跳过本次快照更新
+23:03:44  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:03:44  INFO     collector  交易员 bab24675 开启了持仓保护或获取失败，跳过本次快照更新
+23:03:45  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:03:45  INFO     collector  交易员 bfb74771 开启了持仓保护或获取失败，跳过本次快照更新
+23:03:47  INFO     collector  当前持仓 0 个 [b1bc4c70]
+23:03:48  INFO     collector  当前持仓 17 个 [b1b64874]
+23:03:50  INFO     collector  当前持仓 17 个 [b1b64874]
+23:03:51  INFO     collector  当前持仓 0 个 [b1bc4c70]
+23:03:53  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:03:53  INFO     collector  交易员 bfb74771 开启了持仓保护或获取失败，跳过本次快照更新
+23:03:54  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:03:54  INFO     collector  交易员 bab24675 开启了持仓保护或获取失败，跳过本次快照更新
+23:03:56  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:03:56  INFO     collector  交易员 beb24f70 开启了持仓保护或获取失败，跳过本次快照更新
+23:03:57  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:03:57  INFO     collector  交易员 beb24f70 开启了持仓保护或获取失败，跳过本次快照更新
+23:03:59  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:03:59  INFO     collector  交易员 bab24675 开启了持仓保护或获取失败，跳过本次快照更新
+23:04:00  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:04:00  INFO     collector  交易员 bfb74771 开启了持仓保护或获取失败，跳过本次快照更新
+23:04:02  INFO     collector  当前持仓 0 个 [b1bc4c70]
+23:04:03  INFO     collector  当前持仓 17 个 [b1b64874]
+23:04:05  INFO     collector  当前持仓 17 个 [b1b64874]
+23:04:07  INFO     collector  当前持仓 0 个 [b1bc4c70]
+23:04:08  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:04:08  INFO     collector  交易员 bfb74771 开启了持仓保护或获取失败，跳过本次快照更新
+23:04:10  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:04:10  INFO     collector  交易员 bab24675 开启了持仓保护或获取失败，跳过本次快照更新
+23:04:11  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:04:11  INFO     collector  交易员 beb24f70 开启了持仓保护或获取失败，跳过本次快照更新
+23:04:13  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:04:13  INFO     collector  交易员 beb24f70 开启了持仓保护或获取失败，跳过本次快照更新
+23:04:14  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:04:14  INFO     collector  交易员 bab24675 开启了持仓保护或获取失败，跳过本次快照更新
+23:04:16  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:04:16  INFO     collector  交易员 bfb74771 开启了持仓保护或获取失败，跳过本次快照更新
+23:04:17  INFO     collector  当前持仓 0 个 [b1bc4c70]
+23:04:19  INFO     collector  当前持仓 17 个 [b1b64874]
+23:04:20  INFO     collector  当前持仓 17 个 [b1b64874]
+23:04:22  INFO     collector  当前持仓 0 个 [b1bc4c70]
+23:04:23  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:04:23  INFO     collector  交易员 bfb74771 开启了持仓保护或获取失败，跳过本次快照更新
+23:04:25  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:04:25  INFO     collector  交易员 bab24675 开启了持仓保护或获取失败，跳过本次快照更新
+23:04:27  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:04:27  INFO     collector  交易员 beb24f70 开启了持仓保护或获取失败，跳过本次快照更新
+23:04:28  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:04:28  INFO     collector  交易员 beb24f70 开启了持仓保护或获取失败，跳过本次快照更新
+23:04:30  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:04:30  INFO     collector  交易员 bab24675 开启了持仓保护或获取失败，跳过本次快照更新
+23:04:31  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:04:31  INFO     collector  交易员 bfb74771 开启了持仓保护或获取失败，跳过本次快照更新
+23:04:33  INFO     collector  当前持仓 0 个 [b1bc4c70]
+23:04:34  INFO     collector  当前持仓 17 个 [b1b64874]
+23:04:34  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:04:34] "POST /api/heartbeat HTTP/1.1" 200 -
+23:04:34  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:04:34] "POST /api/heartbeat HTTP/1.1" 200 -
+23:04:34  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:04:34] "GET /api/status HTTP/1.1" 200 -
+23:04:34  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:04:34] "GET /api/copy/orders?page=1&page_size=30 HTTP/1.1" 200 -
+23:04:34  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:04:34] "GET /api/status HTTP/1.1" 200 -
+23:04:34  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:04:34] "GET /api/copy/orders?page=1&page_size=30 HTTP/1.1" 200 -
+23:04:34  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:04:34] "GET /api/status HTTP/1.1" 200 -
+23:04:34  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:04:34] "GET /api/status HTTP/1.1" 200 -
+23:04:36  INFO     collector  当前持仓 17 个 [b1b64874]
+23:04:38  INFO     collector  当前持仓 0 个 [b1bc4c70]
+23:04:40  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:04:40  INFO     collector  交易员 bfb74771 开启了持仓保护或获取失败，跳过本次快照更新
+23:04:41  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:04:41  INFO     collector  交易员 bab24675 开启了持仓保护或获取失败，跳过本次快照更新
+23:04:43  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:04:43  INFO     collector  交易员 beb24f70 开启了持仓保护或获取失败，跳过本次快照更新
+23:04:44  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:04:44  INFO     collector  交易员 beb24f70 开启了持仓保护或获取失败，跳过本次快照更新
+23:04:46  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:04:46  INFO     collector  交易员 bab24675 开启了持仓保护或获取失败，跳过本次快照更新
+23:04:47  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:04:47  INFO     collector  交易员 bfb74771 开启了持仓保护或获取失败，跳过本次快照更新
+23:04:49  INFO     collector  当前持仓 0 个 [b1bc4c70]
+23:04:50  INFO     collector  当前持仓 17 个 [b1b64874]
+23:04:52  INFO     collector  当前持仓 17 个 [b1b64874]
+23:04:53  INFO     collector  当前持仓 0 个 [b1bc4c70]
+23:04:55  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:04:55  INFO     collector  交易员 bfb74771 开启了持仓保护或获取失败，跳过本次快照更新
+23:04:56  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:04:56  INFO     collector  交易员 bab24675 开启了持仓保护或获取失败，跳过本次快照更新
+23:04:58  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:04:58  INFO     collector  交易员 beb24f70 开启了持仓保护或获取失败，跳过本次快照更新
+23:04:59  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:04:59  INFO     collector  交易员 beb24f70 开启了持仓保护或获取失败，跳过本次快照更新
+23:05:01  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:05:01  INFO     collector  交易员 bab24675 开启了持仓保护或获取失败，跳过本次快照更新
+23:05:02  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:05:02  INFO     collector  交易员 bfb74771 开启了持仓保护或获取失败，跳过本次快照更新
+23:05:04  INFO     collector  当前持仓 0 个 [b1bc4c70]
+23:05:05  INFO     collector  当前持仓 17 个 [b1b64874]
+23:05:07  INFO     collector  当前持仓 17 个 [b1b64874]
+23:05:08  INFO     collector  当前持仓 0 个 [b1bc4c70]
+23:05:10  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:05:10  INFO     collector  交易员 bfb74771 开启了持仓保护或获取失败，跳过本次快照更新
+23:05:11  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:05:11  INFO     collector  交易员 bab24675 开启了持仓保护或获取失败，跳过本次快照更新
+23:05:13  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:05:13  INFO     collector  交易员 beb24f70 开启了持仓保护或获取失败，跳过本次快照更新
+23:05:15  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:05:15  INFO     collector  交易员 beb24f70 开启了持仓保护或获取失败，跳过本次快照更新
+23:05:16  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:05:16  INFO     collector  交易员 bab24675 开启了持仓保护或获取失败，跳过本次快照更新
+23:05:18  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:05:18  INFO     collector  交易员 bfb74771 开启了持仓保护或获取失败，跳过本次快照更新
+23:05:19  INFO     collector  当前持仓 0 个 [b1bc4c70]
+23:05:20  INFO     collector  当前持仓 17 个 [b1b64874]
+23:05:22  INFO     collector  当前持仓 17 个 [b1b64874]
+23:05:24  INFO     collector  当前持仓 0 个 [b1bc4c70]
+23:05:25  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:05:25  INFO     collector  交易员 bfb74771 开启了持仓保护或获取失败，跳过本次快照更新
+23:05:27  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:05:27  INFO     collector  交易员 bab24675 开启了持仓保护或获取失败，跳过本次快照更新
+23:05:28  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:05:28  INFO     collector  交易员 beb24f70 开启了持仓保护或获取失败，跳过本次快照更新
+23:05:30  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:05:30  INFO     collector  交易员 beb24f70 开启了持仓保护或获取失败，跳过本次快照更新
+23:05:31  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:05:31  INFO     collector  交易员 bab24675 开启了持仓保护或获取失败，跳过本次快照更新
+23:05:33  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:05:33  INFO     collector  交易员 bfb74771 开启了持仓保护或获取失败，跳过本次快照更新
+23:05:34  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:05:34] "POST /api/heartbeat HTTP/1.1" 200 -
+23:05:34  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:05:34] "POST /api/heartbeat HTTP/1.1" 200 -
+23:05:34  INFO     collector  当前持仓 0 个 [b1bc4c70]
+23:05:34  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:05:34] "GET /api/status HTTP/1.1" 200 -
+23:05:34  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:05:34] "GET /api/copy/orders?page=1&page_size=30 HTTP/1.1" 200 -
+23:05:34  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:05:34] "GET /api/status HTTP/1.1" 200 -
+23:05:34  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:05:34] "GET /api/copy/orders?page=1&page_size=30 HTTP/1.1" 200 -
+23:05:34  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:05:34] "GET /api/status HTTP/1.1" 200 -
+23:05:34  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:05:34] "GET /api/status HTTP/1.1" 200 -
+23:05:36  INFO     collector  当前持仓 17 个 [b1b64874]
+23:05:37  INFO     collector  当前持仓 17 个 [b1b64874]
+23:05:39  INFO     collector  当前持仓 0 个 [b1bc4c70]
+23:05:40  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:05:40  INFO     collector  交易员 bfb74771 开启了持仓保护或获取失败，跳过本次快照更新
+23:05:42  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:05:42  INFO     collector  交易员 bab24675 开启了持仓保护或获取失败，跳过本次快照更新
+23:05:44  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:05:44  INFO     collector  交易员 beb24f70 开启了持仓保护或获取失败，跳过本次快照更新
+23:05:45  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:05:45  INFO     collector  交易员 beb24f70 开启了持仓保护或获取失败，跳过本次快照更新
+23:05:46  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:05:46  INFO     collector  交易员 bab24675 开启了持仓保护或获取失败，跳过本次快照更新
+23:05:48  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:05:48  INFO     collector  交易员 bfb74771 开启了持仓保护或获取失败，跳过本次快照更新
+23:05:49  INFO     collector  当前持仓 0 个 [b1bc4c70]
+23:05:51  INFO     collector  当前持仓 17 个 [b1b64874]
+23:05:53  INFO     collector  当前持仓 17 个 [b1b64874]
+23:05:54  INFO     collector  当前持仓 0 个 [b1bc4c70]
+23:05:56  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:05:56  INFO     collector  交易员 bfb74771 开启了持仓保护或获取失败，跳过本次快照更新
+23:05:57  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:05:57  INFO     collector  交易员 bab24675 开启了持仓保护或获取失败，跳过本次快照更新
+23:05:59  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:05:59  INFO     collector  交易员 beb24f70 开启了持仓保护或获取失败，跳过本次快照更新
+23:06:00  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:06:00  INFO     collector  交易员 beb24f70 开启了持仓保护或获取失败，跳过本次快照更新
+23:06:02  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:06:02  INFO     collector  交易员 bab24675 开启了持仓保护或获取失败，跳过本次快照更新
+23:06:04  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:06:04  INFO     collector  交易员 bfb74771 开启了持仓保护或获取失败，跳过本次快照更新
+23:06:06  INFO     collector  当前持仓 0 个 [b1bc4c70]
+23:06:07  INFO     collector  当前持仓 17 个 [b1b64874]
+23:06:09  INFO     collector  当前持仓 17 个 [b1b64874]
+23:06:10  INFO     collector  当前持仓 0 个 [b1bc4c70]
+23:06:12  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:06:12  INFO     collector  交易员 bfb74771 开启了持仓保护或获取失败，跳过本次快照更新
+23:06:13  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:06:13  INFO     collector  交易员 bab24675 开启了持仓保护或获取失败，跳过本次快照更新
+23:06:15  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:06:15  INFO     collector  交易员 beb24f70 开启了持仓保护或获取失败，跳过本次快照更新
+23:06:16  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:06:16  INFO     collector  交易员 beb24f70 开启了持仓保护或获取失败，跳过本次快照更新
+23:06:18  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:06:18  INFO     collector  交易员 bab24675 开启了持仓保护或获取失败，跳过本次快照更新
+23:06:19  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:06:19  INFO     collector  交易员 bfb74771 开启了持仓保护或获取失败，跳过本次快照更新
+23:06:21  INFO     collector  当前持仓 0 个 [b1bc4c70]
+23:06:22  INFO     collector  当前持仓 17 个 [b1b64874]
+23:06:24  INFO     collector  当前持仓 17 个 [b1b64874]
+23:06:25  INFO     collector  当前持仓 0 个 [b1bc4c70]
+23:06:27  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:06:27  INFO     collector  交易员 bfb74771 开启了持仓保护或获取失败，跳过本次快照更新
+23:06:28  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:06:28  INFO     collector  交易员 bab24675 开启了持仓保护或获取失败，跳过本次快照更新
+23:06:30  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:06:30  INFO     collector  交易员 beb24f70 开启了持仓保护或获取失败，跳过本次快照更新
+23:06:31  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:06:31  INFO     collector  交易员 beb24f70 开启了持仓保护或获取失败，跳过本次快照更新
+23:06:33  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:06:33  INFO     collector  交易员 bab24675 开启了持仓保护或获取失败，跳过本次快照更新
+23:06:34  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:06:34] "POST /api/heartbeat HTTP/1.1" 200 -
+23:06:34  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:06:34] "POST /api/heartbeat HTTP/1.1" 200 -
+23:06:34  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:06:34] "GET /api/status HTTP/1.1" 200 -
+23:06:34  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:06:34] "GET /api/copy/orders?page=1&page_size=30 HTTP/1.1" 200 -
+23:06:34  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:06:34] "GET /api/status HTTP/1.1" 200 -
+23:06:34  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:06:34] "GET /api/copy/orders?page=1&page_size=30 HTTP/1.1" 200 -
+23:06:34  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:06:34] "GET /api/status HTTP/1.1" 200 -
+23:06:34  INFO     werkzeug  127.0.0.1 - - [02/Mar/2026 23:06:34] "GET /api/status HTTP/1.1" 200 -
+23:06:34  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:06:35  INFO     collector  交易员 bfb74771 开启了持仓保护或获取失败，跳过本次快照更新
+23:06:36  INFO     collector  当前持仓 0 个 [b1bc4c70]
+23:06:38  INFO     collector  当前持仓 17 个 [b1b64874]
+23:06:39  INFO     collector  当前持仓 17 个 [b1b64874]
+23:06:41  INFO     collector  当前持仓 0 个 [b1bc4c70]
+23:06:42  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:06:42  INFO     collector  交易员 bfb74771 开启了持仓保护或获取失败，跳过本次快照更新
+23:06:44  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:06:44  INFO     collector  交易员 bab24675 开启了持仓保护或获取失败，跳过本次快照更新
+23:06:45  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:06:45  INFO     collector  交易员 beb24f70 开启了持仓保护或获取失败，跳过本次快照更新
+23:06:47  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:06:47  INFO     collector  交易员 beb24f70 开启了持仓保护或获取失败，跳过本次快照更新
+23:06:48  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:06:48  INFO     collector  交易员 bab24675 开启了持仓保护或获取失败，跳过本次快照更新
+23:06:50  WARNING  scraper  Web API /v1/trigger/trace/order/currentList error: 交易专家已启用未结仓位保护
+23:06:50  INFO     collector  交易员 bfb74771 开启了持仓保护或获取失败，跳过本次快照更新
+23:06:51  INFO     collector  当前持仓 0 个 [b1bc4c70]
+23:06:53  INFO     collector  当前持仓 17 个 [b1b64874]
+23:06:54  INFO     collector  当前持仓 17 个 [b1b64874]
+23:06:55  INFO     web  收到信号 15，开始退出…
+23:06:55  INFO     web  ════════════════════════════════════════════
+23:06:55  INFO     web  系统清理启动 - 正在妥善关闭所有资源…
+23:06:55  INFO     web  ════════════════════════════════════════════
+23:06:56  INFO     collector  当前持仓 0 个 [b1bc4c70]
+23:06:56  INFO     copy_engine  跟单引擎已停止
+23:06:56  INFO     web  优化数据库 WAL…
+23:06:56  INFO     web  系统清理完成，已安全退出

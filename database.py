@@ -6,12 +6,37 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
+import threading
+import time
 from contextlib import contextmanager
 from typing import Any
 
 import config
 
 logger = logging.getLogger(__name__)
+
+# 数据库写入锁（序列化并发写操作）
+_db_write_lock = threading.RLock()
+
+# 删除黑名单（防止采集器重新创建已删除的交易员）
+_deleted_traders: set[str] = set()
+_deleted_lock = threading.Lock()
+
+def mark_deleted(uid: str):
+    """标记交易员为已删除。"""
+    with _deleted_lock:
+        _deleted_traders.add(uid)
+    logger.info("已将交易员 %s 加入删除黑名单", uid[:8])
+
+def is_deleted(uid: str) -> bool:
+    """检查交易员是否在删除黑名单中。"""
+    with _deleted_lock:
+        return uid in _deleted_traders
+
+def clear_deleted(uid: str):
+    """从删除黑名单中移除（用于重新添加时）。"""
+    with _deleted_lock:
+        _deleted_traders.discard(uid)
 
 # ── 初始化 ────────────────────────────────────────────────────────────────────
 
@@ -26,14 +51,39 @@ def init_db():
 
 @contextmanager
 def get_conn():
-    conn = sqlite3.connect(config.DB_PATH, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    try:
-        yield conn
-    finally:
-        conn.close()
+    """获取数据库连接（支持超时重试处理 SQLITE_BUSY）。"""
+    max_retries = 3
+    last_error = None
+    
+    for attempt in range(1, max_retries + 1):
+        try:
+            conn = sqlite3.connect(
+                config.DB_PATH,
+                check_same_thread=False,
+                timeout=10.0  # 10秒超时让 SQLite 自动重试
+            )
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA foreign_keys=ON")
+            conn.execute("PRAGMA busy_timeout=5000")  # 5秒忙碌超时
+            try:
+                yield conn
+            finally:
+                conn.close()
+            return
+        except sqlite3.OperationalError as e:
+            last_error = e
+            if "database is locked" in str(e) and attempt < max_retries:
+                wait_time = 0.1 * (2 ** attempt)
+                logger.debug("数据库被锁定，%f秒后重试 (尝试 %d/%d)", wait_time, attempt, max_retries)
+                time.sleep(wait_time)
+                continue
+            raise
+        except Exception:
+            raise
+    
+    if last_error:
+        raise last_error
 
 
 # ── 建表 DDL ──────────────────────────────────────────────────────────────────
@@ -164,6 +214,11 @@ def upsert_trader(
     profit_7d: float | None = None,
     profit_30d: float | None = None,
 ):
+    # 黑名单检查：已删除的交易员不允许重新创建
+    if is_deleted(trader_uid):
+        logger.debug("交易员 %s 在删除黑名单中，拒绝 upsert", trader_uid[:8])
+        return
+    
     import time as _time
     now = int(_time.time())
     with get_conn() as conn:
@@ -215,7 +270,7 @@ def get_all_traders() -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def get_trader(trader_uid: str) -> dict | None:
+def get_trader(trader_uid: str):
     with get_conn() as conn:
         row = conn.execute(
             "SELECT * FROM traders WHERE trader_uid = ?", (trader_uid,)
@@ -329,27 +384,58 @@ def get_latest_close_time(trader_uid: str) -> int:
 # ── snapshots CRUD ────────────────────────────────────────────────────────────
 
 def upsert_snapshot(snap: dict):
-    """保存最新快照（trader_uid + tracking_no 唯一，冲突则更新）。"""
+    """保存最新快照（线程安全）。"""
     import time as _time
-    snap.setdefault("timestamp", int(_time.time()))
-    with get_conn() as conn:
-        conn.execute(
-            """
-            INSERT INTO snapshots
-                (trader_uid, timestamp, tracking_no, symbol, hold_side,
-                 leverage, open_price, open_time, open_amount, tp_price, sl_price)
-            VALUES
-                (:trader_uid, :timestamp, :tracking_no, :symbol, :hold_side,
-                 :leverage, :open_price, :open_time, :open_amount, :tp_price, :sl_price)
-            ON CONFLICT(trader_uid, tracking_no) DO UPDATE SET
-                timestamp  = excluded.timestamp,
-                tp_price   = excluded.tp_price,
-                sl_price   = excluded.sl_price,
-                open_amount = excluded.open_amount
-            """,
-            snap,
-        )
-        conn.commit()
+    # 统一使用毫秒时间戳，避免与 replace_all_snapshots 的毫秒值混用导致“最新快照”判断失真。
+    ts_raw = snap.get("timestamp")
+    try:
+        ts = int(float(ts_raw))
+    except (TypeError, ValueError):
+        ts = int(_time.time() * 1000)
+    if ts < 100_000_000_000:  # 10位秒级时间戳
+        ts *= 1000
+    snap["timestamp"] = ts
+    snap.setdefault("margin_mode", "cross")
+    snap.setdefault("position_size", snap.get("open_amount", 0))
+    snap.setdefault("unrealized_pnl", 0.0)
+    snap.setdefault("return_rate", 0.0)
+    snap.setdefault("follow_count", 0)
+    snap.setdefault("tp_price", 0.0)
+    snap.setdefault("sl_price", 0.0)
+    with _db_write_lock:
+        with get_conn() as conn:
+            _migrate_snapshots(conn)
+            conn.execute(
+                """
+                INSERT INTO snapshots
+                    (trader_uid, timestamp, tracking_no, symbol, hold_side,
+                     leverage, margin_mode, open_price, open_time, open_amount,
+                     position_size, unrealized_pnl, return_rate, follow_count,
+                     tp_price, sl_price)
+                VALUES
+                    (:trader_uid, :timestamp, :tracking_no, :symbol, :hold_side,
+                     :leverage, :margin_mode, :open_price, :open_time, :open_amount,
+                     :position_size, :unrealized_pnl, :return_rate, :follow_count,
+                     :tp_price, :sl_price)
+                ON CONFLICT(trader_uid, tracking_no) DO UPDATE SET
+                    timestamp      = excluded.timestamp,
+                    symbol         = excluded.symbol,
+                    hold_side      = excluded.hold_side,
+                    leverage       = excluded.leverage,
+                    margin_mode    = excluded.margin_mode,
+                    open_price     = excluded.open_price,
+                    open_time      = excluded.open_time,
+                    open_amount    = excluded.open_amount,
+                    position_size  = excluded.position_size,
+                    unrealized_pnl = excluded.unrealized_pnl,
+                    return_rate    = excluded.return_rate,
+                    follow_count   = excluded.follow_count,
+                    tp_price       = excluded.tp_price,
+                    sl_price       = excluded.sl_price
+                """,
+                snap,
+            )
+            conn.commit()
 
 
 def get_snapshots(trader_uid: str) -> dict[str, dict]:
@@ -375,18 +461,65 @@ def get_latest_snapshots(trader_uid: str) -> list[dict]:
 
 
 def delete_snapshot(trader_uid: str, tracking_no: str):
-    with get_conn() as conn:
-        conn.execute(
-            "DELETE FROM snapshots WHERE trader_uid = ? AND tracking_no = ?",
-            (trader_uid, tracking_no),
-        )
-        conn.commit()
+    """删除快照（线程安全）。"""
+    with _db_write_lock:
+        with get_conn() as conn:
+            conn.execute(
+                "DELETE FROM snapshots WHERE trader_uid = ? AND tracking_no = ?",
+                (trader_uid, tracking_no),
+            )
+            conn.commit()
 
 
 def clear_snapshots(trader_uid: str):
-    with get_conn() as conn:
-        conn.execute("DELETE FROM snapshots WHERE trader_uid = ?", (trader_uid,))
-        conn.commit()
+    """清空快照（线程安全）。"""
+    with _db_write_lock:
+        with get_conn() as conn:
+            conn.execute("DELETE FROM snapshots WHERE trader_uid = ?", (trader_uid,))
+            conn.commit()
+
+
+def replace_all_snapshots(trader_uid: str, snaps: list[dict]):
+    """
+    全量替换某个交易员的快照（线程安全）。
+    用于采集器定期同步最新状态，避免与跟单引擎的快照更新产生竞争。
+    """
+    import time as _time
+    now = int(_time.time() * 1000)
+
+    def _clean_symbol(symbol: Any) -> str:
+        s = str(symbol or "").upper()
+        for suffix in ("_UMCBL", "_UM", "_DMCBL", "_DM"):
+            s = s.replace(suffix, "")
+        return s
+
+    with _db_write_lock:
+        with get_conn() as conn:
+            conn.execute("DELETE FROM snapshots WHERE trader_uid = ?", (trader_uid,))
+            for s in snaps:
+                # 兼容不同来源的字段名（scrapper vs internal）
+                tracking_no = s.get("order_no") or s.get("tracking_no") or f"snap_{int(_time.time()*1000)}"
+                conn.execute(
+                    """
+                    INSERT INTO snapshots
+                        (trader_uid, timestamp, tracking_no, symbol, hold_side,
+                         leverage, margin_mode, open_price, open_time,
+                         open_amount, position_size, unrealized_pnl,
+                         return_rate, follow_count)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        trader_uid, now, tracking_no,
+                        _clean_symbol(s.get("symbol")), s.get("direction") or s.get("hold_side"),
+                        s.get("leverage", 1), s.get("margin_mode", "cross"),
+                        s.get("open_price", 0), s.get("open_time", 0),
+                        s.get("margin_amount", 0) or s.get("open_amount", 0),
+                        s.get("position_size", 0),
+                        s.get("unrealized_pnl", 0), s.get("return_rate", 0),
+                        s.get("follow_count", 0)
+                    )
+                )
+            conn.commit()
 
 
 # ── copy_settings CRUD ─────────────────────────────────────────────────────────
@@ -397,6 +530,7 @@ def _ensure_copy_settings(conn) -> None:
     for col, dtype, default in [
         ("sl_pct", "REAL", "0.15"),
         ("tp_pct", "REAL", "0.30"),
+        ("binance_traders", "TEXT", "'[]'"),
     ]:
         try:
             conn.execute(f"ALTER TABLE copy_settings ADD COLUMN {col} {dtype} DEFAULT {default}")
@@ -418,7 +552,7 @@ _COPY_SETTINGS_COLS = frozenset({
     "api_key", "api_secret", "api_passphrase",
     "total_capital", "max_margin_pct", "price_tolerance",
     "sl_pct", "tp_pct",
-    "enabled_traders", "engine_enabled",
+    "enabled_traders", "binance_traders", "engine_enabled",
 })
 
 
@@ -472,23 +606,25 @@ def _migrate_copy_orders(conn) -> None:
 
 
 def insert_copy_order(order: dict) -> int:
-    with get_conn() as conn:
-        _migrate_copy_orders(conn)
-        cur = conn.execute(
-            """
-            INSERT INTO copy_orders
-                (timestamp, trader_uid, tracking_no, my_order_id, symbol,
-                 direction, leverage, margin_usdt, source_price, exec_price,
-                 deviation_pct, action, status, pnl, notes, exec_qty)
-            VALUES
-                (:timestamp, :trader_uid, :tracking_no, :my_order_id, :symbol,
-                 :direction, :leverage, :margin_usdt, :source_price, :exec_price,
-                 :deviation_pct, :action, :status, :pnl, :notes, :exec_qty)
-            """,
-            {**order, "exec_qty": order.get("exec_qty", 0.0)},
-        )
-        conn.commit()
-        return int(cur.lastrowid)
+    """插入跟单记录（线程安全）。"""
+    with _db_write_lock:
+        with get_conn() as conn:
+            _migrate_copy_orders(conn)
+            cur = conn.execute(
+                """
+                INSERT INTO copy_orders
+                    (timestamp, trader_uid, tracking_no, my_order_id, symbol,
+                     direction, leverage, margin_usdt, source_price, exec_price,
+                     deviation_pct, action, status, pnl, notes, exec_qty)
+                VALUES
+                    (:timestamp, :trader_uid, :tracking_no, :my_order_id, :symbol,
+                     :direction, :leverage, :margin_usdt, :source_price, :exec_price,
+                     :deviation_pct, :action, :status, :pnl, :notes, :exec_qty)
+                """,
+                {**order, "exec_qty": order.get("exec_qty", 0.0)},
+            )
+            conn.commit()
+            return int(cur.lastrowid)
 
 
 def update_copy_order(
@@ -551,7 +687,28 @@ def get_copy_orders_by_tracking(
     return [dict(r) for r in rows]
 
 
-def get_last_copy_order(symbol: str, direction: str) -> dict | None:
+def get_open_copy_orders(trader_uid: str, symbol: str, direction: str) -> list[dict]:
+    """获取指定交易员、币种、方向下所有已成单的开仓记录（用于币安合并平仓）"""
+    with get_conn() as conn:
+        rows = conn.execute('''
+            SELECT * FROM copy_orders 
+            WHERE trader_uid = ? AND symbol = ? AND direction = ? 
+              AND action = 'open' AND status = 'filled'
+        ''', (trader_uid, symbol, direction)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def has_tracking_no(trader_uid: str, tracking_no: str) -> bool:
+    """检查是否存在使用该 tracking_no 的任何记录（用于防重复执行币安信号）"""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM copy_orders WHERE trader_uid = ? AND tracking_no = ? LIMIT 1",
+            (trader_uid, tracking_no)
+        ).fetchone()
+    return bool(row)
+
+
+def get_last_copy_order(symbol: str, direction: str):
     """查询该币种和方向下最近一次成功的跟单开仓记录，用于账户持仓关联。"""
     with get_conn() as conn:
         row = conn.execute('''

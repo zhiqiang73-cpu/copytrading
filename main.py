@@ -23,7 +23,7 @@ import collector
 import config
 import database as db
 import reporter
-import trade_detector
+import scraper
 
 _colorama_init(autoreset=True)
 
@@ -73,42 +73,21 @@ def _resolve_uids(arg: str | None) -> list[str]:
 
 def cmd_search(nickname: str):
     _require_key()
-    print(f"搜索昵称：{nickname} …")
+    print(f"解析交易员：{nickname} …")
+
+    # 支持粘贴个人主页 URL 或直接传 UID
+    uid = scraper.extract_uid_from_url(nickname) or nickname
+    if not uid:
+        print(f"{Fore.RED}无法解析交易员 UID，请粘贴个人主页链接或 UID。{Style.RESET_ALL}")
+        return
+
+    detail = None
     try:
-        results = api_client.search_trader(nickname)
+        detail = scraper.fetch_trader_detail(uid)
     except Exception as exc:
-        print(f"{Fore.RED}搜索失败：{exc}{Style.RESET_ALL}")
-        sys.exit(1)
+        print(f"{Fore.YELLOW}警告：获取交易员信息失败，继续添加：{exc}{Style.RESET_ALL}")
 
-    if not results:
-        print("未找到匹配的交易员。")
-        return
-
-    print(f"\n找到 {len(results)} 名交易员：\n")
-    for i, r in enumerate(results[:10], 1):
-        uid  = r.get("traderUid") or r.get("uid", "")
-        nick = r.get("traderNickName") or r.get("nickName", uid)
-        print(f"  {i}. [{uid[:12]}]  {nick}")
-
-    if len(results) == 1:
-        choice = 1
-    else:
-        raw = input("\n输入序号添加到追踪列表（回车跳过）：").strip()
-        if not raw:
-            return
-        try:
-            choice = int(raw)
-        except ValueError:
-            print("无效输入，已取消。")
-            return
-
-    if not (1 <= choice <= len(results)):
-        print("序号超出范围。")
-        return
-
-    selected = results[choice - 1]
-    uid  = selected.get("traderUid") or selected.get("uid", "")
-    nick = selected.get("traderNickName") or selected.get("nickName", uid)
+    nick = (detail.get("name") if isinstance(detail, dict) else None) or uid
 
     print(f"\n正在初始化交易员 {nick}（这可能需要几十秒）…")
     collector.init_trader(uid, nick)

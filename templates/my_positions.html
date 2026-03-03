@@ -4,115 +4,245 @@
 {% block content %}
 <div class="space-y-6">
 
-    <div class="flex items-center justify-between">
+    <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-2">
         <div>
-            <h1 class="text-2xl font-bold text-white">我的持仓</h1>
-            <p class="text-gray-400 mt-1 text-sm">配置交易 API，选择跟单对象，实时监控并自动下单。</p>
+            <h1 class="text-3xl font-extrabold text-white tracking-tight">跟单管理中心</h1>
+            <p class="text-gray-400 mt-2 text-sm flex items-center">
+                <svg class="w-4 h-4 mr-1.5 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                        d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                配置交易 API，选择跟单对象，实时监控并自动下单。
+            </p>
         </div>
-        <!-- 引擎状态指示 -->
-        <div id="engine-badge" class="flex items-center space-x-2 px-4 py-2 rounded-lg border text-sm font-medium border-gray-600 bg-dark-card text-gray-400">
-            <span class="w-2 h-2 rounded-full bg-gray-500"></span>
-            <span>引擎已停止</span>
+        <!-- 引擎状态指示（右上角徽章） -->
+        <div id="engine-badge"
+            class="flex items-center space-x-3 px-6 py-3 rounded-2xl border-2 transition-all duration-300 shadow-xl border-gray-700 bg-dark-card text-gray-400">
+            <div class="relative">
+                <span id="badge-dot" class="block w-3 h-3 rounded-full bg-gray-500"></span>
+            </div>
+            <span id="badge-text" class="font-bold text-sm tracking-wide">跟单引擎未启动</span>
         </div>
     </div>
 
     <div id="page-msg" class="hidden px-4 py-3 rounded-lg text-sm font-medium"></div>
 
     <!-- ① API 密钥配置 -->
-    <section class="bg-dark-card border border-dark-border rounded-xl p-5">
-        <div class="flex items-center justify-between mb-4">
-            <h2 class="text-lg font-semibold text-white">① 交易 API 密钥</h2>
-            <span class="text-xs text-gray-500 bg-dark-bg px-2 py-1 rounded">仅存本地数据库，不上传任何服务器</span>
-        </div>
-        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <div>
-                <label class="block text-sm text-gray-300 mb-1.5">API Key</label>
-                <input id="api_key" type="text" autocomplete="off"
-                       class="w-full bg-dark-bg border border-dark-border rounded-lg px-4 py-2.5 text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 text-sm font-mono"
-                       placeholder="bg_xxxxxxxxxxxxxxxx">
+    <section
+        class="bg-dark-card border border-dark-border rounded-2xl overflow-hidden shadow-xl transition-all hover:border-blue-500/20">
+        <div class="flex items-center justify-between p-6 cursor-pointer hover:bg-white/5 transition-colors"
+            onclick="toggleSection('section-api')">
+            <div class="flex items-center space-x-4">
+                <div
+                    class="w-10 h-10 rounded-xl bg-blue-600/10 flex items-center justify-center border border-blue-500/20">
+                    <span class="text-blue-500 font-black text-lg">1</span>
+                </div>
+                <div>
+                    <h2 class="text-xl font-bold text-white tracking-tight">API 密钥配置</h2>
+                    <p class="text-xs text-gray-500 mt-0.5">连接您的 Bitget 账户，数据仅存储在您的设备中</p>
+                </div>
             </div>
-            <div>
-                <label class="block text-sm text-gray-300 mb-1.5">Secret Key</label>
-                <input id="api_secret" type="password" autocomplete="new-password"
-                       class="w-full bg-dark-bg border border-dark-border rounded-lg px-4 py-2.5 text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 text-sm font-mono"
-                       placeholder="••••••••••••••••">
-            </div>
-            <div>
-                <label class="block text-sm text-gray-300 mb-1.5">Passphrase</label>
-                <input id="api_passphrase" type="password" autocomplete="new-password"
-                       class="w-full bg-dark-bg border border-dark-border rounded-lg px-4 py-2.5 text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 text-sm"
-                       placeholder="你在 Bitget 设置的 passphrase">
+            <div
+                class="flex items-center space-x-3 text-xs text-gray-400 select-none px-3 py-1.5 rounded-full bg-dark-bg/60 border border-dark-border hover:text-white transition-all">
+                <span id="label-api" class="font-bold">收起</span>
+                <svg id="icon-api" class="w-4 h-4 text-gray-400 transform transition-transform duration-300 rotate-180"
+                    fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+                </svg>
             </div>
         </div>
-        <div class="flex items-center space-x-3 mt-4">
-            <button id="btn-test" onclick="testApi()"
+        <div id="section-api" class="p-5 pt-0 space-y-4 border-t border-dark-border/30 mt-0">
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4 pt-4">
+                <div>
+                    <label class="block text-sm text-gray-300 mb-1.5">API Key</label>
+                    <input id="api_key" type="text" autocomplete="off"
+                        class="w-full bg-dark-bg border border-dark-border rounded-lg px-4 py-2.5 text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 text-sm font-mono"
+                        placeholder="bg_xxxxxxxxxxxxxxxx">
+                </div>
+                <div>
+                    <label class="block text-sm text-gray-300 mb-1.5">Secret Key</label>
+                    <input id="api_secret" type="password" autocomplete="new-password"
+                        class="w-full bg-dark-bg border border-dark-border rounded-lg px-4 py-2.5 text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 text-sm font-mono"
+                        placeholder="••••••••••••••••">
+                </div>
+                <div>
+                    <label class="block text-sm text-gray-300 mb-1.5">Passphrase</label>
+                    <input id="api_passphrase" type="password" autocomplete="new-password"
+                        class="w-full bg-dark-bg border border-dark-border rounded-lg px-4 py-2.5 text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 text-sm"
+                        placeholder="你在 Bitget 设置的 passphrase">
+                </div>
+            </div>
+            <div class="flex items-center space-x-3 mt-4">
+                <button id="btn-test" onclick="testApi()"
                     class="bg-dark-bg border border-dark-border hover:border-blue-500/50 text-gray-200 px-4 py-2 rounded-lg text-sm transition-colors">
-                测试连接
-            </button>
-            <button id="btn-save" onclick="saveSettings()"
+                    测试连接
+                </button>
+                <button id="btn-save" onclick="saveSettings()"
                     class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm transition-colors">
-                保存配置
-            </button>
-            <span id="api-status" class="text-xs text-gray-500"></span>
+                    保存配置
+                </button>
+                <span id="api-status" class="text-xs text-gray-500"></span>
+            </div>
         </div>
     </section>
 
     <!-- ② 跟单参数 -->
-    <section class="bg-dark-card border border-dark-border rounded-xl p-5">
-        <h2 class="text-lg font-semibold text-white mb-4">② 资金 & 风控参数</h2>
-        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
-            <div>
-                <label class="block text-sm text-gray-300 mb-1.5">总分配资金（USDT）</label>
-                <input id="total_capital" type="number" min="0" step="10" onchange="computeAllocation()"
-                       class="w-full bg-dark-bg border border-dark-border rounded-lg px-4 py-2.5 text-white focus:outline-none focus:border-blue-500 text-sm"
-                       placeholder="例如 500">
-                <p class="text-xs text-gray-500 mt-1">从你账户拿出多少 USDT 用于跟单</p>
+    <section
+        class="bg-dark-card border border-dark-border rounded-2xl overflow-hidden shadow-xl transition-all hover:border-yellow-500/20">
+        <div class="flex items-center justify-between p-6 cursor-pointer hover:bg-white/5 transition-colors"
+            onclick="toggleSection('section-params')">
+            <div class="flex items-center space-x-4">
+                <div
+                    class="w-10 h-10 rounded-xl bg-yellow-600/10 flex items-center justify-center border border-yellow-500/20">
+                    <span class="text-yellow-500 font-black text-lg">2</span>
+                </div>
+                <div>
+                    <h2 class="text-xl font-bold text-white tracking-tight">资金与风控参数</h2>
+                    <p class="text-xs text-gray-500 mt-0.5">设置最大亏损、分配资金等风险指标</p>
+                </div>
             </div>
-            <div>
-                <label class="block text-sm text-gray-300 mb-1.5">
-                    单笔保证金上限 —— <span id="max_margin_pct_label" class="text-blue-400 font-medium">20%</span>
-                </label>
-                <input id="max_margin_pct" type="range" min="5" max="50" step="1" value="20"
-                       oninput="document.getElementById('max_margin_pct_label').textContent = this.value + '%'; computeAllocation();"
-                       class="w-full accent-blue-500">
-                <div class="flex justify-between text-xs text-gray-600 mt-1"><span>5%</span><span>50%</span></div>
-            </div>
-            <div>
-                <label class="block text-sm text-gray-300 mb-1.5">价差容忍度（%）</label>
-                <input id="price_tolerance" type="number" min="0" step="0.001"
-                       class="w-full bg-dark-bg border border-dark-border rounded-lg px-4 py-2.5 text-white focus:outline-none focus:border-blue-500 text-sm"
-                       placeholder="0.02">
-                <p class="text-xs text-gray-500 mt-1">当前价与入场价的最大偏差，BTC 65000 时约 <span class="text-gray-400" id="price-abs-hint">13 USDT</span></p>
+            <div
+                class="flex items-center space-x-3 text-xs text-gray-400 select-none px-3 py-1.5 rounded-full bg-dark-bg/60 border border-dark-border hover:text-white transition-all">
+                <span id="label-params" class="font-bold">收起</span>
+                <svg id="icon-params"
+                    class="w-4 h-4 text-gray-400 transform transition-transform duration-300 rotate-180" fill="none"
+                    stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+                </svg>
             </div>
         </div>
-        <div class="mt-4 p-3 bg-dark-bg rounded-lg">
-            <div class="text-sm text-gray-300" id="allocation-summary">跟 <strong class="text-white">0</strong> 人，每人分配 <strong class="text-blue-400">0 USDT</strong>，单笔保证金上限 <strong class="text-yellow-400">0 USDT</strong></div>
+        <div id="section-params" class="p-5 pt-0 space-y-4 border-t border-dark-border/30">
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6 pt-4">
+                <div>
+                    <label class="block text-sm text-gray-300 mb-1.5">总分配资金（USDT）</label>
+                    <input id="total_capital" type="number" min="0" step="10" onchange="computeAllocation()"
+                        class="w-full bg-dark-bg border border-dark-border rounded-lg px-4 py-2.5 text-white focus:outline-none focus:border-blue-500 text-sm"
+                        placeholder="例如 500">
+                    <p class="text-xs text-gray-500 mt-1">从你账户拿出多少 USDT 用于跟单</p>
+                </div>
+                <div>
+                    <label class="block text-sm text-gray-300 mb-1.5">
+                        单笔保证金上限 —— <span id="max_margin_pct_label" class="text-blue-400 font-medium">20%</span>
+                    </label>
+                    <input id="max_margin_pct" type="range" min="5" max="50" step="1" value="20"
+                        oninput="document.getElementById('max_margin_pct_label').textContent = this.value + '%'; computeAllocation();"
+                        class="w-full accent-blue-500">
+                    <div class="flex justify-between text-xs text-gray-600 mt-1"><span>5%</span><span>50%</span></div>
+                </div>
+                <div>
+                    <label class="block text-sm text-gray-300 mb-1.5">价差容忍度（%）</label>
+                    <input id="price_tolerance" type="number" min="0" step="0.001"
+                        class="w-full bg-dark-bg border border-dark-border rounded-lg px-4 py-2.5 text-white focus:outline-none focus:border-blue-500 text-sm"
+                        placeholder="0.02">
+                    <p class="text-xs text-gray-500 mt-1">当前价与入场价的最大偏差，BTC 65000 时约 <span class="text-gray-400"
+                            id="price-abs-hint">13 USDT</span></p>
+                </div>
+            </div>
+            <div class="p-3 bg-dark-bg rounded-lg">
+                <div class="text-sm text-gray-300" id="allocation-summary">跟 <strong class="text-white">0</strong>
+                    人，每人分配 <strong class="text-blue-400">0 USDT</strong>，单笔保证金上限 <strong class="text-yellow-400">0
+                        USDT</strong></div>
+            </div>
         </div>
     </section>
 
-    <!-- ③ 跟单对象 -->
-    <section class="bg-dark-card border border-dark-border rounded-xl p-5">
-        <div class="flex items-center justify-between mb-4">
-            <h2 class="text-lg font-semibold text-white">③ 跟单对象</h2>
-            <button onclick="saveSettings()" class="text-xs text-blue-400 hover:text-blue-300 border border-blue-500/30 px-3 py-1.5 rounded-lg">保存选择</button>
+    <!-- ③ 跟单对象（已选择跟单的 Bitget 交易员） -->
+    <section
+        class="bg-dark-card border border-dark-border rounded-2xl overflow-hidden shadow-xl transition-all hover:border-green-500/20">
+        <div class="flex items-center justify-between p-6 cursor-pointer hover:bg-white/5 transition-colors"
+            onclick="toggleSection('section-traders')">
+            <div class="flex items-center space-x-4">
+                <div
+                    class="w-10 h-10 rounded-xl bg-green-600/10 flex items-center justify-center border border-green-500/20">
+                    <span class="text-green-500 font-black text-lg">3</span>
+                </div>
+                <div>
+                    <h2 class="text-xl font-bold text-white tracking-tight">Bitget 跟单中 <span id="bitget-copy-count"
+                            class="text-sm font-normal text-green-400 ml-2"></span></h2>
+                    <p class="text-xs text-gray-500 mt-0.5">在首页交易员卡片上点击"+ 跟单"来添加</p>
+                </div>
+            </div>
+            <div
+                class="flex items-center space-x-3 text-xs text-gray-400 select-none px-3 py-1.5 rounded-full bg-dark-bg/60 border border-dark-border hover:text-white transition-all">
+                <span id="label-traders" class="font-bold">收起</span>
+                <svg id="icon-traders"
+                    class="w-4 h-4 text-gray-400 transform transition-transform duration-300 rotate-180" fill="none"
+                    stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+                </svg>
+            </div>
         </div>
-        <div id="trader-list" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3"></div>
-        <div id="trader-empty" class="text-sm text-gray-500 py-4 hidden">暂无追踪交易员，请先在首页添加。</div>
+        <div id="section-traders" class="p-5 pt-0 border-t border-dark-border/30">
+            <div id="trader-list" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 pt-4"></div>
+            <div id="trader-empty" class="text-sm text-gray-500 py-4 hidden">
+                <div class="text-center py-6">
+                    <div class="text-3xl mb-2">📊</div>
+                    <div class="text-gray-400 mb-1">暂无跟单的 Bitget 交易员</div>
+                    <div class="text-gray-600 text-xs">请到首页，在交易员卡片上点击 <span class="text-blue-400">"+ 跟单"</span> 按钮</div>
+                </div>
+            </div>
+        </div>
     </section>
 
-    <!-- ④ 控制面板 + 实时持仓 + 历史记录 -->
+    <!-- ④ 币安跟单交易员（已选择跟单的） -->
+    <section
+        class="bg-dark-card border border-dark-border rounded-2xl overflow-hidden shadow-xl transition-all hover:border-yellow-400/20">
+        <div class="flex items-center justify-between p-6 cursor-pointer hover:bg-white/5 transition-colors"
+            onclick="toggleSection('section-binance')">
+            <div class="flex items-center space-x-4">
+                <div
+                    class="w-10 h-10 rounded-xl bg-yellow-500/10 flex items-center justify-center border border-yellow-400/20">
+                    <span class="text-yellow-400 font-black text-lg">4</span>
+                </div>
+                <div>
+                    <h2 class="text-xl font-bold text-white tracking-tight">币安 跟单中 <span id="binance-copy-count"
+                            class="text-sm font-normal text-yellow-400 ml-2"></span></h2>
+                    <p class="text-xs text-gray-500 mt-0.5">在首页币安交易员卡片上点击"+ 跟单"来添加</p>
+                </div>
+            </div>
+            <div
+                class="flex items-center space-x-3 text-xs text-gray-400 select-none px-3 py-1.5 rounded-full bg-dark-bg/60 border border-dark-border hover:text-white transition-all">
+                <span id="label-binance" class="font-bold">收起</span>
+                <svg id="icon-binance"
+                    class="w-4 h-4 text-gray-400 transform transition-transform duration-300 rotate-180" fill="none"
+                    stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+                </svg>
+            </div>
+        </div>
+        <div id="section-binance" class="p-5 pt-0 border-t border-dark-border/30">
+            <!-- 已启用跟单的币安交易员列表 -->
+            <div id="bn-list" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 pt-4"></div>
+            <div id="bn-empty" class="text-sm text-gray-500 py-4 hidden">
+                <div class="text-center py-6">
+                    <div class="text-3xl mb-2">🟡</div>
+                    <div class="text-gray-400 mb-1">暂无跟单的币安交易员</div>
+                    <div class="text-gray-600 text-xs">请到首页，在币安交易员卡片上点击 <span class="text-yellow-400">"+ 跟单"</span> 按钮
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- ⑤ 控制面板 + 实时持仓 + 历史记录 -->
     <section class="bg-dark-card border border-dark-border rounded-xl p-5 space-y-6">
 
         <!-- 控制按钮 -->
-        <div class="flex items-center space-x-3">
+        <div class="flex items-center space-x-3 flex-wrap gap-y-2">
             <button id="btn-start" onclick="toggleEngine(true)"
-                    class="flex items-center space-x-2 bg-green-600 hover:bg-green-700 disabled:opacity-40 text-white px-5 py-2.5 rounded-lg text-sm font-medium transition-colors">
-                <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20"><path d="M6.3 2.841A1.5 1.5 0 004 4.11V15.89a1.5 1.5 0 002.3 1.269l9.344-5.89a1.5 1.5 0 000-2.538L6.3 2.84z"/></svg>
+                class="flex items-center space-x-2 bg-green-600 hover:bg-green-700 disabled:opacity-40 text-white px-5 py-2.5 rounded-lg text-sm font-medium transition-colors">
+                <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                    <path
+                        d="M6.3 2.841A1.5 1.5 0 004 4.11V15.89a1.5 1.5 0 002.3 1.269l9.344-5.89a1.5 1.5 0 000-2.538L6.3 2.84z" />
+                </svg>
                 <span>启动跟单引擎</span>
             </button>
             <button id="btn-stop" onclick="toggleEngine(false)"
-                    class="flex items-center space-x-2 bg-red-600/80 hover:bg-red-600 text-white px-5 py-2.5 rounded-lg text-sm font-medium transition-colors">
-                <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20"><path d="M5 4a1 1 0 00-1 1v10a1 1 0 001 1h3a1 1 0 001-1V5a1 1 0 00-1-1H5zm7 0a1 1 0 00-1 1v10a1 1 0 001 1h3a1 1 0 001-1V5a1 1 0 00-1-1h-3z"/></svg>
+                class="flex items-center space-x-2 bg-red-600/80 hover:bg-red-600 text-white px-5 py-2.5 rounded-lg text-sm font-medium transition-colors">
+                <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                    <path
+                        d="M5 4a1 1 0 00-1 1v10a1 1 0 001 1h3a1 1 0 001-1V5a1 1 0 00-1-1H5zm7 0a1 1 0 00-1 1v10a1 1 0 001 1h3a1 1 0 001-1V5a1 1 0 00-1-1h-3z" />
+                </svg>
                 <span>停止引擎</span>
             </button>
             <div class="flex-1 text-xs text-gray-500">
@@ -120,12 +250,73 @@
             </div>
         </div>
 
+        <!-- 引擎运行状态闪灯横幅 -->
+        <div id="engine-running-banner"
+            class="hidden items-center space-x-4 px-5 py-4 rounded-xl border-2 border-green-500/60 bg-green-500/10"
+            style="animation: bannerPulse 2s ease-in-out infinite;">
+            <div class="relative flex-shrink-0">
+                <span class="block w-4 h-4 rounded-full bg-green-400"
+                    style="animation: lightBlink 1s steps(1) infinite;"></span>
+                <span class="absolute inset-0 rounded-full bg-green-400 opacity-50"
+                    style="animation: lightGlow 1s ease-out infinite;"></span>
+            </div>
+            <div class="flex-1">
+                <p class="text-green-300 font-bold text-sm">跟单引擎运行中</p>
+                <p id="engine-start-time" class="text-green-500/70 text-xs mt-0.5">正在自动监控持仓变动，每 2.5 秒扫描一次</p>
+            </div>
+            <div class="text-green-400/60 text-xs font-mono" id="engine-tick">●</div>
+        </div>
+        <style>
+            @keyframes lightBlink {
+
+                0%,
+                49% {
+                    opacity: 1;
+                }
+
+                50%,
+                100% {
+                    opacity: 0.1;
+                }
+            }
+
+            @keyframes lightGlow {
+                0% {
+                    transform: scale(1);
+                    opacity: 0.6;
+                }
+
+                100% {
+                    transform: scale(2.5);
+                    opacity: 0;
+                }
+            }
+
+            @keyframes bannerPulse {
+
+                0%,
+                100% {
+                    border-color: rgba(34, 197, 94, 0.6);
+                    background-color: rgba(34, 197, 94, 0.08);
+                }
+
+                50% {
+                    border-color: rgba(34, 197, 94, 0.35);
+                    background-color: rgba(34, 197, 94, 0.04);
+                }
+            }
+        </style>
+
         <!-- 当前持仓 -->
         <div>
             <div class="flex items-center justify-between mb-3">
                 <h3 class="text-sm font-semibold text-gray-200">📍 我的当前持仓</h3>
-                <button onclick="refreshPositions()" class="text-xs text-blue-400 hover:text-blue-300 flex items-center space-x-1">
-                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+                <button onclick="refreshPositions()"
+                    class="text-xs text-blue-400 hover:text-blue-300 flex items-center space-x-1">
+                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                    </svg>
                     <span>刷新</span>
                 </button>
             </div>
@@ -136,6 +327,7 @@
                             <th class="text-left px-4 py-2.5">品种</th>
                             <th class="text-center px-3 py-2.5">方向</th>
                             <th class="text-right px-3 py-2.5">杠杆</th>
+                            <th class="text-right px-3 py-2.5">持仓数量</th>
                             <th class="text-right px-3 py-2.5">开仓价</th>
                             <th class="text-right px-3 py-2.5">保证金(U)</th>
                             <th class="text-right px-3 py-2.5">浮盈亏</th>
@@ -152,8 +344,12 @@
         <div>
             <div class="flex items-center justify-between mb-3">
                 <h3 class="text-sm font-semibold text-gray-200">📋 跟单执行记录</h3>
-                <button onclick="refreshOrders()" class="text-xs text-blue-400 hover:text-blue-300 flex items-center space-x-1">
-                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+                <button onclick="refreshOrders()"
+                    class="text-xs text-blue-400 hover:text-blue-300 flex items-center space-x-1">
+                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                    </svg>
                     <span>刷新</span>
                 </button>
             </div>
@@ -162,6 +358,7 @@
                     <thead class="bg-dark-bg/60 text-gray-500 text-xs">
                         <tr>
                             <th class="text-left px-4 py-2.5">时间</th>
+                            <th class="text-left px-3 py-2.5">交易员</th>
                             <th class="text-left px-3 py-2.5">品种</th>
                             <th class="text-center px-3 py-2.5">操作</th>
                             <th class="text-center px-3 py-2.5">方向</th>
@@ -186,240 +383,619 @@
 
 {% block scripts %}
 <script>
-const state = { settings: null, traders: [] };
+    // Safari/Chrome 的 back-forward cache 可能恢复旧脚本状态，检测到持久化恢复时强制刷新一次
+    window.addEventListener('pageshow', (event) => {
+        if (event.persisted) {
+            window.location.reload();
+        }
+    });
 
-function setMsg(text, type) {
-    const box = document.getElementById('page-msg');
-    if (!text) { box.classList.add('hidden'); return; }
-    box.className = 'px-4 py-3 rounded-lg text-sm font-medium ' + (type === 'error'
-        ? 'bg-red-500/10 text-red-400 border border-red-500/20'
-        : 'bg-green-500/10 text-green-400 border border-green-500/20');
-    box.textContent = text;
-    box.classList.remove('hidden');
-    setTimeout(() => box.classList.add('hidden'), 5000);
-}
+    const state = { settings: null, traders: [] };
 
-function computeAllocation() {
-    const total = parseFloat(document.getElementById('total_capital').value || '0');
-    const pct = parseFloat(document.getElementById('max_margin_pct').value || '20') / 100;
-    const tol = parseFloat(document.getElementById('price_tolerance').value || '0') / 100;
-    const n = document.querySelectorAll('.trader-toggle:checked').length;
-    const perTrader = n ? total / n : 0;
-    const maxMargin = perTrader * pct;
+    function setMsg(text, type) {
+        const box = document.getElementById('page-msg');
+        if (!text) { box.classList.add('hidden'); return; }
+        box.className = 'px-4 py-3 rounded-lg text-sm font-medium ' + (type === 'error'
+            ? 'bg-red-500/10 text-red-400 border border-red-500/20'
+            : 'bg-green-500/10 text-green-400 border border-green-500/20');
+        box.textContent = text;
+        box.classList.remove('hidden');
+        setTimeout(() => box.classList.add('hidden'), 5000);
+    }
 
-    document.getElementById('allocation-summary').innerHTML =
-        `跟 <strong class="text-white">${n}</strong> 人，每人分配 <strong class="text-blue-400">${perTrader.toFixed(2)} USDT</strong>，单笔保证金上限 <strong class="text-yellow-400">${maxMargin.toFixed(2)} USDT</strong>`;
+    function toggleSection(id) {
+        const content = document.getElementById(id);
+        const key = id.split('-')[1];
+        const icon = document.getElementById('icon-' + key);
+        const label = document.getElementById('label-' + key);
+        const isHidden = content.classList.contains('hidden');
 
-    // BTC 参考价差（65000 * tol）
-    const absHint = (65000 * tol).toFixed(2);
-    document.getElementById('price-abs-hint').textContent = `${absHint} USDT`;
-}
+        if (isHidden) {
+            content.classList.remove('hidden');
+            icon.classList.add('rotate-180');
+            if (label) label.textContent = '收起';
+        } else {
+            content.classList.add('hidden');
+            icon.classList.remove('rotate-180');
+            if (label) label.textContent = '展开';
+        }
+    }
 
-function renderTraders() {
-    const list = document.getElementById('trader-list');
-    const empty = document.getElementById('trader-empty');
-    list.innerHTML = '';
-    if (!state.traders.length) { empty.classList.remove('hidden'); return; }
-    empty.classList.add('hidden');
-    const rawEnabled = state.settings.enabled_traders;
-    const enabledArr = Array.isArray(rawEnabled) ? rawEnabled
-        : (typeof rawEnabled === 'string' ? JSON.parse(rawEnabled || '[]') : []);
-    const enabledSet = new Set(enabledArr);
-    state.traders.forEach(t => {
-        const card = document.createElement('label');
-        const checked = enabledSet.has(t.uid);
-        card.className = `flex items-start space-x-3 bg-dark-bg border rounded-xl p-4 cursor-pointer transition-all ${checked ? 'border-blue-500/50 bg-blue-500/5' : 'border-dark-border hover:border-gray-500'}`;
-        card.innerHTML = `
-            <input type="checkbox" class="trader-toggle mt-0.5 w-4 h-4 accent-blue-500 rounded"
-                   data-uid="${t.uid}" ${checked ? 'checked' : ''}>
+    function getEnabledBitgetUids() {
+        const checked = Array.from(document.querySelectorAll('.trader-toggle:checked')).map(el => el.dataset.uid);
+        if (checked.length) return checked;
+        const raw = (state.settings && state.settings.enabled_traders) ? state.settings.enabled_traders : [];
+        if (Array.isArray(raw)) return raw;
+        if (typeof raw === 'string') {
+            try { return JSON.parse(raw || '[]'); } catch (e) { return []; }
+        }
+        return [];
+    }
+
+    function getEnabledBinancePids() {
+        return (bnTraders || []).filter(t => t.copy_enabled === true).map(t => t.pid);
+    }
+
+    function serializeBinanceTraders() {
+        const out = {};
+        (bnTraders || []).forEach(t => {
+            if (!t || !t.pid) return;
+            out[t.pid] = {
+                nickname: t.name || `币安_${String(t.pid).substring(0, 8)}`,
+                follower_count: Number(t.followers || 0),
+                copier_pnl: Number(t.copier_pnl || 0),
+                aum: Number(t.aum || 0),
+                total_trades: Number(t.total_trades || 0),
+                avatar: t.avatar || '',
+                copy_enabled: t.copy_enabled === true,
+            };
+        });
+        return out;
+    }
+
+    function parseNumberOrFallback(id, fallback) {
+        const el = document.getElementById(id);
+        const raw = (el && typeof el.value === 'string') ? el.value.trim() : '';
+        if (!raw) return Number(fallback || 0);
+        const n = parseFloat(raw);
+        return Number.isFinite(n) ? n : Number(fallback || 0);
+    }
+
+    function computeAllocation() {
+        const total = parseFloat(document.getElementById('total_capital').value || '0');
+        const pct = parseFloat(document.getElementById('max_margin_pct').value || '20') / 100;
+        const tol = parseFloat(document.getElementById('price_tolerance').value || '0') / 100;
+        const n = getEnabledBitgetUids().length + getEnabledBinancePids().length;
+        const perTrader = n ? total / n : 0;
+        const maxMargin = perTrader * pct;
+
+        document.getElementById('allocation-summary').innerHTML =
+            `跟 <strong class="text-white">${n}</strong> 人，每人分配 <strong class="text-blue-400">${perTrader.toFixed(2)} USDT</strong>，单笔保证金上限 <strong class="text-yellow-400">${maxMargin.toFixed(2)} USDT</strong>`;
+
+        // BTC 参考价差（65000 * tol）
+        const absHint = (65000 * tol).toFixed(2);
+        document.getElementById('price-abs-hint').textContent = `${absHint} USDT`;
+    }
+
+    function renderTraders() {
+        const list = document.getElementById('trader-list');
+        const empty = document.getElementById('trader-empty');
+        const countEl = document.getElementById('bitget-copy-count');
+        list.innerHTML = '';
+
+        // 获取已启用跟单的交易员 UID 列表
+        const rawEnabled = state.settings.enabled_traders;
+        const enabledArr = Array.isArray(rawEnabled) ? rawEnabled
+            : (typeof rawEnabled === 'string' ? JSON.parse(rawEnabled || '[]') : []);
+        const enabledSet = new Set(enabledArr);
+
+        // 只显示已启用跟单的交易员
+        const enabledTraders = state.traders.filter(t => enabledSet.has(t.uid));
+
+        // 更新计数
+        if (countEl) countEl.textContent = enabledTraders.length > 0 ? `(${enabledTraders.length}人)` : '';
+
+        if (!enabledTraders.length) {
+            empty.classList.remove('hidden');
+            return;
+        }
+        empty.classList.add('hidden');
+
+        enabledTraders.forEach(t => {
+            const card = document.createElement('div');
+            card.className = 'flex items-start space-x-3 bg-dark-bg border border-green-500/30 rounded-xl p-4 transition-all hover:border-green-400/50';
+            card.innerHTML = `
+            <div class="w-8 h-8 rounded-full bg-green-500/20 flex items-center justify-center flex-shrink-0">
+                <span class="text-green-400 text-sm">✓</span>
+            </div>
             <div class="flex-1 min-w-0">
                 <div class="flex items-center space-x-2">
                     <span class="text-white font-medium text-sm truncate">${t.name}</span>
-                    <span class="text-xs text-gray-600 font-mono">${t.uid.slice(0,6)}…</span>
+                    <span class="text-xs text-gray-600 font-mono">${t.uid.slice(0, 6)}…</span>
                 </div>
                 <div class="text-xs text-gray-500 mt-1 space-x-3">
                     <span>胜率 <span class="text-green-400">${t.win_rate}%</span></span>
                     <span>回撤 <span class="text-red-400">${t.max_drawdown}%</span></span>
                     <span>持仓 <span class="text-blue-400">${t.positions}</span></span>
                 </div>
-            </div>`;
-        list.appendChild(card);
-    });
-    document.querySelectorAll('.trader-toggle').forEach(el => {
-        el.addEventListener('change', (e) => {
-            const label = e.target.closest('label');
-            label.className = label.className.replace(/border-blue-500\/50 bg-blue-500\/5|border-dark-border hover:border-gray-500/g, '');
-            label.className += e.target.checked ? ' border-blue-500/50 bg-blue-500/5' : ' border-dark-border hover:border-gray-500';
-            computeAllocation();
+            </div>
+            <button class="trader-stop-btn shrink-0 text-gray-500 hover:text-red-400 transition-colors text-xs px-2 py-1 rounded border border-gray-700 hover:border-red-500/50"
+                    data-uid="${t.uid}" data-name="${t.name.replace(/"/g, '&quot;')}"
+                    title="停止跟单">停止跟单</button>`;
+            list.appendChild(card);
         });
-    });
-}
 
-async function loadSettings() {
-    const res = await fetch('/api/copy/settings');
-    const data = await res.json();
-    state.settings = data;
-    state.traders = data.traders || [];
+        // 绑定"停止跟单"按钮事件
+        document.querySelectorAll('.trader-stop-btn').forEach(btn => {
+            btn.addEventListener('click', async (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                const uid = btn.dataset.uid;
+                const name = btn.dataset.name;
+                if (!confirm(`确定停止跟单 ${name}？`)) return;
 
-    document.getElementById('api_key').value = data.api_key || '';
-    document.getElementById('api_secret').value = data.api_secret ? '••••••••' : '';
-    document.getElementById('api_passphrase').value = data.api_passphrase ? '••••••••' : '';
-    document.getElementById('total_capital').value = data.total_capital || '';
-    const pctVal = Math.round((data.max_margin_pct || 0.2) * 100);
-    document.getElementById('max_margin_pct').value = pctVal;
-    document.getElementById('max_margin_pct_label').textContent = pctVal + '%';
-    document.getElementById('price_tolerance').value = ((data.price_tolerance || 0.0002) * 100).toFixed(4);
+                btn.disabled = true;
+                btn.textContent = '...';
 
-    renderTraders();
-    computeAllocation();
-    updateEngineBadge(data.engine_enabled);
-}
-
-async function saveSettings() {
-    const enabled = Array.from(document.querySelectorAll('.trader-toggle:checked')).map(el => el.dataset.uid);
-    const apiKey = document.getElementById('api_key').value.trim();
-    const apiSecret = document.getElementById('api_secret').value.trim();
-    const apiPass = document.getElementById('api_passphrase').value.trim();
-
-    const payload = {
-        api_key: apiKey,
-        api_secret: apiSecret === '••••••••' ? '' : apiSecret,
-        api_passphrase: apiPass === '••••••••' ? '' : apiPass,
-        total_capital: parseFloat(document.getElementById('total_capital').value || '0'),
-        max_margin_pct: parseFloat(document.getElementById('max_margin_pct').value || '20') / 100,
-        price_tolerance: parseFloat(document.getElementById('price_tolerance').value || '0') / 100,
-        enabled_traders: enabled,
-    };
-    const res = await apiPost('/api/copy/settings', payload);
-    if (res.error) { setMsg(res.error, 'error'); return; }
-    setMsg('配置已保存', 'success');
-    await loadSettings();
-}
-
-async function testApi() {
-    const apiKey = document.getElementById('api_key').value.trim();
-    const apiSecret = document.getElementById('api_secret').value.trim();
-    const apiPass = document.getElementById('api_passphrase').value.trim();
-    const status = document.getElementById('api-status');
-    status.textContent = '测试中…';
-    status.className = 'text-xs text-gray-400';
-    const res = await apiPost('/api/copy/test_api', {
-        api_key: apiKey,
-        api_secret: apiSecret === '••••••••' ? '' : apiSecret,
-        api_passphrase: apiPass === '••••••••' ? '' : apiPass,
-    });
-    if (res.error) {
-        status.textContent = '✗ ' + res.error;
-        status.className = 'text-xs text-red-400';
-        return;
+                const res = await apiPost('/api/toggle_copy', { uid, source: 'bitget', enabled: false });
+                if (res.ok) {
+                    setMsg(`已停止跟单 ${name}`, 'success');
+                    await loadSettings();
+                } else {
+                    setMsg(res.error || '操作失败', 'error');
+                    btn.disabled = false;
+                    btn.textContent = '停止跟单';
+                }
+            });
+        });
     }
-    status.textContent = '✓ ' + (res.msg || '连接成功');
-    status.className = 'text-xs text-green-400';
-}
 
-function updateEngineBadge(running) {
-    const badge = document.getElementById('engine-badge');
-    if (running) {
-        badge.className = 'flex items-center space-x-2 px-4 py-2 rounded-lg border text-sm font-medium border-green-500/40 bg-green-500/10 text-green-400';
-        badge.innerHTML = '<span class="w-2 h-2 rounded-full bg-green-400 animate-pulse"></span><span>引擎运行中</span>';
-    } else {
-        badge.className = 'flex items-center space-x-2 px-4 py-2 rounded-lg border text-sm font-medium border-gray-600 bg-dark-card text-gray-400';
-        badge.innerHTML = '<span class="w-2 h-2 rounded-full bg-gray-500"></span><span>引擎已停止</span>';
+    async function loadSettings() {
+        const res = await fetch('/api/copy/settings');
+        const data = await res.json();
+        state.settings = data;
+        state.traders = data.traders || [];
+
+        document.getElementById('api_key').value = data.api_key || '';
+        document.getElementById('api_secret').value = data.api_secret ? '••••••••' : '';
+        document.getElementById('api_passphrase').value = data.api_passphrase ? '••••••••' : '';
+        document.getElementById('total_capital').value = data.total_capital || '';
+        const pctVal = Math.round((data.max_margin_pct || 0.2) * 100);
+        document.getElementById('max_margin_pct').value = pctVal;
+        document.getElementById('max_margin_pct_label').textContent = pctVal + '%';
+        document.getElementById('price_tolerance').value = ((data.price_tolerance || 0.0002) * 100).toFixed(4);
+
+        // 加载币安交易员列表（新格式：字典）
+        let rawBn = data.binance_traders || {};
+        if (typeof rawBn === 'string') {
+            try { rawBn = JSON.parse(rawBn); } catch (e) { rawBn = {}; }
+        }
+
+        // 转换为数组格式
+        if (typeof rawBn === 'object' && !Array.isArray(rawBn)) {
+            bnTraders = Object.entries(rawBn).map(([pid, info]) => ({
+                pid,
+                name: info.nickname || `币安_${pid.substring(0, 8)}`,
+                copy_enabled: info.copy_enabled === true,
+                copier_pnl: info.copier_pnl || 0,
+                aum: info.aum || 0,
+                followers: info.follower_count || 0,
+                total_trades: info.total_trades || 0,
+                avatar: info.avatar || ''
+            }));
+        } else if (Array.isArray(rawBn)) {
+            // 旧格式兼容
+            bnTraders = rawBn.map(pid => ({ pid, name: pid, copy_enabled: true, copier_pnl: 0, aum: 0, followers: 0, total_trades: 0, avatar: '' }));
+        }
+        renderBnList();
+
+        // 关键：重新渲染（刷新DOM）
+        renderTraders();
+        computeAllocation();
+        updateEngineBadge(data.engine_enabled);
     }
-}
 
-async function toggleEngine(start) {
-    const res = await apiPost(start ? '/api/copy/start' : '/api/copy/stop', {});
-    if (res.error) { setMsg(res.error, 'error'); return; }
-    setMsg(res.msg || '操作成功', 'success');
-    updateEngineBadge(start);
-    if (start) { setTimeout(refreshPositions, 3000); }
-}
+    // ── 币安交易员管理（只显示已启用跟单的） ──
+    let bnTraders = []; // [{pid, name, copy_enabled, ...}]
 
-function fmtTs(ts) {
-    if (!ts) return '-';
-    const d = new Date(ts);
-    return `${d.getMonth()+1}-${String(d.getDate()).padStart(2,'0')} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}`;
-}
+    function renderBnList() {
+        const list = document.getElementById('bn-list');
+        const empty = document.getElementById('bn-empty');
+        const countEl = document.getElementById('binance-copy-count');
+        list.innerHTML = '';
 
-function statusBadge(s) {
-    const map = {
-        filled:  'bg-green-500/10 text-green-400 border-green-500/20',
-        skipped: 'bg-yellow-500/10 text-yellow-400 border-yellow-500/20',
-        failed:  'bg-red-500/10 text-red-400 border-red-500/20',
-    };
-    const cls = map[s] || 'bg-gray-500/10 text-gray-400 border-gray-500/20';
-    const label = { filled: '成交', skipped: '跳过(价差)', failed: '失败' }[s] || s;
-    return `<span class="px-2 py-0.5 rounded text-xs font-medium border ${cls}">${label}</span>`;
-}
+        // 只显示已启用跟单的
+        const enabledBn = bnTraders.filter(t => t.copy_enabled === true);
 
-async function refreshPositions() {
-    const body = document.getElementById('positions-body');
-    const empty = document.getElementById('positions-empty');
-    body.innerHTML = '<tr><td colspan="7" class="px-4 py-4 text-center text-gray-600 text-xs">加载中…</td></tr>';
-    const res = await fetch('/api/copy/positions');
-    const data = await res.json();
-    body.innerHTML = '';
-    if (data.error) {
-        empty.textContent = data.error;
-        empty.classList.remove('hidden');
-        return;
+        // 更新计数
+        if (countEl) countEl.textContent = enabledBn.length > 0 ? `(${enabledBn.length}人)` : '';
+
+        if (!enabledBn.length) { empty.classList.remove('hidden'); return; }
+        empty.classList.add('hidden');
+
+        enabledBn.forEach((t) => {
+            const card = document.createElement('div');
+            card.className = 'flex items-start space-x-3 bg-dark-bg border border-yellow-400/30 rounded-xl p-4 transition-all hover:border-yellow-400/50';
+
+            // 格式化数字
+            function formatNum(n) {
+                if (n >= 1000000) return (n / 1000000).toFixed(2) + 'M';
+                if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
+                return n.toFixed(0);
+            }
+            const pnlStr = t.copier_pnl > 0 ? `+$${formatNum(t.copier_pnl)}` : t.copier_pnl < 0 ? `-$${formatNum(Math.abs(t.copier_pnl))}` : '$0';
+            const pnlColor = t.copier_pnl > 0 ? 'text-green-400' : t.copier_pnl < 0 ? 'text-red-400' : 'text-gray-400';
+
+            card.innerHTML = `
+            <div class="w-8 h-8 rounded-full bg-yellow-500/20 flex items-center justify-center flex-shrink-0">
+                <span class="text-yellow-400 text-sm">✓</span>
+            </div>
+            <div class="flex-1 min-w-0">
+                <div class="text-white font-medium text-sm">${t.name || '未命名'}</div>
+                <div class="text-xs text-gray-500 font-mono mt-0.5">${t.pid.substring(0, 16)}…</div>
+                <div class="flex gap-4 mt-2 text-xs">
+                    <span class="text-gray-500">收益: <span class="${pnlColor} font-medium">${pnlStr}</span></span>
+                    <span class="text-gray-500">跟单: <span class="text-yellow-400 font-medium">${t.followers || '—'}</span></span>
+                </div>
+            </div>
+            <button class="bn-stop shrink-0 text-gray-500 hover:text-red-400 transition-colors text-xs px-2 py-1 rounded border border-gray-700 hover:border-red-500/50"
+                    data-pid="${t.pid}" data-name="${(t.name || '').replace(/"/g, '&quot;')}"
+                    title="停止跟单">停止跟单</button>`;
+            list.appendChild(card);
+        });
+
+        // 绑定"停止跟单"按钮
+        document.querySelectorAll('.bn-stop').forEach(btn => {
+            btn.addEventListener('click', async e => {
+                e.preventDefault();
+                e.stopPropagation();
+                const pid = btn.dataset.pid;
+                const name = btn.dataset.name;
+                if (!confirm(`确定停止跟单 ${name}？`)) return;
+
+                btn.disabled = true;
+                btn.textContent = '...';
+
+                const res = await apiPost('/api/toggle_copy', { uid: pid, source: 'binance', enabled: false });
+                if (res.ok) {
+                    setMsg(`已停止跟单 ${name}`, 'success');
+                    await loadSettings();
+                } else {
+                    setMsg(res.error || '操作失败', 'error');
+                    btn.disabled = false;
+                    btn.textContent = '停止跟单';
+                }
+            });
+        });
     }
-    const items = data.items || [];
-    if (!items.length) {
-        empty.textContent = '暂无持仓';
-        empty.classList.remove('hidden');
-        return;
+
+    async function addBinanceTrader() {
+        const urlOrPid = document.getElementById('bn-pid').value.trim();
+        if (!urlOrPid) { setMsg('请输入 URL 或 Portfolio ID', 'error'); return; }
+
+        setMsg('正在添加…', 'info');
+
+        try {
+            const res = await apiPost('/api/add_binance_trader', { url: urlOrPid });
+            if (res.error) {
+                setMsg('❌ ' + res.error, 'error');
+                return;
+            }
+
+            const info = res.info || {};
+            const pid = res.portfolio_id;
+
+            // 如果已存在则跳过
+            if (!bnTraders.find(t => t.pid === pid)) {
+                bnTraders.push({
+                    pid,
+                    name: info.nickname || pid,
+                    copy_enabled: true,
+                    copier_pnl: info.copier_pnl || 0,
+                    aum: info.aum || 0,
+                    followers: info.follower_count || 0,
+                    total_trades: info.total_trades || 0,
+                    avatar: info.avatar || ''
+                });
+            }
+
+            document.getElementById('bn-pid').value = '';
+            document.getElementById('bn-name').value = '';
+            renderBnList();
+            await saveSettings();
+
+            // 显示成功消息
+            if (info._warning) {
+                setMsg(`✓ 已添加 ${info.nickname || pid}（需要等待第一次操作记录同步）`, 'success');
+            } else {
+                setMsg(`✓ 已添加 ${info.nickname || pid}`, 'success');
+            }
+        } catch (e) {
+            setMsg('❌ 添加失败：' + (e.message || e), 'error');
+        }
     }
-    empty.classList.add('hidden');
-    items.forEach(p => {
-        const pnl = parseFloat(p.pnl) || 0;
-        const tr = document.createElement('tr');
+
+    async function saveSettings() {
+        const enabled = getEnabledBitgetUids();
+        const apiKey = document.getElementById('api_key').value.trim();
+        const apiSecret = document.getElementById('api_secret').value.trim();
+        const apiPass = document.getElementById('api_passphrase').value.trim();
+        const fallbackTotal = (state.settings && state.settings.total_capital) || 0;
+        const fallbackMarginPct = ((state.settings && state.settings.max_margin_pct) || 0.2) * 100;
+        const fallbackTolerance = ((state.settings && state.settings.price_tolerance) || 0.0002) * 100;
+
+        const payload = {
+            api_key: apiKey,
+            api_secret: apiSecret === '••••••••' ? '' : apiSecret,
+            api_passphrase: apiPass === '••••••••' ? '' : apiPass,
+            total_capital: parseNumberOrFallback('total_capital', fallbackTotal),
+            max_margin_pct: parseNumberOrFallback('max_margin_pct', fallbackMarginPct) / 100,
+            price_tolerance: parseNumberOrFallback('price_tolerance', fallbackTolerance) / 100,
+            enabled_traders: enabled,
+            binance_traders: serializeBinanceTraders(),
+        };
+        const res = await apiPost('/api/copy/settings', payload);
+        if (res.error) { setMsg(res.error, 'error'); return; }
+        setMsg('配置已保存', 'success');
+        await loadSettings();
+    }
+
+    async function testApi() {
+        const apiKey = document.getElementById('api_key').value.trim();
+        const apiSecret = document.getElementById('api_secret').value.trim();
+        const apiPass = document.getElementById('api_passphrase').value.trim();
+        const status = document.getElementById('api-status');
+        status.textContent = '测试中…';
+        status.className = 'text-xs text-gray-400';
+        const res = await apiPost('/api/copy/test_api', {
+            api_key: apiKey,
+            api_secret: apiSecret === '••••••••' ? '' : apiSecret,
+            api_passphrase: apiPass === '••••••••' ? '' : apiPass,
+        });
+        if (res.error) {
+            status.textContent = '✗ ' + res.error;
+            status.className = 'text-xs text-red-400';
+            return;
+        }
+        status.textContent = '✓ ' + (res.msg || '连接成功');
+        status.className = 'text-xs text-green-400';
+    }
+
+    let _tickTimer = null;
+
+    function updateEngineBadge(running) {
+        const badge = document.getElementById('engine-badge');
+        const dot = document.getElementById('badge-dot');
+        const text = document.getElementById('badge-text');
+        const banner = document.getElementById('engine-running-banner');
+
+        if (running) {
+            // 右上角徽章
+            badge.className = 'flex items-center space-x-2 px-4 py-2 rounded-lg border text-sm font-medium border-green-500/40 bg-green-500/10 text-green-400';
+            dot.className = 'w-2 h-2 rounded-full bg-green-400 animate-pulse';
+            text.textContent = '引擎运行中';
+
+            // 显示闪灯横幅
+            banner.classList.remove('hidden');
+            banner.classList.add('flex');
+
+            // 启动跳动的心跳点计时器
+            if (!_tickTimer) {
+                let tick = 0;
+                const dots = ['●', '◉', '●', '◉'];
+                _tickTimer = setInterval(() => {
+                    document.getElementById('engine-tick').textContent = dots[tick++ % dots.length];
+                }, 500);
+            }
+        } else {
+            // 右上角徽章恢复灰色
+            badge.className = 'flex items-center space-x-2 px-4 py-2 rounded-lg border text-sm font-medium border-gray-600 bg-dark-card text-gray-400';
+            dot.className = 'w-2 h-2 rounded-full bg-gray-500';
+            text.textContent = '引擎已停止';
+
+            // 自动隐藏闪灯横幅
+            banner.classList.add('hidden');
+            banner.classList.remove('flex');
+
+            // 清除心跳计时器
+            if (_tickTimer) { clearInterval(_tickTimer); _tickTimer = null; }
+        }
+    }
+
+    async function toggleEngine(start) {
+        if (start) {
+            // 启动前先自动保存当前勾选的交易员和所有参数，确保引擎用最新数据
+            const enabled = getEnabledBitgetUids();
+            const apiKey = document.getElementById('api_key').value.trim();
+            const apiSecret = document.getElementById('api_secret').value.trim();
+            const apiPass = document.getElementById('api_passphrase').value.trim();
+            const fallbackTotal = (state.settings && state.settings.total_capital) || 0;
+            const fallbackMarginPct = ((state.settings && state.settings.max_margin_pct) || 0.2) * 100;
+            const fallbackTolerance = ((state.settings && state.settings.price_tolerance) || 0.0002) * 100;
+            const savePayload = {
+                api_key: apiKey,
+                api_secret: apiSecret === '••••••••' ? '' : apiSecret,
+                api_passphrase: apiPass === '••••••••' ? '' : apiPass,
+                total_capital: parseNumberOrFallback('total_capital', fallbackTotal),
+                max_margin_pct: parseNumberOrFallback('max_margin_pct', fallbackMarginPct) / 100,
+                price_tolerance: parseNumberOrFallback('price_tolerance', fallbackTolerance) / 100,
+                enabled_traders: enabled,
+                binance_traders: serializeBinanceTraders(),
+            };
+            const saveRes = await apiPost('/api/copy/settings', savePayload);
+            if (saveRes.error) { setMsg('保存配置失败：' + saveRes.error, 'error'); return; }
+        }
+
+        const res = await apiPost(start ? '/api/copy/start' : '/api/copy/stop', {});
+        if (res.error) { setMsg(res.error, 'error'); return; }
+        setMsg(res.msg || '操作成功', 'success');
+        updateEngineBadge(start);
+        if (start) {
+            const enabledCount = getEnabledBitgetUids().length + getEnabledBinancePids().length;
+            document.getElementById('engine-start-time').textContent =
+                '启动于 ' + new Date().toLocaleTimeString('zh-CN') +
+                '，跟踪 ' + enabledCount + ' 名交易员，每 2.5 秒自动扫描持仓变动';
+            setTimeout(refreshPositions, 3000);
+        }
+    }
+
+    function fmtTs(ts) {
+        if (!ts) return '-';
+        const d = new Date(ts);
+        return `${d.getMonth() + 1}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
+    }
+
+    function statusBadge(s) {
+        const map = {
+            filled: 'bg-green-500/10 text-green-400 border-green-500/20',
+            skipped: 'bg-yellow-500/10 text-yellow-400 border-yellow-500/20',
+            failed: 'bg-red-500/10 text-red-400 border-red-500/20',
+        };
+        const cls = map[s] || 'bg-gray-500/10 text-gray-400 border-gray-500/20';
+        const label = { filled: '成交', skipped: '跳过(价差)', failed: '失败' }[s] || s;
+        return `<span class="px-2 py-0.5 rounded text-xs font-medium border ${cls}">${label}</span>`;
+    }
+
+    let _positionsLoadedOnce = false;
+
+    function _positionKey(p) {
+        return `${(p.symbol || '').toUpperCase()}_${(p.direction || '').toLowerCase()}`;
+    }
+
+    function _renderPositionCells(tr, p) {
+        const pnlNum = parseFloat(p.pnl);
+        const pnl = Number.isFinite(pnlNum) ? pnlNum : 0;
+        const qtyNum = parseFloat(p.qty);
+        const qtyText = Number.isFinite(qtyNum)
+            ? (Math.abs(qtyNum) >= 1 ? qtyNum.toFixed(2) : qtyNum.toFixed(4))
+            : (p.qty || '-');
+        const levNum = parseFloat(p.leverage);
+        const leverageText = Number.isFinite(levNum) ? `${levNum}x` : (p.leverage || '-');
+        const marginNum = parseFloat(p.margin);
+        const marginText = Number.isFinite(marginNum) ? marginNum.toFixed(2) : (p.margin || '-');
+        const openPriceNum = parseFloat(p.open_price);
+        const openPriceText = Number.isFinite(openPriceNum) ? openPriceNum.toString() : (p.open_price || '-');
+        const direction = p.direction === 'long' ? 'long' : (p.direction === 'short' ? 'short' : '-');
+        const directionBadge = direction === 'long'
+            ? '<span class="px-2 py-0.5 rounded text-xs font-bold bg-green-500/10 text-green-400">多▲</span>'
+            : direction === 'short'
+                ? '<span class="px-2 py-0.5 rounded text-xs font-bold bg-red-500/10 text-red-400">空▼</span>'
+                : '<span class="px-2 py-0.5 rounded text-xs font-bold bg-gray-500/10 text-gray-400">-</span>';
+        const pnlText = Number.isFinite(pnlNum) ? `${pnl >= 0 ? '+' : ''}${pnl.toFixed(4)}` : (p.pnl || '-');
+        const pnlCls = Number.isFinite(pnlNum) ? (pnl >= 0 ? 'text-profit' : 'text-loss') : 'text-gray-400';
         tr.className = 'hover:bg-dark-hover transition-colors';
         tr.innerHTML = `
             <td class="px-4 py-3 text-white font-bold font-mono text-sm">${p.symbol}</td>
-            <td class="text-center px-3 py-3">
-                <span class="px-2 py-0.5 rounded text-xs font-bold ${p.direction === 'long' ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400'}">
-                    ${p.direction === 'long' ? '多▲' : '空▼'}
-                </span>
-            </td>
-            <td class="text-right px-3 py-3 text-yellow-400 font-bold">${p.leverage}x</td>
-            <td class="text-right px-3 py-3 text-gray-300 font-mono text-xs">${p.open_price}</td>
-            <td class="text-right px-3 py-3 text-gray-400 font-mono text-xs">${parseFloat(p.margin || 0).toFixed(2)}</td>
-            <td class="text-right px-3 py-3 font-medium font-mono text-xs ${pnl >= 0 ? 'text-profit' : 'text-loss'}">${pnl >= 0 ? '+' : ''}${pnl.toFixed(4)}</td>
+            <td class="text-center px-3 py-3">${directionBadge}</td>
+            <td class="text-right px-3 py-3 text-yellow-400 font-bold">${leverageText}</td>
+            <td class="text-right px-3 py-3 text-blue-300 font-mono text-xs">${qtyText}</td>
+            <td class="text-right px-3 py-3 text-gray-300 font-mono text-xs">${openPriceText}</td>
+            <td class="text-right px-3 py-3 text-gray-400 font-mono text-xs">${marginText}</td>
+            <td class="text-right px-3 py-3 font-medium font-mono text-xs ${pnlCls}">${pnlText}</td>
             <td class="text-right px-3 py-3 text-gray-500 text-xs">${p.source || '-'}</td>`;
-        body.appendChild(tr);
-    });
-}
-
-async function refreshOrders() {
-    const body = document.getElementById('orders-body');
-    const empty = document.getElementById('orders-empty');
-    body.innerHTML = '<tr><td colspan="11" class="px-4 py-4 text-center text-gray-600 text-xs">加载中…</td></tr>';
-    const res = await fetch('/api/copy/orders?page=1&page_size=30');
-    const data = await res.json();
-    body.innerHTML = '';
-    const items = data.items || [];
-    if (!items.length) {
-        empty.textContent = '暂无记录';
-        empty.classList.remove('hidden');
-        return;
     }
-    empty.classList.add('hidden');
-    items.forEach(o => {
-        const dev = o.deviation_pct != null ? (o.deviation_pct * 100).toFixed(4) + '%' : '-';
-        const pnl = o.pnl != null ? (o.pnl >= 0 ? '+' : '') + parseFloat(o.pnl).toFixed(4) : '-';
-        const pnlCls = o.pnl != null ? (o.pnl >= 0 ? 'text-profit' : 'text-loss') : 'text-gray-400';
-        const actionBadge = o.action === 'open'
-            ? '<span class="text-green-400 text-xs font-bold">开仓</span>'
-            : '<span class="text-red-400 text-xs font-bold">平仓</span>';
-        const dirBadge = o.direction
-            ? `<span class="px-1.5 py-0.5 rounded text-xs ${o.direction === 'long' ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400'}">${o.direction === 'long' ? '多' : '空'}</span>`
-            : '-';
-        const tr = document.createElement('tr');
-        tr.className = 'hover:bg-dark-hover transition-colors';
-        tr.innerHTML = `
+
+    async function refreshPositions() {
+        const body = document.getElementById('positions-body');
+        const empty = document.getElementById('positions-empty');
+        if (!_positionsLoadedOnce && body.children.length === 0) {
+            body.innerHTML = '<tr><td colspan="8" class="px-4 py-4 text-center text-gray-600 text-xs">加载中…</td></tr>';
+        }
+
+        let data = {};
+        try {
+            const res = await fetch('/api/copy/positions', { cache: 'no-store' });
+            data = await res.json();
+        } catch (err) {
+            // 网络抖动时保留旧数据，不闪烁清空
+            if (!_positionsLoadedOnce) {
+                body.innerHTML = '';
+                empty.textContent = '读取持仓失败，请稍后重试';
+                empty.classList.remove('hidden');
+            }
+            return;
+        }
+
+        if (data.error) {
+            if (!_positionsLoadedOnce) {
+                body.innerHTML = '';
+                empty.textContent = data.error;
+                empty.classList.remove('hidden');
+            }
+            return;
+        }
+
+        const items = data.items || [];
+        if (!items.length) {
+            body.innerHTML = '';
+            empty.textContent = '暂无持仓';
+            empty.classList.remove('hidden');
+            _positionsLoadedOnce = true;
+            return;
+        }
+
+        empty.classList.add('hidden');
+
+        const existingRows = new Map();
+        Array.from(body.querySelectorAll('tr[data-pos-key]')).forEach((tr) => {
+            existingRows.set(tr.dataset.posKey, tr);
+        });
+
+        const orderKeys = [];
+        items.forEach((p) => {
+            const key = _positionKey(p);
+            orderKeys.push(key);
+            let tr = existingRows.get(key);
+            if (!tr) {
+                tr = document.createElement('tr');
+                tr.dataset.posKey = key;
+                body.appendChild(tr);
+            }
+            _renderPositionCells(tr, p);
+            existingRows.delete(key);
+        });
+
+        // 删除本轮已不存在的持仓行
+        existingRows.forEach((tr) => tr.remove());
+
+        // 按接口返回顺序重排，避免视觉跳动
+        orderKeys.forEach((key) => {
+            const tr = body.querySelector(`tr[data-pos-key="${key}"]`);
+            if (tr) body.appendChild(tr);
+        });
+
+        _positionsLoadedOnce = true;
+    }
+
+    async function refreshOrders() {
+        const body = document.getElementById('orders-body');
+        const empty = document.getElementById('orders-empty');
+        body.innerHTML = '<tr><td colspan="12" class="px-4 py-4 text-center text-gray-600 text-xs">加载中…</td></tr>';
+        const res = await fetch('/api/copy/orders?page=1&page_size=30');
+        const data = await res.json();
+        body.innerHTML = '';
+        const items = data.items || [];
+        if (!items.length) {
+            empty.textContent = '暂无记录';
+            empty.classList.remove('hidden');
+            return;
+        }
+        empty.classList.add('hidden');
+        items.forEach(o => {
+            const dev = o.deviation_pct != null ? (o.deviation_pct * 100).toFixed(4) + '%' : '-';
+            const pnl = o.pnl != null ? (o.pnl >= 0 ? '+' : '') + parseFloat(o.pnl).toFixed(4) : '-';
+            const pnlCls = o.pnl != null ? (o.pnl >= 0 ? 'text-profit' : 'text-loss') : 'text-gray-400';
+            const actionBadge = o.action === 'open'
+                ? '<span class="text-green-400 text-xs font-bold">开仓</span>'
+                : '<span class="text-red-400 text-xs font-bold">平仓</span>';
+            const dirBadge = o.direction
+                ? `<span class="px-1.5 py-0.5 rounded text-xs ${o.direction === 'long' ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400'}">${o.direction === 'long' ? '多' : '空'}</span>`
+                : '-';
+            const tr = document.createElement('tr');
+            tr.className = 'hover:bg-dark-hover transition-colors';
+            tr.innerHTML = `
             <td class="px-4 py-2.5 text-gray-500 text-xs whitespace-nowrap">${fmtTs(o.timestamp)}</td>
+            <td class="px-3 py-2.5 text-blue-400 text-xs font-medium">${o.trader_name || o.trader_uid || '-'}</td>
             <td class="px-3 py-2.5 text-white font-mono text-xs font-bold">${o.symbol || '-'}</td>
             <td class="text-center px-3 py-2.5">${actionBadge}</td>
             <td class="text-center px-3 py-2.5">${dirBadge}</td>
@@ -430,24 +1006,25 @@ async function refreshOrders() {
             <td class="text-right px-3 py-2.5 text-gray-400 text-xs">${dev}</td>
             <td class="text-center px-3 py-2.5">${statusBadge(o.status)}</td>
             <td class="px-3 py-2.5 text-gray-600 text-xs truncate max-w-xs">${o.notes || ''}</td>`;
-        body.appendChild(tr);
-    });
-}
+            body.appendChild(tr);
+        });
+    }
 
-// 轮询引擎状态（每 5s）
-async function pollEngineStatus() {
-    try {
-        const res = await fetch('/api/status');
-        const data = await res.json();
-        updateEngineBadge(data.copy_engine_running);
-    } catch(e) {}
-}
+    // 轮询引擎状态（每 5s）
+    async function pollEngineStatus() {
+        try {
+            const res = await fetch('/api/status');
+            const data = await res.json();
+            updateEngineBadge(data.copy_engine_running);
+        } catch (e) { }
+    }
 
-document.getElementById('price_tolerance').addEventListener('input', computeAllocation);
-document.getElementById('total_capital').addEventListener('input', computeAllocation);
+    document.getElementById('price_tolerance').addEventListener('input', computeAllocation);
+    document.getElementById('total_capital').addEventListener('input', computeAllocation);
 
-loadSettings().then(() => { refreshPositions(); refreshOrders(); });
-setInterval(pollEngineStatus, 5000);
-setInterval(refreshOrders, 15000);
+    loadSettings().then(() => { refreshPositions(); refreshOrders(); });
+    setInterval(pollEngineStatus, 5000);
+    setInterval(refreshPositions, 5000);
+    setInterval(refreshOrders, 15000);
 </script>
 {% endblock %}

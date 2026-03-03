@@ -145,13 +145,13 @@ def _recent_trades(trades: list[dict], days: int = 7) -> list[dict]:
 
 def _total_roi(trades: list[dict]) -> float:
     """累计 ROI（简单累加 pnl_pct，非复利）。"""
-    return sum(t["pnl_pct"] for t in trades) * 100
+    return sum(t["pnl_pct"] for t in trades)
 
 
 def _recent_roi(trades: list[dict], days: int = 30) -> float:
     """最近 N 天 ROI。"""
     recent = _recent_trades(trades, days)
-    return sum(t["pnl_pct"] for t in recent) * 100
+    return sum(t["pnl_pct"] for t in recent)
 
 
 # ── 汇总计算 ──────────────────────────────────────────────────────────────────
@@ -217,15 +217,23 @@ def compute(trader_uid: str) -> dict[str, Any]:
 
 
 def _score(r: dict) -> dict[str, Any]:
-    """6 项硬性筛选，仅这 6 项决定 PASS/WATCH/FAIL。"""
+    """硬性筛选用于评级；同时提供额外检查给报告展示。"""
     f = config.FILTER
-    checks = {
+    base_checks = {
         "active_7d":    r["days_since_last"] <= f["active_days"],
         "drawdown_ok":  r["max_drawdown_pct"] <= f["max_drawdown"] * 100,
         "ev_positive":  r["expected_value"] >= f["min_expected_value"],
         "sample_ok":    r["total_trades"] >= f["min_trade_count"],
         "loss_streak":  r["max_loss_streak"] < f["max_loss_streak"],
         "holdable":     r["avg_hold_h"] >= f["min_avg_hold_h"],
+    }
+    # 软性指标，仅用于展示，不影响评级
+    extra_checks = {
+        "win_rate_ok":   r["win_rate"] >= 55,          # 胜率 ≥55%
+        "rr_ratio_ok":   r["avg_rr_ratio"] >= 1.5,     # 盈亏比 ≥1.5
+        "sharpe_ok":     r["sharpe_ratio"] >= 1.0,     # 夏普 ≥1.0
+        "calmar_ok":     r["calmar_ratio"] >= 1.5,     # Calmar ≥1.5
+        "copy_days_ok":  (r.get("copy_trade_days") or 0) >= 60,  # 跟单天数 ≥60
     }
     labels = {
         "active_7d":   "7天内活跃",
@@ -234,12 +242,17 @@ def _score(r: dict) -> dict[str, Any]:
         "sample_ok":   f"笔数≥{f['min_trade_count']}",
         "loss_streak": "连亏<5次",
         "holdable":    "持仓>30min",
+        "win_rate_ok": "胜率≥55%",
+        "rr_ratio_ok": "盈亏比≥1.5",
+        "sharpe_ok":   "夏普≥1.0",
+        "calmar_ok":   "Calmar≥1.5",
+        "copy_days_ok": "跟单天数≥60",
     }
-    passed = sum(1 for v in checks.values() if v)
-    total  = len(checks)
+    passed = sum(1 for v in base_checks.values() if v)
+    total  = len(base_checks)
     grade  = "PASS" if passed == total else ("WATCH" if passed >= total - 1 else "FAIL")
     return {
-        "checks": checks,
+        "checks": {**base_checks, **extra_checks},
         "labels": labels,
         "passed": passed,
         "total":  total,
@@ -351,6 +364,9 @@ def _today() -> str:
 
 
 def compute_and_log(trader_uid: str):
+    # 确保交易员还存在
+    if not db.get_trader(trader_uid):
+        return
     result = compute(trader_uid)
     if "error" in result:
         logger.info("[指标] %s: %s", trader_uid[:8], result["error"])

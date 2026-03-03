@@ -18,11 +18,17 @@ _HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/121.0.0.0 Safari/537.36"
+        "Chrome/122.0.0.0 Safari/537.36"
     ),
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
     "Content-Type": "application/json",
-    "Accept": "application/json",
+    "Origin": "https://www.bitget.com",
+    "X-Requested-With": "XMLHttpRequest",
     "locale": "zh-CN",
+    "Sec-Ch-Ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"macOS"',
 }
 
 
@@ -45,7 +51,14 @@ def _post(path: str, body: dict, trader_uid: str = "") -> Optional[dict]:
         )
     try:
         resp = requests.post(url, json=body, headers=headers, timeout=15)
-        data = resp.json()
+        if not resp.text.strip():
+            logger.warning("Web API %s returned empty response", path)
+            return None
+        try:
+            data = resp.json()
+        except Exception:
+            logger.error("Web API %s json decode failed. First 100 chars: %s", path, resp.text[:100])
+            return None
         if data.get("code") == "00000":
             return data.get("data")
         logger.warning("Web API %s error: %s", path, data.get("msg", ""))
@@ -241,8 +254,8 @@ def fetch_current_positions(uid: str) -> list[dict]:
         {"languageType": 1, "traderUid": uid, "pageNo": 1, "pageSize": 9999},
         uid,
     )
-    if not data:
-        return []
+    if data is None:
+        return None  # 返回 None 表示获取失败（如持仓保护）
 
     items = data.get("items") or []
     result = []
@@ -317,8 +330,8 @@ def infer_current_positions_from_history(uid: str) -> list[dict]:
             "margin_mode": snap.get("margin_mode", "cross"),
             "open_price": float(snap.get("open_price") or 0),
             "open_time": int(snap.get("open_time") or 0),
-            "position_size": float(snap.get("open_amount") or 0),
-            "margin_amount": float(snap.get("margin_amount") or 0),
+            "position_size": float(snap.get("position_size") or 0),
+            "margin_amount": float(snap.get("open_amount") or 0),
             "unrealized_pnl": 0.0,  # 历史数据无法计算未实现盈亏
             "return_rate": 0.0,
             "follow_count": int(snap.get("follow_count") or 0),

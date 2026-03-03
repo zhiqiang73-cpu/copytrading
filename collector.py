@@ -14,7 +14,6 @@ import analyzer
 import config
 import database as db
 import scraper
-import trade_detector
 
 logger = logging.getLogger(__name__)
 
@@ -73,11 +72,21 @@ def init_trader(trader_uid: str, nickname: str):
 # ── 单轮采集 ──────────────────────────────────────────────────────────────────
 
 def _poll_trader(trader_uid: str):
+    # 首先检查交易员是否在删除黑名单中
+    if db.is_deleted(trader_uid):
+        logger.debug("交易员 %s 在删除黑名单中，跳过采集", trader_uid[:8])
+        return
+    
+    # 检查交易员是否还在数据库中
+    trader = db.get_trader(trader_uid)
+    if not trader:
+        logger.info("交易员 %s 已被删除，跳过轮询", trader_uid[:8])
+        return
+
     # ① 刷新基础数据
     detail = _safe_call(scraper.fetch_trader_detail, trader_uid)
     if detail:
-        trader = db.get_trader(trader_uid)
-        nickname = (trader["nickname"] if trader else None) or detail.get("name") or trader_uid
+        nickname = trader["nickname"] or detail.get("name") or trader_uid
         db.upsert_trader(
             trader_uid=trader_uid,
             nickname=nickname,
@@ -101,17 +110,14 @@ def _poll_trader(trader_uid: str):
 
 # ── 主循环 ────────────────────────────────────────────────────────────────────
 
-def run(trader_uids: list[str]):
+def run(trader_uids: list[str] | None = None):
     """
-    启动采集主循环。trader_uids 是已在 DB 中存在的交易员 uid 列表。
+    启动采集主循环。
+    每轮循环都会从数据库重新读取最新的交易员列表，支持动态增删。
     """
-    if not trader_uids:
-        logger.warning("没有要追踪的交易员，采集器退出。")
-        return
-
     logger.info(
-        "采集器启动，追踪 %d 名交易员，轮询间隔 %ds",
-        len(trader_uids), config.POLL_INTERVAL,
+        "采集器启动，轮询间隔 %ds",
+        config.POLL_INTERVAL,
     )
 
     _last_analyze = time.monotonic()
@@ -120,17 +126,24 @@ def run(trader_uids: list[str]):
     while _running:
         cycle_start = time.monotonic()
 
-        for uid in trader_uids:
-            if not _running:
-                break
-            try:
-                _poll_trader(uid)
-            except Exception as exc:
-                logger.error("采集异常 [%s]: %s", uid[:8], exc, exc_info=True)
+        # 动态获取当前所有需要追踪的交易员
+        current_traders = db.get_all_traders()
+        current_uids = [t["trader_uid"] for t in current_traders]
+
+        if not current_uids:
+            logger.debug("暂无追踪中的交易员，等待中…")
+        else:
+            for uid in current_uids:
+                if not _running:
+                    break
+                try:
+                    _poll_trader(uid)
+                except Exception as exc:
+                    logger.error("采集异常 [%s]: %s", uid[:8], exc, exc_info=True)
 
         # 每小时触发指标计算
         if time.monotonic() - _last_analyze >= analyze_interval:
-            for uid in trader_uids:
+            for uid in current_uids:
                 try:
                     analyzer.compute_and_log(uid)
                 except Exception as exc:
@@ -184,34 +197,16 @@ def _sync_positions(trader_uid: str):
     """
     try:
         positions = scraper.fetch_current_positions(trader_uid)
-        now = int(time.time() * 1000)
-        with db.get_conn() as conn:
-            db._migrate_snapshots(conn)
-            conn.execute("DELETE FROM snapshots WHERE trader_uid = ?", (trader_uid,))
-            for pos in positions:
-                tracking_no = pos.get("order_no") or f"open_{pos['symbol']}_{pos['direction']}_{pos['open_time']}"
-                conn.execute(
-                    """
-                    INSERT OR REPLACE INTO snapshots
-                        (trader_uid, timestamp, tracking_no, symbol, hold_side,
-                         leverage, margin_mode, open_price, open_time,
-                         open_amount, position_size, unrealized_pnl,
-                         return_rate, follow_count)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        trader_uid, now, tracking_no,
-                        pos["symbol"], pos["direction"],
-                        pos["leverage"], pos["margin_mode"],
-                        pos["open_price"], pos["open_time"],
-                        pos["margin_amount"], pos["position_size"],
-                        pos["unrealized_pnl"], pos["return_rate"],
-                        pos["follow_count"],
-                    ),
-                )
-            conn.commit()
-        if positions:
-            logger.info("当前持仓 %d 个 [%s]", len(positions), trader_uid[:8])
+        if positions is None:
+            # 如果获取失败（如持仓保护），保留现有快照，不进行删除
+            logger.info("交易员 %s 开启了持仓保护或获取失败，跳过本次快照更新", trader_uid[:8])
+            return
+
+        # 使用新封装的线程安全加锁替换方法
+        db.replace_all_snapshots(trader_uid, positions)
+        
+        # 只有在真正有持仓时才打印，或者如果是空列表打印 0
+        logger.info("当前持仓 %d 个 [%s]", len(positions), trader_uid[:8])
     except Exception as exc:
         logger.error("更新持仓快照失败 [%s]: %s", trader_uid[:8], exc)
 
@@ -233,7 +228,7 @@ def _safe_call(fn, *args, **kwargs):
         return None
 
 
-def _f(d: dict, key: str, default=None) -> float | None:
+def _f(d: dict, key: str, default=None):
     v = d.get(key)
     try:
         return float(v)
@@ -241,7 +236,7 @@ def _f(d: dict, key: str, default=None) -> float | None:
         return default
 
 
-def _i(d: dict, key: str, default=None) -> int | None:
+def _i(d: dict, key: str, default=None):
     v = d.get(key)
     try:
         return int(v)
