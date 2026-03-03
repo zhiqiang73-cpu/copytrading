@@ -127,6 +127,7 @@ def _normalize_copy_settings(raw: dict) -> dict:
         "api_secret": "",
         "api_passphrase": "",
         "total_capital": 0.0,
+        "follow_ratio_pct": 0.003,
         "max_margin_pct": 0.20,
         "price_tolerance": 0.0002,
         "sl_pct": 0.15,
@@ -721,6 +722,11 @@ def api_copy_settings():
                 return float(default_v)
 
         total_capital = _float_or(payload.get("total_capital"), existing.get("total_capital", 0.0))
+        follow_ratio_pct = _float_or(payload.get("follow_ratio_pct"), existing.get("follow_ratio_pct", 0.003))
+        # 兼容手动 API 传入百分数（例如 3 表示 3%）
+        if follow_ratio_pct > 1:
+            follow_ratio_pct = follow_ratio_pct / 100.0
+        follow_ratio_pct = min(max(follow_ratio_pct, 0.0), 1.0)
         max_margin_pct = _float_or(payload.get("max_margin_pct"), existing.get("max_margin_pct", 0.2))
         price_tolerance = _float_or(payload.get("price_tolerance"), existing.get("price_tolerance", 0.0002))
         sl_pct = _float_or(payload.get("sl_pct"), existing.get("sl_pct", 0.15))
@@ -775,6 +781,7 @@ def api_copy_settings():
             api_secret=api_secret,
             api_passphrase=api_passphrase,
             total_capital=total_capital,
+            follow_ratio_pct=follow_ratio_pct,
             max_margin_pct=max_margin_pct,
             price_tolerance=price_tolerance,
             sl_pct=sl_pct,

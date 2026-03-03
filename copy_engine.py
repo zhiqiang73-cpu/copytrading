@@ -280,6 +280,7 @@ class CopyEngine:
             return
 
         tol     = _safe_float(settings.get("price_tolerance"), 0.05)
+        follow_ratio = self._resolve_follow_ratio(settings)
         # 兜底保证金（仅当币安信号缺失数量/价格时启用），正常优先使用来源信号反推
         fallback_margin = 0.0
         total_p = _safe_float(settings.get("total_capital"), 0.0)
@@ -313,7 +314,10 @@ class CopyEngine:
                     if order_key in seen_in_batch:
                         continue
                     seen_in_batch.add(order_key)
-                    self._process_binance_order(ak, sk, pp, pid, order, fallback_margin, tol, available_usdt)
+                    self._process_binance_order(
+                        ak, sk, pp, pid, order,
+                        fallback_margin, tol, available_usdt, follow_ratio,
+                    )
                     # 更新已处理的最新时间戳
                     if order["order_time"] > self._bn_seen[pid]:
                         self._bn_seen[pid] = order["order_time"]
@@ -339,6 +343,7 @@ class CopyEngine:
                         "follower_count": info.get("follower_count"),
                         "copier_pnl": info.get("copier_pnl"),
                         "aum": info.get("aum"),
+                        "margin_balance": info.get("margin_balance"),
                         "avatar": info.get("avatar"),
                         "total_trades": info.get("total_trades"),
                     })
@@ -349,6 +354,30 @@ class CopyEngine:
         if changed:
             db.update_copy_settings(binance_traders=json.dumps(current_data))
             logger.info("币安交易员元数据已更新到数据库")
+
+    def _resolve_follow_ratio(self, settings: dict) -> float:
+        """
+        读取全局跟随比例（0~1）。
+        兼容历史值：若误传百分数（>1），按百分比换算。
+        """
+        ratio = _safe_float(settings.get("follow_ratio_pct"), 0.003)
+        if ratio > 1:
+            ratio = ratio / 100.0
+        return min(max(ratio, 0.0), 1.0)
+
+    def _apply_follow_ratio(self, source_margin: float, follow_ratio: float, fallback_margin: float) -> tuple[float, str]:
+        """
+        按“来源保证金 * 跟随比例”计算目标保证金。
+        当来源保证金不可得时，退回兜底保证金。
+        """
+        if source_margin > 0 and follow_ratio > 0:
+            target = source_margin * follow_ratio
+            return target, f"[比例跟随] ratio={follow_ratio * 100:.4f}% src={source_margin:.4f} target={target:.4f}"
+        if source_margin > 0:
+            return source_margin, f"[比例跟随] ratio=0，回退来源原值 src={source_margin:.4f}"
+        if fallback_margin > 0:
+            return fallback_margin, "[比例跟随] 来源保证金缺失，回退资金池兜底"
+        return 0.0, "[比例跟随] 来源保证金缺失且无兜底"
 
     def _cap_open_margin(
         self,
@@ -396,16 +425,17 @@ class CopyEngine:
         )
         return cap_value, f"[保证金裁剪] src={margin:.4f} cap={cap_value:.4f} ({cap_reason})"
 
-    def _estimate_binance_margin(self, order: dict, fallback_margin: float) -> float:
+    def _estimate_binance_margin(self, order: dict) -> float:
         qty = abs(_safe_float(order.get("qty"), 0.0))
         price = _safe_float(order.get("price"), 0.0)
         lev = max(1, _safe_int(order.get("leverage"), 1))
         estimated = _estimate_margin_from_position(qty, price, lev)
         if estimated > 0:
             return estimated
-        return max(0.0, fallback_margin)
+        # 缺失来源保证金时返回 0，由 _apply_follow_ratio 统一走 fallback_margin 兜底。
+        return 0.0
 
-    def _process_binance_order(self, ak, sk, pp, pid, order, fallback_margin, tol, available_usdt) -> None:
+    def _process_binance_order(self, ak, sk, pp, pid, order, fallback_margin, tol, available_usdt, follow_ratio: float) -> None:
         """
         处理单条币安操作记录，映射到 Bitget 开仓或平仓。
         """
@@ -425,9 +455,10 @@ class CopyEngine:
             try:
                 # 严格同步来源杠杆，不再强制替换为固定 20x。
                 lev = max(1, int(order.get("leverage") or 1))
-                src_margin = self._estimate_binance_margin(order, fallback_margin)
+                src_margin = self._estimate_binance_margin(order)
+                target_margin, ratio_note = self._apply_follow_ratio(src_margin, follow_ratio, fallback_margin)
                 margin, margin_note = self._cap_open_margin(
-                    src_margin,
+                    target_margin,
                     fallback_margin=fallback_margin,
                     available_usdt=available_usdt,
                     source_tag="Binance",
@@ -446,7 +477,7 @@ class CopyEngine:
                         "source_price": price, "exec_price": 0,
                         "deviation_pct": 0, "action": "open",
                         "status": "skipped", "pnl": None,
-                        "notes": f"[跳过] Bitget 不支持该交易对: {symbol} ({reason}) {margin_note}".strip(), "exec_qty": 0.0,
+                        "notes": f"[跳过] Bitget 不支持该交易对: {symbol} ({reason}) {ratio_note} {margin_note}".strip(), "exec_qty": 0.0,
                     })
 
                 if symbol in self._unsupported_symbols:
@@ -463,12 +494,13 @@ class CopyEngine:
 
                 if margin <= 0:
                     logger.warning(
-                        "[币安信号跳过] 无法推导保证金: %s %s qty=%s price=%s lev=%s",
+                        "[币安信号跳过] 无法推导保证金: %s %s qty=%s price=%s lev=%s ratio=%.4f%%",
                         symbol,
                         direction.upper(),
                         order.get("qty"),
                         price,
                         lev,
+                        follow_ratio * 100,
                     )
                     return
 
@@ -501,7 +533,7 @@ class CopyEngine:
                         "leverage": lev, "margin_usdt": margin,
                         "source_price": price, "exec_price": curr_p,
                         "deviation_pct": dev, "action": "open",
-                        "status": "filled", "pnl": None, "notes": f"[Binance Signal] src_margin={src_margin:.4f} {margin_note}".strip(), "exec_qty": exec_qty,
+                        "status": "filled", "pnl": None, "notes": f"[Binance Signal] src_margin={src_margin:.4f} {ratio_note} {margin_note}".strip(), "exec_qty": exec_qty,
                     })
                     logger.info("[币安信号→Bitget开仓] %s %s 价格=%s 数量=%s", symbol, direction.upper(), curr_p, exec_qty)
                 except Exception as exc:
@@ -516,7 +548,7 @@ class CopyEngine:
                         "leverage": lev, "margin_usdt": margin,
                         "source_price": price, "exec_price": 0,
                         "deviation_pct": 0, "action": "open",
-                        "status": "failed", "pnl": None, "notes": f"{exc} | src_margin={src_margin:.4f} {margin_note}".strip(), "exec_qty": 0.0,
+                        "status": "failed", "pnl": None, "notes": f"{exc} | src_margin={src_margin:.4f} {ratio_note} {margin_note}".strip(), "exec_qty": 0.0,
                     })
                     logger.error("[币安信号→Bitget开仓失败] %s: %s", symbol, exc)
             finally:
@@ -591,6 +623,7 @@ class CopyEngine:
 
         # 1. 基础检查（并提取账户模式 posMode）
         tol = _safe_float(settings.get("price_tolerance"), 0.0002)
+        follow_ratio = self._resolve_follow_ratio(settings)
         # 资金池仅作为兜底保证金，不再作为硬性开仓门槛。
         total_p = _safe_float(settings.get("total_capital"), 0.0)
         max_m = _safe_float(settings.get("max_margin_pct"), 0.20)
@@ -681,7 +714,10 @@ class CopyEngine:
                         changed_list.append((prev_pos, curr_pos))
 
             for pos in new_list:
-                status = self._handle_open(api_key, api_secret, api_passphrase, uid, pos, fallback_margin, tol, available)
+                status = self._handle_open(
+                    api_key, api_secret, api_passphrase,
+                    uid, pos, fallback_margin, tol, available, follow_ratio,
+                )
                 if status in ("filled", "skipped"):
                     db.upsert_snapshot(_to_snap(uid, pos))
                     self._prev_snaps.setdefault(uid, {})[pos["order_no"]] = pos
@@ -703,7 +739,7 @@ class CopyEngine:
                     self._prev_snaps[uid][curr_pos["order_no"]] = curr_pos
 
 
-    def _handle_open(self, ak, sk, pp, uid, pos, fallback_margin, tol, available_usdt) -> str:
+    def _handle_open(self, ak, sk, pp, uid, pos, fallback_margin, tol, available_usdt, follow_ratio: float) -> str:
         symbol = pos.get("symbol", "")
         tn = pos.get("order_no", "")
         side = pos.get("direction", "")
@@ -714,9 +750,9 @@ class CopyEngine:
         if source_margin <= 0:
             source_size = _safe_float(pos.get("position_size"), 0.0)
             source_margin = _estimate_margin_from_position(source_size, ref_p, lev)
-        margin = source_margin if source_margin > 0 else max(0.0, fallback_margin)
+        target_margin, ratio_note = self._apply_follow_ratio(source_margin, follow_ratio, fallback_margin)
         margin, margin_note = self._cap_open_margin(
-            margin,
+            target_margin,
             fallback_margin=fallback_margin,
             available_usdt=available_usdt,
             source_tag="Bitget",
@@ -737,7 +773,7 @@ class CopyEngine:
                     "leverage": lev, "margin_usdt": margin, "source_price": ref_p,
                     "exec_price": 0, "deviation_pct": 0, "action": "open",
                     "status": "skipped", "pnl": None,
-                    "notes": f"[跳过] Bitget 不支持该交易对: {symbol} ({reason}) {margin_note}".strip(), "exec_qty": 0.0,
+                    "notes": f"[跳过] Bitget 不支持该交易对: {symbol} ({reason}) {ratio_note} {margin_note}".strip(), "exec_qty": 0.0,
                 })
             logger.warning("[来源同步跳过] Bitget 不支持交易对 %s: %s", symbol, reason)
             return "skipped"
@@ -782,7 +818,7 @@ class CopyEngine:
                 "leverage": lev, "margin_usdt": margin, "source_price": ref_p,
                 "exec_price": curr_p, "deviation_pct": dev, "action": "open",
                 "status": "filled", "pnl": None,
-                "notes": f"[来源同步] src_margin={source_margin:.4f} {margin_note}".strip(),
+                "notes": f"[来源同步] src_margin={source_margin:.4f} {ratio_note} {margin_note}".strip(),
                 "exec_qty": exec_qty,
             })
             self._fail_streak = 0
@@ -804,7 +840,7 @@ class CopyEngine:
                 "my_order_id": "", "symbol": symbol, "direction": side,
                 "leverage": lev, "margin_usdt": margin, "source_price": ref_p,
                 "exec_price": curr_p, "deviation_pct": dev, "action": "open",
-                "status": "failed", "pnl": None, "notes": f"{exc} | src_margin={source_margin:.4f} {margin_note}".strip(), "exec_qty": 0.0,
+                "status": "failed", "pnl": None, "notes": f"{exc} | src_margin={source_margin:.4f} {ratio_note} {margin_note}".strip(), "exec_qty": 0.0,
             })
             # fail_streak 只在同一个 uid+symbol 的连续失败时计数，避免跨交易员误触发熔断
             self._fail_streak += 1

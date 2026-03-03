@@ -159,6 +159,7 @@ CREATE TABLE IF NOT EXISTS copy_settings (
     api_secret      TEXT,
     api_passphrase  TEXT,
     total_capital   REAL DEFAULT 0,
+    follow_ratio_pct REAL DEFAULT 0.003,
     max_margin_pct  REAL DEFAULT 0.20,
     price_tolerance REAL DEFAULT 0.0002,
     sl_pct          REAL DEFAULT 0.15,
@@ -528,6 +529,7 @@ def _ensure_copy_settings(conn) -> None:
     conn.execute("INSERT OR IGNORE INTO copy_settings (id) VALUES (1)")
     # 迁移：为旧数据库添加新字段（幂等）
     for col, dtype, default in [
+        ("follow_ratio_pct", "REAL", "0.003"),
         ("sl_pct", "REAL", "0.15"),
         ("tp_pct", "REAL", "0.30"),
         ("binance_traders", "TEXT", "'[]'"),
@@ -550,7 +552,7 @@ def get_copy_settings() -> dict:
 # copy_settings 允许更新的列名白名单（防止 SQL 注入）
 _COPY_SETTINGS_COLS = frozenset({
     "api_key", "api_secret", "api_passphrase",
-    "total_capital", "max_margin_pct", "price_tolerance",
+    "total_capital", "follow_ratio_pct", "max_margin_pct", "price_tolerance",
     "sl_pct", "tp_pct",
     "enabled_traders", "binance_traders", "engine_enabled",
 })
