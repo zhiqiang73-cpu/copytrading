@@ -173,6 +173,7 @@ class CopyEngine:
         self._state_lock = threading.RLock()
         self._unsupported_symbols: set[str] = set()
         self._bn_inflight: set[str] = set()
+        self._bn_dup_logged: set[str] = set()
 
     def start(self) -> None:
         with self._state_lock:
@@ -188,6 +189,7 @@ class CopyEngine:
             self._load_snaps_from_db()
             # 防重启信号重放：将所有已知币安交易员的起始时间戳设为当前时刻前 2 小时 (允许补票)
             self._bn_seen = {pid: int((time.time() - 7200) * 1000) for pid in self._bn_seen}
+            self._bn_dup_logged.clear()
             self._running = True
             self._thread = threading.Thread(target=self._run, daemon=True)
             self._thread.start()
@@ -453,6 +455,14 @@ class CopyEngine:
                     return
                 self._bn_inflight.add(signal_key)
             try:
+                # 幂等防重（提前执行，避免重复信号触发误导性日志）
+                if db.has_tracking_no(pid, order_id):
+                    dup_key = f"{pid}:{order_id}"
+                    if dup_key not in self._bn_dup_logged:
+                        logger.info("[币安信号跳过] 已处理过，不重复下单: pid=%s symbol=%s order_id=%s", pid[:12], symbol, order_id)
+                        self._bn_dup_logged.add(dup_key)
+                    return
+
                 # 严格同步来源杠杆，不再强制替换为固定 20x。
                 lev = max(1, int(order.get("leverage") or 1))
                 src_margin = self._estimate_binance_margin(order)
@@ -487,10 +497,6 @@ class CopyEngine:
 
                 short_hash = hashlib.md5(f"bn_{pid}_{order_id}".encode()).hexdigest()[:16]
                 client_oid = f"bn_{short_hash}"
-
-                # 检查是否已处理过（幂等性 — 用数据库持久化防重，重启也不怕）
-                if db.has_tracking_no(pid, order_id):
-                    return  # 已处理过，跳过
 
                 if margin <= 0:
                     logger.warning(

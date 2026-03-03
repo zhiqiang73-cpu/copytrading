@@ -58,41 +58,42 @@ else
     STARTED_NEW=1
 fi
 
-# 浏览器打开采用冷却控制：连续触发只放行一次
+# 等待服务就绪（新启动时需要）
 if [ "$STARTED_NEW" -eq 1 ]; then
-    for _ in {1..20}; do
-        if curl -s -o /dev/null "$URL"; then
+    for _ in {1..25}; do
+        if curl -s -o /dev/null "$URL" 2>/dev/null; then
             break
         fi
         sleep 0.2
     done
 fi
 
-if [ "$STARTED_NEW" -eq 1 ] && [ "$AUTO_OPEN_BROWSER" = "1" ]; then
-    NOW_TS=$(date +%s)
-    LAST_TS=0
-    if [ -f "$OPEN_STAMP_FILE" ]; then
-        LAST_TS=$(cat "$OPEN_STAMP_FILE" 2>/dev/null || echo 0)
-    fi
-    if [ $((NOW_TS - LAST_TS)) -ge "$OPEN_COOLDOWN_SEC" ]; then
-        echo "$NOW_TS" > "$OPEN_STAMP_FILE"
-        # 优先复用已运行的 Chrome；若未运行则改用 Safari，避免 Chrome 资料选择器弹窗
-        if pgrep -x "Google Chrome" >/dev/null 2>&1; then
-            osascript -e "tell application \"Google Chrome\" to open location \"$URL\"" >/dev/null 2>&1 || open -a "Safari" "$URL"
-        elif pgrep -x "Safari" >/dev/null 2>&1; then
-            osascript -e "tell application \"Safari\" to open location \"$URL\"" >/dev/null 2>&1 || open -a "Safari" "$URL"
+# 浏览器打开：无论是否新启动，只要服务可用且冷却期已过就打开（解决“双击没打开”问题）
+if [ "$AUTO_OPEN_BROWSER" = "1" ]; then
+    if curl -s -o /dev/null "$URL" 2>/dev/null; then
+        NOW_TS=$(date +%s)
+        LAST_TS=0
+        if [ -f "$OPEN_STAMP_FILE" ]; then
+            LAST_TS=$(cat "$OPEN_STAMP_FILE" 2>/dev/null || echo 0)
+        fi
+        if [ $((NOW_TS - LAST_TS)) -ge "$OPEN_COOLDOWN_SEC" ]; then
+            echo "$NOW_TS" > "$OPEN_STAMP_FILE"
+            # 优先复用已运行的 Chrome；若未运行则改用 Safari
+            if pgrep -x "Google Chrome" >/dev/null 2>&1; then
+                osascript -e "tell application \"Google Chrome\" to open location \"$URL\"" 2>/dev/null || open -a "Safari" "$URL"
+            elif pgrep -x "Safari" >/dev/null 2>&1; then
+                osascript -e "tell application \"Safari\" to open location \"$URL\"" 2>/dev/null || open -a "Safari" "$URL"
+            else
+                open -a "Safari" "$URL" 2>/dev/null || open "$URL"
+            fi
         else
-            open -a "Safari" "$URL" || open "$URL"
+            echo "  浏览器已在冷却期，请手动访问: $URL"
         fi
     else
-        echo "  浏览器打开已在冷却中，跳过重复打开"
+        echo "  服务尚未就绪，请稍后手动访问: $URL"
     fi
-else
-    if [ "$AUTO_OPEN_BROWSER" = "0" ]; then
-        echo "  已禁用自动打开浏览器，请手动访问: $URL"
-    else
-        echo "  服务已在运行，不重复弹出浏览器"
-    fi
+elif [ "$AUTO_OPEN_BROWSER" = "0" ]; then
+    echo "  已禁用自动打开，请手动访问: $URL"
 fi
 
 # 自动关闭当前终端窗口（默认关闭此行为，避免手动执行时弹出“终止进程”对话框）

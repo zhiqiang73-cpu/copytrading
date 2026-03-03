@@ -58,15 +58,21 @@ def _is_bitget_error(exc: Exception, code: str) -> bool:
 def _is_non_retryable_error(exc: Exception) -> bool:
     msg = str(exc)
     lower_msg = msg.lower()
-    # 交易对不存在属于参数错误，重试无意义，直接失败返回更快也更稳定。
+    # 交易对不存在、保证金模式不合法等属于参数错误，重试相同参数无意义
     return (
         "code=40034" in msg
+        or "code=400172" in msg
         or "code=40762" in msg
         or ("参数" in msg and "不存在" in msg)
         or ("订单金额" in msg and "超出账户余额" in msg)
         or "symbol does not exist" in lower_msg
         or "order amount exceeds account balance" in lower_msg
     )
+
+
+def _is_margin_mode_error(exc: Exception) -> bool:
+    """400172 保证金模式不合法：模拟盘常见，可用 crossed 重试。"""
+    return "code=400172" in str(exc)
 
 
 def _normalize_size(size: float | str) -> str:
@@ -344,18 +350,25 @@ def place_market_order_by_size(
     norm_pos_mode = _normalize_pos_mode(pos_mode)
     side = f"{base_side}_single" if norm_pos_mode == "1" else base_side
 
-    if sync_leverage:
-        set_symbol_leverage(
-            api_key,
-            api_secret,
-            api_passphrase,
-            symbol=symbol,
-            direction=direction,
-            leverage=leverage,
-            margin_mode=margin_mode,
-            pos_mode=norm_pos_mode or "2",
-            product_type=product_type,
-        )
+    def _do_set_leverage(mm: str) -> None:
+        if sync_leverage:
+            set_symbol_leverage(
+                api_key, api_secret, api_passphrase,
+                symbol=symbol, direction=direction, leverage=leverage,
+                margin_mode=mm, pos_mode=norm_pos_mode or "2",
+                product_type=product_type,
+            )
+
+    try:
+        _do_set_leverage(margin_mode)
+    except Exception as exc:
+        if config.SIMULATED and _is_margin_mode_error(exc):
+            fallback = "crossed" if _normalize_margin_mode(margin_mode) != "crossed" else "isolated"
+            logger.warning("模拟盘 400172(杠杆设置)，改用 marginMode=%s: %s", fallback, symbol)
+            _do_set_leverage(fallback)
+            margin_mode = fallback
+        else:
+            raise
 
     payload = {
         "symbol": symbol,
@@ -391,29 +404,52 @@ def place_market_order_by_size(
             data=payload,
         )
     except Exception as exc:
-        if not _is_bitget_error(exc, "40774"):
-            raise
-        retry_payload = dict(payload)
-        if str(retry_payload.get("side", "")).endswith("_single"):
-            retry_payload["side"] = base_side
-            retry_payload["tradeSide"] = "open"
+        # 模拟盘 400172 保证金模式不合法：改用另一种 marginMode 重试
+        if config.SIMULATED and _is_margin_mode_error(exc):
+            fallback = "crossed"
+            if _normalize_margin_mode(margin_mode) == "crossed":
+                fallback = "isolated"
+            logger.warning(
+                "模拟盘 400172，改用 marginMode=%s 重试: %s %s",
+                fallback, symbol, side.upper()
+            )
+            payload_retry = {**payload, "marginMode": fallback}
+            if sync_leverage:
+                set_symbol_leverage(
+                    api_key, api_secret, api_passphrase,
+                    symbol=symbol, direction=direction, leverage=leverage,
+                    margin_mode=fallback, pos_mode=norm_pos_mode or "2",
+                    product_type=product_type,
+                )
+            res = _request(
+                api_key, api_secret, api_passphrase,
+                "POST", "/api/v2/mix/order/place-order",
+                data=payload_retry,
+            )
+        elif _is_bitget_error(exc, "40774"):
+            retry_payload = dict(payload)
+            if str(retry_payload.get("side", "")).endswith("_single"):
+                retry_payload["side"] = base_side
+                retry_payload["tradeSide"] = "open"
+            else:
+                retry_payload["side"] = f"{base_side}_single"
+                retry_payload.pop("tradeSide", None)
+            logger.warning(
+                "按张数下单触发 40774，切换下单类型后重试: symbol=%s side=%s",
+                symbol,
+                retry_payload["side"],
+            )
+            res = _request(
+                api_key,
+                api_secret,
+                api_passphrase,
+                "POST",
+                "/api/v2/mix/order/place-order",
+                data=retry_payload,
+                max_retries=1,
+            )
         else:
-            retry_payload["side"] = f"{base_side}_single"
-            retry_payload.pop("tradeSide", None)
-        logger.warning(
-            "按张数下单触发 40774，切换下单类型后重试: symbol=%s side=%s",
-            symbol,
-            retry_payload["side"],
-        )
-        res = _request(
-            api_key,
-            api_secret,
-            api_passphrase,
-            "POST",
-            "/api/v2/mix/order/place-order",
-            data=retry_payload,
-            max_retries=1,
-        )
+            raise
     if isinstance(res, dict):
         res["_calculated_size"] = size_str
     return res
