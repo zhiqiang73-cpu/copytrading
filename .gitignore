@@ -1,0 +1,23 @@
+# 环境与密钥
+.env
+api.txt
+
+# 日志
+logs/
+*.log
+
+# 数据库（运行时生成）
+data/*.db
+data/*.db-shm
+data/*.db-wal
+
+# 临时文件
+*.pid
+*.lock
+.DS_Store
+__pycache__/
+*.pyc
+
+# IDE
+.vscode/
+.idea/

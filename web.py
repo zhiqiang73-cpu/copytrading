@@ -1,6 +1,7 @@
 """
 BitgetFollow Web 仪表盘
 双击启动后在浏览器中操作，无需命令行。
+仅支持币安交易员跟单 → Bitget 下单。
 """
 import logging
 import os
@@ -14,14 +15,11 @@ import signal
 
 from flask import Flask, render_template, request, jsonify, redirect, url_for, make_response
 
-import analyzer
 import api_client
-import collector
 import config
 import copy_engine
 import database as db
 import order_executor
-import scraper
 # ── Flask 初始化 ──────────────────────────────────────────────────────────────
 
 app = Flask(__name__)
@@ -34,16 +32,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger("web")
 
-# 采集线程状态 - 线程安全
-_collector_thread = None  # type: threading.Thread | None
-_collector_running = False
-_collector_lock = threading.RLock()
-
 # 心跳机制：检测网页是否关闭
 _last_heartbeat = time.time()
 _heartbeat_lock = threading.Lock()
 _config_lock = threading.RLock()
-_AUTO_EXIT_ON_HEARTBEAT_LOSS = os.getenv("AUTO_EXIT_ON_HEARTBEAT_LOSS", "0") == "1"
+_AUTO_EXIT_ON_HEARTBEAT_LOSS = os.getenv("AUTO_EXIT_ON_HEARTBEAT_LOSS", "1") == "1"
 
 @app.route("/api/heartbeat", methods=["POST"])
 def api_heartbeat():
@@ -53,16 +46,13 @@ def api_heartbeat():
     return jsonify({"ok": True})
 
 def _heartbeat_monitor():
-    """后台监控：如果 60 秒没收到心跳，说明网页已关闭。
-    注意：nohup 后台运行时心跳不会发送，因此仅在检测到至少有过一次心跳后才开始计时。
-    """
+    """后台监控：如果 60 秒没收到心跳，说明网页已关闭。"""
     logger.info("心跳监控启动（首次收到心跳后，60秒无响应将提示网页关闭）")
     _ever_received = False
     while True:
         time.sleep(5)
         with _heartbeat_lock:
             elapsed = time.time() - _last_heartbeat
-        # 只有收到过至少一次心跳之后，才启动超时检测
         if elapsed < 30:
             _ever_received = True
         if _ever_received and elapsed > 60:
@@ -121,6 +111,85 @@ def _fmt_h(seconds):
     return f"{hours:.1f}h"
 
 
+def _to_float_or_none(value):
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = value.strip().replace(",", "")
+        if value in ("", "-", "--", "null", "None"):
+            return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _pick_number(data: dict, keys: tuple[str, ...]):
+    for key in keys:
+        v = _to_float_or_none(data.get(key))
+        if v is not None:
+            return v
+    return None
+
+
+def _extract_wallet_metrics(balance_raw):
+    data = balance_raw
+    if isinstance(data, list) and data:
+        data = data[0]
+    if not isinstance(data, dict):
+        return None, None
+
+    wallet_balance = _pick_number(
+        data,
+        (
+            "usdtEquity",
+            "equity",
+            "accountEquity",
+            "totalEquity",
+            "netAsset",
+            "balance",
+        ),
+    )
+    available_balance = _pick_number(
+        data,
+        (
+            "available",
+            "availableEquity",
+            "maxAvailable",
+            "free",
+            "availableBalance",
+        ),
+    )
+    if wallet_balance is None:
+        wallet_balance = available_balance
+    return wallet_balance, available_balance
+
+
+def _build_account_overview(api_key: str, api_secret: str, api_passphrase: str):
+    balance_raw = order_executor.get_account_balance(api_key, api_secret, api_passphrase)
+    wallet_balance, available_balance = _extract_wallet_metrics(balance_raw)
+    if wallet_balance is None:
+        return None
+
+    day = time.strftime("%Y-%m-%d", time.localtime())
+    daily = db.upsert_account_daily_equity(day, wallet_balance)
+    start_equity = _to_float_or_none(daily.get("start_equity")) or 0.0
+    day_pnl = _to_float_or_none(daily.get("day_pnl")) or 0.0
+    day_pnl_pct = (day_pnl / start_equity * 100.0) if start_equity > 0 else None
+    start_ts = int(daily.get("start_ts") or 0)
+
+    return {
+        "wallet_balance": wallet_balance,
+        "available_balance": available_balance,
+        "day": day,
+        "day_start_equity": start_equity,
+        "day_start_ts": start_ts * 1000 if start_ts > 0 else None,
+        "day_pnl": day_pnl,
+        "day_pnl_pct": day_pnl_pct,
+        "updated_at": int(time.time() * 1000),
+    }
+
+
 def _normalize_copy_settings(raw: dict) -> dict:
     defaults = {
         "api_key": "",
@@ -135,6 +204,12 @@ def _normalize_copy_settings(raw: dict) -> dict:
         "enabled_traders": [],
         "binance_traders": {},
         "engine_enabled": 0,
+        "binance_api_key": "",
+        "binance_api_secret": "",
+        "binance_total_capital": 0.0,
+        "binance_follow_ratio_pct": 0.003,
+        "binance_max_margin_pct": 0.20,
+        "binance_price_tolerance": 0.0002,
     }
     if not raw:
         return defaults
@@ -160,6 +235,13 @@ def _normalize_copy_settings(raw: dict) -> dict:
         bt = {}
     settings["binance_traders"] = bt
     settings["engine_enabled"] = int(settings.get("engine_enabled") or 0)
+    
+    # 填充币安的独立风控参数（兼容旧表数据，防 None）
+    settings["binance_total_capital"] = _to_float_or_none(settings.get("binance_total_capital")) or 0.0
+    settings["binance_follow_ratio_pct"] = _to_float_or_none(settings.get("binance_follow_ratio_pct")) or 0.003
+    settings["binance_max_margin_pct"] = _to_float_or_none(settings.get("binance_max_margin_pct")) or 0.20
+    settings["binance_price_tolerance"] = _to_float_or_none(settings.get("binance_price_tolerance")) or 0.0002
+
     return settings
 
 
@@ -178,30 +260,7 @@ def _with_temp_api_config(api_key: str, api_secret: str, api_passphrase: str, fn
 
 @app.route("/")
 def index():
-    traders = db.get_all_traders()
-    uids = [t["trader_uid"] for t in traders]
-    report = analyzer.generate_daily_report(uids)
-    
-    # 获取已启用跟单的交易员列表
-    settings = db.get_copy_settings()
-    enabled_raw = settings.get("enabled_traders") or "[]"
-    enabled_traders = json.loads(enabled_raw) if isinstance(enabled_raw, str) else enabled_raw
-    
-    return render_template(
-        "index.html",
-        report=report,
-        collector_running=_collector_running,
-        filter_config=config.FILTER,
-        api_configured=_api_configured(),
-        enabled_traders=enabled_traders,
-    )
-
-
-@app.route("/api/daily_report")
-def api_daily_report():
-    uids = [t["trader_uid"] for t in db.get_all_traders()]
-    report = analyzer.generate_daily_report(uids)
-    return jsonify(report)
+    return render_template("index.html", api_configured=_api_configured())
 
 
 @app.route("/settings", methods=["GET", "POST"])
@@ -241,28 +300,9 @@ def settings():
     return render_template("settings.html", current=current, configured=configured, msg=msg, msg_type=msg_type)
 
 
-@app.route("/trader/<trader_uid>")
-def trader_detail(trader_uid):
-    trader = db.get_trader(trader_uid)
-    if not trader:
-        return "交易员不存在", 404
-    result = analyzer.compute(trader_uid)
-    trades = db.get_trades(trader_uid, limit=100)
-    snaps_dict = db.get_snapshots(trader_uid)
-    snaps  = list(snaps_dict.values())
-    now_ms = int(time.time() * 1000)
-    return render_template(
-        "trader.html",
-        trader=trader, result=result, trades=trades,
-        snaps=snaps, now_ms=now_ms,
-        fmt_ts=_fmt_ts, fmt_h=_fmt_h,
-    )
-
-
 @app.route("/my-positions")
 def my_positions():
     resp = make_response(render_template("my_positions.html"))
-    # 避免浏览器缓存旧内联脚本，导致前端仍执行过期校验逻辑
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     resp.headers["Pragma"] = "no-cache"
     resp.headers["Expires"] = "0"
@@ -270,170 +310,6 @@ def my_positions():
 
 
 # ── API 路由 ──────────────────────────────────────────────────────────────────
-
-def _parse_trader_url(text: str):
-    """
-    从 Bitget 交易员个人主页 URL 中提取 traderUid。
-    支持格式：
-      https://www.bitget.com/copy-trading/trader/{uid}/futures
-      https://www.bitget.com/zh-CN/copy-trading/trader/{uid}/futures
-      https://www.bitget.com/copytrading/trader?traderUid={uid}
-    """
-    import re
-    # 路径格式: /copy-trading/trader/{uid}/ 或 /copytrading/trader/{uid}/
-    m = re.search(r'copy-?trading/trader/([a-zA-Z0-9]+)', text)
-    if m:
-        return m.group(1)
-    # Query 参数格式: traderUid=xxx
-    m = re.search(r'traderUid=([a-zA-Z0-9]+)', text)
-    if m:
-        return m.group(1)
-    return None
-
-
-def _is_leaderboard_url(text: str) -> bool:
-    """
-    检测是否为 Bitget 排行榜/列表页链接。
-    例如：https://www.bitget.com/zh-CN/copy-trading/futures/all?rule=5&sort=0
-          https://www.bitget.com/copy-trading/futures/all
-    """
-    import re
-    return bool(re.search(r'copy-?trading/futures/(all|leaderboard|top)', text, re.I)
-                or (re.search(r'copy-?trading', text, re.I)
-                    and re.search(r'[?&](rule|sort)=\d', text)))
-
-
-@app.route("/api/batch_scan", methods=["POST"])
-def api_batch_scan():
-    """
-    【V2 新逻辑】从 Bitget 同步当前账号已跟单的交易员列表。
-    Bitget V1 公开排行榜 API 已于 2025 年下线，V2 只允许读取
-    「你自己已跟单的交易员」数据。
-    """
-    if not _api_configured():
-        return jsonify({"error": "请先配置 API Key"}), 400
-
-    try:
-        followed = api_client.get_followed_traders(page=1, page_size=50)
-    except Exception as exc:
-        return jsonify({"error": f"读取跟单列表失败：{exc}"}), 500
-
-    tracked_uids = {t["trader_uid"] for t in db.get_all_traders()}
-
-    candidates = []
-    for r in followed:
-        # V2 字段名：traderId / traderName / profitRate / winRate / followerCount 等
-        uid  = r.get("traderId") or r.get("traderUid") or ""
-        name = r.get("traderName") or r.get("traderNickName") or uid[:12]
-        if not uid:
-            continue
-
-        win_rate  = float(r.get("winRate") or r.get("averageWinRate") or 0)
-        max_dd    = float(r.get("maxDrawdown") or r.get("maxCallbackRate") or 0)
-        total     = int(r.get("totalTradeCount") or 0)
-        followers = int(r.get("followerCount") or r.get("totalFollowers") or 0)
-        roi_val   = float(r.get("profitRate") or 0)
-        roi       = f"{roi_val:.1f}%" if roi_val else "N/A"
-
-        already = uid in tracked_uids
-        candidates.append({
-            "uid":       uid,
-            "name":      name,
-            "win_rate":  round(win_rate, 1),
-            "total":     total,
-            "max_dd":    round(max_dd, 1),
-            "followers": followers,
-            "roi":       roi,
-            "already":   already,
-        })
-
-    new_count = sum(1 for c in candidates if not c["already"])
-    return jsonify({
-        "mode":         "followed",
-        "total":        len(followed),
-        "candidates":   candidates,
-        "new_count":    new_count,
-    })
-
-
-@app.route("/api/search", methods=["POST"])
-def api_search():
-    raw_input = (request.json or {}).get("nickname", "").strip()
-    if not raw_input:
-        return jsonify({"error": "请输入交易员主页链接"}), 400
-
-    # ① 排行榜链接 → 提示换成个人主页
-    if _is_leaderboard_url(raw_input):
-        return jsonify({
-            "error": (
-                "请粘贴【交易员个人主页】链接，格式：\n"
-                "https://www.bitget.com/zh-CN/copy-trading/trader/xxxx/futures\n\n"
-                "（排行榜链接无法自动处理，需要点进交易员主页后复制链接）"
-            )
-        }), 400
-
-    # ② 个人主页链接 → 提取 UID 并立即拉取公开数据
-    uid_from_url = _parse_trader_url(raw_input)
-    if uid_from_url:
-        try:
-            detail = scraper.fetch_trader_detail(uid_from_url)
-        except Exception as exc:
-            return jsonify({"error": f"拉取交易员数据失败：{exc}"}), 500
-        if not detail:
-            return jsonify({"error": "无法获取该交易员数据，请确认链接有效"}), 400
-        return jsonify({
-            "preview": True,
-            "uid": uid_from_url,
-            "name": detail.get("name", uid_from_url),
-            "win_rate": detail.get("win_rate", 0),
-            "roi": detail.get("roi", 0),
-            "max_drawdown": detail.get("max_drawdown", 0),
-            "total_profit": detail.get("total_profit", 0),
-            "follower_count": detail.get("follower_count", 0),
-            "aum": detail.get("aum", 0),
-            "profit_7d": detail.get("profit_7d", 0),
-            "profit_30d": detail.get("profit_30d", 0),
-            "avatar": detail.get("avatar", ""),
-            "already": uid_from_url in {t["trader_uid"] for t in db.get_all_traders()},
-        })
-
-    # ③ 不是链接 → 提示需要主页链接
-    return jsonify({
-        "error": (
-            "请粘贴 Bitget 交易员【个人主页链接】，例如：\n"
-            "https://www.bitget.com/zh-CN/copy-trading/trader/b1bc4c7086b23b55ad94/futures\n\n"
-            "暂不支持按名称搜索（Bitget V2 API 限制）"
-        )
-    }), 400
-
-
-@app.route("/api/add_trader", methods=["POST"])
-def api_add_trader():
-    global _collector_thread, _collector_running
-    uid  = (request.json or {}).get("uid", "").strip()
-    name = (request.json or {}).get("name", "").strip()
-    if not uid:
-        return jsonify({"error": "UID 不能为空"}), 400
-    try:
-        # 如果之前删除过该交易员，清除黑名单以允许重新添加
-        db.clear_deleted(uid)
-        collector.init_trader(uid, name or uid)
-        # 添加成功后，若采集器未运行则自动启动
-        with _collector_lock:
-            if not _collector_running and not (_collector_thread and _collector_thread.is_alive()):
-                import collector as _col
-                _col._running = True
-                _collector_running = True
-                _collector_thread = threading.Thread(target=_run_collector, daemon=True)
-                _collector_thread.start()
-                logger.info("添加交易员后自动启动采集器")
-        trader = db.get_trader(uid)
-        final_name = (trader["nickname"] if trader else None) or name or uid
-        return jsonify({"ok": True, "msg": f"已成功添加 {final_name}，数据已同步"})
-    except Exception as exc:
-        logger.error("添加交易员失败: %s", exc, exc_info=True)
-        return jsonify({"error": f"添加失败：{exc}"}), 500
-
 
 @app.route("/api/add_binance_trader", methods=["POST"])
 def api_add_binance_trader():
@@ -445,10 +321,8 @@ def api_add_binance_trader():
         return jsonify({"error": "URL 或 Portfolio ID 不能为空"}), 400
     
     try:
-        # 尝试从 URL 提取 portfolio_id
         portfolio_id = binance_scraper.parse_binance_url(url_or_pid) or url_or_pid
         
-        # 基础验证：portfolio_id 应该是数字
         if not portfolio_id.isdigit() or len(portfolio_id) < 10:
             return jsonify({
                 "error": f"无效的 Portfolio ID: {portfolio_id}\n请使用完整的 URL 或正确的 ID（数字，至少 10 位）"
@@ -456,35 +330,27 @@ def api_add_binance_trader():
         
         logger.info("正在添加币安交易员：%s", portfolio_id[:12])
         
-        # 获取交易员信息（总是返回至少基础信息）
         info = binance_scraper.fetch_trader_info(portfolio_id)
         if not info:
-            logger.error("无法获取币安交易员信息: %s", portfolio_id[:12])
-            # 至少提供一个默认条目
             info = {
                 "portfolio_id": portfolio_id,
                 "nickname": f"币安交易员_{portfolio_id[:8]}",
             }
         
-        # 获取当前设置
         settings = db.get_copy_settings()
         bn_traders_raw = settings.get("binance_traders") or "[]"
         
-        # 兼容旧格式（数组）和新格式（对象字典）
         try:
             bn_traders_data = json.loads(bn_traders_raw)
             if isinstance(bn_traders_data, list) and bn_traders_data and isinstance(bn_traders_data[0], str):
-                # 旧格式：简单数组，转换为新格式
                 bn_traders_dict = {pid: {"nickname": f"币安交易员_{pid[:8]}"} for pid in bn_traders_data}
             elif isinstance(bn_traders_data, dict):
-                # 新格式：对象字典
                 bn_traders_dict = bn_traders_data
             else:
                 bn_traders_dict = {}
         except:
             bn_traders_dict = {}
         
-        # 避免重复添加
         if portfolio_id not in bn_traders_dict:
             bn_traders_dict[portfolio_id] = {
                 "nickname": info.get("nickname"),
@@ -495,7 +361,7 @@ def api_add_binance_trader():
                 "aum": info.get("aum"),
                 "avatar": info.get("avatar"),
                 "total_trades": info.get("total_trades"),
-                "copy_enabled": True,  # 默认开启跟单
+                "copy_enabled": True,
                 "added_at": int(time.time())
             }
             db.update_copy_settings(binance_traders=json.dumps(bn_traders_dict))
@@ -531,7 +397,6 @@ def api_remove_binance_trader():
         except:
             bn_traders_data = {}
         
-        # 支持旧格式和新格式
         if isinstance(bn_traders_data, dict):
             if portfolio_id in bn_traders_data:
                 del bn_traders_data[portfolio_id]
@@ -551,156 +416,112 @@ def api_remove_binance_trader():
 
 @app.route("/api/toggle_copy", methods=["POST"])
 def api_toggle_copy():
-    """切换单个交易员的跟单开关（Bitget 或 币安）"""
+    """切换币安交易员的跟单开关"""
     data = request.json or {}
     uid = data.get("uid", "").strip()
-    source = data.get("source", "bitget")  # "bitget" 或 "binance"
     enabled = data.get("enabled", False)
     
     if not uid:
         return jsonify({"error": "缺少交易员ID"}), 400
     
     settings = db.get_copy_settings()
+    raw = settings.get("binance_traders") or "{}"
+    bn_traders = json.loads(raw) if isinstance(raw, str) else raw
     
-    if source == "bitget":
-        # 更新 Bitget 交易员列表
-        raw = settings.get("enabled_traders") or "[]"
-        enabled_list = json.loads(raw) if isinstance(raw, str) else raw
-        
-        if enabled and uid not in enabled_list:
-            enabled_list.append(uid)
-            logger.info("启用 Bitget 跟单: %s", uid[:12])
-        elif not enabled and uid in enabled_list:
-            enabled_list.remove(uid)
-            logger.info("禁用 Bitget 跟单: %s", uid[:12])
-        
-        db.update_copy_settings(enabled_traders=json.dumps(enabled_list))
-        return jsonify({"ok": True, "enabled": enabled, "count": len(enabled_list)})
-    
-    elif source == "binance":
-        # 更新币安交易员的启用状态
-        raw = settings.get("binance_traders") or "{}"
-        bn_traders = json.loads(raw) if isinstance(raw, str) else raw
-        
-        if uid in bn_traders:
-            bn_traders[uid]["copy_enabled"] = enabled
-            db.update_copy_settings(binance_traders=json.dumps(bn_traders))
-            logger.info("%s 币安跟单: %s", "启用" if enabled else "禁用", uid[:12])
-            return jsonify({"ok": True, "enabled": enabled})
-        else:
-            return jsonify({"error": "币安交易员不存在"}), 404
-    
-    return jsonify({"error": "未知来源"}), 400
-
-
-@app.route("/api/remove_trader", methods=["POST"])
-def api_remove_trader():
-    uid = request.json.get("uid", "").strip()
-    trader = db.get_trader(uid)
-    if not trader:
-        return jsonify({"error": "交易员不存在"}), 404
-    
-    logger.info("开始删除交易员 %s (%s)…", uid[:8], trader.get("nickname"))
-    
-    global _collector_running
-    
-    # 1. 暂停采集器（防止并发写入冲突）
-    with _collector_lock:
-        was_running = _collector_running
-        if was_running:
-            import collector
-            collector._running = False
-            logger.info("已暂停采集器")
-            time.sleep(0.5)  # 等待采集器本轮结束
-    
-    try:
-        # 2. 清理快照
-        db.clear_snapshots(uid)
-        logger.info("已清理快照")
-        
-        # 3. 删除交易记录和交易员记录（使用写锁）
-        from database import get_conn, _db_write_lock
-        with _db_write_lock:
-            with get_conn() as conn:
-                conn.execute("DELETE FROM trades WHERE trader_uid = ?", (uid,))
-                conn.execute("DELETE FROM traders WHERE trader_uid = ?", (uid,))
-                conn.commit()
-        logger.info("已从 DB 删除交易员和历史订单")
-        
-        # 4. 从 copy_settings.enabled_traders 中移除该 UID
-        with _db_write_lock:
-            try:
-                settings = db.get_copy_settings()
-                raw_enabled = settings.get("enabled_traders") or "[]"
-                enabled = json.loads(raw_enabled) if isinstance(raw_enabled, str) else raw_enabled
-                if uid in enabled:
-                    enabled.remove(uid)
-                    db.update_copy_settings(enabled_traders=json.dumps(enabled))
-                    logger.info("已从 enabled_traders 中移除该 UID")
-            except Exception as exc:
-                logger.warning("清理 enabled_traders 失败: %s", exc)
-        
-        # 5. 标记该交易员为已删除（防止采集器重新创建）
-        db.mark_deleted(uid)
-        
-        # 6. 恢复采集器（如果之前运行过）
-        if was_running:
-            with _collector_lock:
-                import collector
-                collector._running = True
-                logger.info("已恢复采集器")
-        
-        logger.info("交易员 %s 已完全删除", uid[:8])
-        return jsonify({"ok": True, "msg": f"已删除 {trader['nickname']}"})
-    
-    except Exception as exc:
-        # 异常时恢复采集器
-        if was_running:
-            with _collector_lock:
-                import collector
-                collector._running = True
-        logger.error("删除交易员失败: %s", exc, exc_info=True)
-        return jsonify({"error": f"删除失败：{exc}"}), 500
-
-
-
-
-@app.route("/api/collector/start", methods=["POST"])
-def api_collector_start():
-    global _collector_thread, _collector_running
-    with _collector_lock:
-        if _collector_running:
-            return jsonify({"error": "采集器已在运行"}), 400
-        uids = [t["trader_uid"] for t in db.get_all_traders()]
-        if not uids:
-            return jsonify({"error": "没有追踪中的交易员"}), 400
-
-        import collector as _col
-        _col._running = True
-        _collector_running = True
-        _collector_thread = threading.Thread(target=_run_collector, daemon=True)
-        _collector_thread.start()
-        return jsonify({"ok": True, "msg": f"采集器已启动，共追踪 {len(uids)} 人"})
-
-
-@app.route("/api/collector/stop", methods=["POST"])
-def api_collector_stop():
-    global _collector_running
-    with _collector_lock:
-        import collector as _col
-        _col._running = False
-        _collector_running = False
-    return jsonify({"ok": True, "msg": "采集器已停止"})
+    if uid in bn_traders:
+        bn_traders[uid]["copy_enabled"] = enabled
+        db.update_copy_settings(binance_traders=json.dumps(bn_traders))
+        logger.info("%s 币安跟单: %s", "启用" if enabled else "禁用", uid[:12])
+        return jsonify({"ok": True, "enabled": enabled})
+    else:
+        return jsonify({"error": "币安交易员不存在"}), 404
 
 
 @app.route("/api/status")
 def api_status():
     return jsonify({
         "api_configured": _api_configured(),
-        "collector_running": _collector_running,
         "copy_engine_running": copy_engine.is_engine_running(),
-        "trader_count": len(db.get_all_traders()),
     })
+
+
+# ── 排行榜扫描 API ───────────────────────────────────────────────────────────
+
+@app.route("/api/scan/start", methods=["POST"])
+def api_scan_start():
+    """启动后台排行榜扫描"""
+    import binance_scanner
+    
+    status = binance_scanner.get_scan_status()
+    if status.get("running"):
+        return jsonify({"error": "扫描已在运行中"}), 400
+    
+    payload = request.json or {}
+    filters = {
+        "min_copier_pnl": float(payload.get("min_copier_pnl", 0)),
+        "min_followers": int(payload.get("min_followers", 10)),
+        "min_sharp_ratio": float(payload.get("min_sharp_ratio", 0)),
+        "min_trades": int(payload.get("min_trades", 5)),
+        "min_win_rate": float(payload.get("min_win_rate", 0)),
+        "sort_by": payload.get("sort_by", "copier_pnl"),
+        "max_results": int(payload.get("max_results", 30)),
+    }
+    max_scroll = int(payload.get("max_scroll", 8))
+    
+    binance_scanner.start_scan(filters=filters, max_scroll=max_scroll)
+    return jsonify({"ok": True, "msg": "扫描已启动"})
+
+
+@app.route("/api/scan/status")
+def api_scan_status():
+    """查询扫描进度"""
+    import binance_scanner
+    status = binance_scanner.get_scan_status()
+    # 不返回完整结果（太大），只返回状态信息
+    return jsonify({
+        "running": status["running"],
+        "phase": status["phase"],
+        "progress": status["progress"],
+        "total_found": status["total_found"],
+        "analyzed": status["analyzed"],
+        "result_count": len(status.get("results", [])),
+        "error": status["error"],
+        "started_at": status["started_at"],
+        "finished_at": status["finished_at"],
+    })
+
+
+@app.route("/api/scan/results")
+def api_scan_results():
+    """获取扫描结果"""
+    import binance_scanner
+    status = binance_scanner.get_scan_status()
+    results = status.get("results", [])
+    
+    # 标记已添加的交易员
+    settings = _normalize_copy_settings(db.get_copy_settings())
+    bn_raw = settings.get("binance_traders") or {}
+    if isinstance(bn_raw, str):
+        try: bn_raw = json.loads(bn_raw)
+        except: bn_raw = {}
+    existing_pids = set(str(k) for k in bn_raw.keys())
+    
+    for r in results:
+        r["already_added"] = str(r.get("portfolio_id", "")) in existing_pids
+    
+    return jsonify({
+        "results": results,
+        "total": len(results),
+        "phase": status["phase"],
+    })
+
+
+@app.route("/api/scan/stop", methods=["POST"])
+def api_scan_stop():
+    """停止扫描"""
+    import binance_scanner
+    binance_scanner.stop_scan()
+    return jsonify({"ok": True, "msg": "扫描已停止"})
 
 
 # ── Copy Trading API ──────────────────────────────────────────────────────────
@@ -713,6 +534,9 @@ def api_copy_settings():
         api_key = (payload.get("api_key") or "").strip() or config.BITGET_API_KEY or ""
         api_secret = (payload.get("api_secret") or "").strip() or config.BITGET_SECRET_KEY or ""
         api_passphrase = (payload.get("api_passphrase") or "").strip() or config.BITGET_PASSPHRASE or ""
+        # 币安 API（可选）
+        binance_api_key = (payload.get("binance_api_key") or "").strip() or existing.get("binance_api_key") or ""
+        binance_api_secret = (payload.get("binance_api_secret") or "").strip() or existing.get("binance_api_secret") or ""
         def _float_or(raw_v, default_v):
             if raw_v is None or raw_v == "":
                 return float(default_v)
@@ -723,7 +547,6 @@ def api_copy_settings():
 
         total_capital = _float_or(payload.get("total_capital"), existing.get("total_capital", 0.0))
         follow_ratio_pct = _float_or(payload.get("follow_ratio_pct"), existing.get("follow_ratio_pct", 0.003))
-        # 兼容手动 API 传入百分数（例如 3 表示 3%）
         if follow_ratio_pct > 1:
             follow_ratio_pct = follow_ratio_pct / 100.0
         follow_ratio_pct = min(max(follow_ratio_pct, 0.0), 1.0)
@@ -731,9 +554,8 @@ def api_copy_settings():
         price_tolerance = _float_or(payload.get("price_tolerance"), existing.get("price_tolerance", 0.0002))
         sl_pct = _float_or(payload.get("sl_pct"), existing.get("sl_pct", 0.15))
         tp_pct = _float_or(payload.get("tp_pct"), existing.get("tp_pct", 0.30))
-        incoming_enabled = payload.get("enabled_traders")
-        enabled_traders = incoming_enabled if isinstance(incoming_enabled, list) else (existing.get("enabled_traders") or [])
-        # 若未传入 binance_traders，保留已有配置，避免被清空
+        
+        # 币安交易员配置
         binance_traders = payload.get("binance_traders")
         if binance_traders is None:
             binance_traders = existing.get("binance_traders") or {}
@@ -743,7 +565,6 @@ def api_copy_settings():
             except Exception:
                 binance_traders = existing.get("binance_traders") or {}
 
-        # 统一成 dict 结构，兼容旧列表格式
         normalized_bn: dict[str, dict] = {}
         if isinstance(binance_traders, list):
             for pid in binance_traders:
@@ -764,17 +585,21 @@ def api_copy_settings():
                 row["copy_enabled"] = bool(row.get("copy_enabled", True))
                 normalized_bn[spid] = row
 
-        # 额外校验：确保选中的 UID 在数据库中真实存在，防止残留或注入
-        valid_uids = {t["trader_uid"] for t in db.get_all_traders()}
-        clean_enabled = [uid for uid in enabled_traders if uid in valid_uids]
-        # 防止旧前端把 enabled_traders 空覆盖
-        if not clean_enabled:
-            prev_enabled = existing.get("enabled_traders") or []
-            if isinstance(prev_enabled, list):
-                clean_enabled = [uid for uid in prev_enabled if uid in valid_uids]
-        # 防止旧前端把 binance_traders 空覆盖
         if not normalized_bn and isinstance(existing.get("binance_traders"), dict):
             normalized_bn = existing.get("binance_traders")
+
+        # 币安风控参数
+        binance_total_capital = _float_or(payload.get("binance_total_capital"), existing.get("binance_total_capital", 0.0))
+        binance_follow_ratio_pct = _float_or(payload.get("binance_follow_ratio_pct"), existing.get("binance_follow_ratio_pct", 0.003))
+        if binance_follow_ratio_pct > 1:
+            binance_follow_ratio_pct = binance_follow_ratio_pct / 100.0
+        binance_follow_ratio_pct = min(max(binance_follow_ratio_pct, 0.0), 1.0)
+        binance_max_margin_pct = _float_or(payload.get("binance_max_margin_pct"), existing.get("binance_max_margin_pct", 0.2))
+        binance_price_tolerance = _float_or(payload.get("binance_price_tolerance"), existing.get("binance_price_tolerance", 0.0002))
+
+        enabled_traders = payload.get("enabled_traders")
+        if enabled_traders is None:
+            enabled_traders = existing.get("enabled_traders", [])
 
         db.update_copy_settings(
             api_key=api_key,
@@ -786,22 +611,29 @@ def api_copy_settings():
             price_tolerance=price_tolerance,
             sl_pct=sl_pct,
             tp_pct=tp_pct,
-            enabled_traders=json.dumps(clean_enabled),
+            enabled_traders=json.dumps(enabled_traders),
             binance_traders=json.dumps(normalized_bn, ensure_ascii=False),
+            binance_api_key=binance_api_key,
+            binance_api_secret=binance_api_secret,
+            binance_total_capital=binance_total_capital,
+            binance_follow_ratio_pct=binance_follow_ratio_pct,
+            binance_max_margin_pct=binance_max_margin_pct,
+            binance_price_tolerance=binance_price_tolerance,
         )
         
-        # 同步更新运行中的 config 对象
         config.BITGET_API_KEY = api_key
         config.BITGET_SECRET_KEY = api_secret
         config.BITGET_PASSPHRASE = api_passphrase
 
-        # 同步写入 .env，保证重启后不丢失（保留 BITGET_SIMULATED 等现有设置）
         env_path = os.path.join(os.path.dirname(__file__), ".env")
         simulated = os.getenv("BITGET_SIMULATED", "0")
         with open(env_path, "w", encoding="utf-8") as f:
             f.write(f"BITGET_API_KEY={api_key}\n")
             f.write(f"BITGET_SECRET_KEY={api_secret}\n")
             f.write(f"BITGET_PASSPHRASE={api_passphrase}\n")
+            f.write(f"BINANCE_API_KEY={binance_api_key}\n")
+            f.write(f"BINANCE_API_SECRET={binance_api_secret}\n")
+            f.write(f"BINANCE_BASE_URL={config.BINANCE_BASE_URL}\n")
             f.write(f"BITGET_SIMULATED={simulated}\n")
             if os.getenv("BITGET_BASE_URL"):
                 f.write(f"BITGET_BASE_URL={os.getenv('BITGET_BASE_URL')}\n")
@@ -811,37 +643,42 @@ def api_copy_settings():
         return jsonify({"ok": True})
 
     settings = _normalize_copy_settings(db.get_copy_settings())
-    # P1#6 密钥脱敏：GET 时不把完整 secret 暴露给前端
     safe_settings = dict(settings)
-    for field in ("api_secret", "api_passphrase"):
+    for field in ("api_secret", "api_passphrase", "binance_api_secret"):
         val = safe_settings.get(field, "")
         if val and len(val) > 8:
             safe_settings[field] = val[:4] + "****" + val[-4:]
-    traders = []
-    for t in db.get_all_traders():
-        snaps = db.get_snapshots(t["trader_uid"])
-        traders.append({
-            "uid": t["trader_uid"],
-            "name": t.get("nickname") or t["trader_uid"][:10],
-            "win_rate": t.get("win_rate") or 0,
-            "max_drawdown": t.get("max_drawdown") or 0,
-            "roi": t.get("roi") or 0,
-            "positions": len(snaps),
-            "avatar": t.get("avatar") or "",
-        })
-    return jsonify({**safe_settings, "traders": traders})
+    return jsonify(safe_settings)
 
 
 @app.route("/api/copy/test_api", methods=["POST"])
 def api_copy_test_api():
     payload = request.json or {}
+    source = payload.get("source", "bitget")
+    existing = _normalize_copy_settings(db.get_copy_settings())
+    
+    if source == "binance":
+        api_key = (payload.get("binance_api_key") or "").strip() or existing.get("binance_api_key") or ""
+        api_secret = (payload.get("binance_api_secret") or "").strip() or existing.get("binance_api_secret") or ""
+        if not api_key or not api_secret:
+            return jsonify({"error": "币安 API Key / Secret 不能为空"}), 400
+        try:
+            balance_info = order_executor.test_binance_connection(api_key, api_secret)
+            available = float(balance_info.get("availableBalance", 0))
+            return jsonify({"ok": True, "msg": f"币安连接成功，可用余额 {available:.2f} USDT | endpoint={config.BINANCE_BASE_URL}"})
+        except Exception as e:
+            logger.error("币安 API 测试失败: %s", e)
+            err = str(e)
+            if "code=-2015" in err or "Invalid API-key" in err:
+                err = f"{err} | 请确认当前 endpoint 与 API Key 所属环境一致（testnet/mainnet）: {config.BINANCE_BASE_URL}"
+            return jsonify({"error": f"币安连接失败：{err}"}), 400
+
     api_key = (payload.get("api_key") or "").strip() or config.BITGET_API_KEY or ""
     api_secret = (payload.get("api_secret") or "").strip() or config.BITGET_SECRET_KEY or ""
     api_passphrase = (payload.get("api_passphrase") or "").strip() or config.BITGET_PASSPHRASE or ""
     if not api_key or not api_secret or not api_passphrase:
-        return jsonify({"error": "API Key / Secret / Passphrase 不能为空"}), 400
+        return jsonify({"error": "Bitget API Key / Secret / Passphrase 不能为空"}), 400
     try:
-        # 用 order_executor 测试交易账户余额
         balance = order_executor.get_account_balance(api_key, api_secret, api_passphrase)
         available = 0.0
         if isinstance(balance, dict):
@@ -854,30 +691,51 @@ def api_copy_test_api():
                 if balance[0].get(k) is not None:
                     available = float(balance[0][k])
                     break
-        return jsonify({"ok": True, "msg": f"连接成功，可用余额 {available:.2f} USDT"})
+        return jsonify({"ok": True, "msg": f"Bitget 连接成功，可用余额 {available:.2f} USDT"})
     except Exception as exc:
-        return jsonify({"error": f"连接失败：{exc}"}), 400
+        return jsonify({"error": f"Bitget 连接失败：{exc}"}), 400
+
+
+
+@app.route("/api/binance/balance")
+def api_binance_balance():
+    """获取币安账户余额和当日盈亏"""
+    import binance_scraper
+    settings = _normalize_copy_settings(db.get_copy_settings())
+    api_key = settings.get("binance_api_key") or ""
+    api_secret = settings.get("binance_api_secret") or ""
+    if not api_key or not api_secret:
+        return jsonify({"error": "币安 API 未配置"}), 400
+    try:
+        balance_info = binance_scraper.get_binance_futures_balance(api_key, api_secret)
+        day_pnl = binance_scraper.get_binance_futures_income_today(api_key, api_secret)
+        wallet_balance = balance_info.get("balance", 0)
+        available = balance_info.get("available", 0)
+        unrealized_pnl = balance_info.get("unrealized_pnl", 0)
+        day_pnl_pct = (day_pnl / wallet_balance * 100.0) if wallet_balance > 0 else 0.0
+        return jsonify({
+            "ok": True,
+            "wallet_balance": wallet_balance,
+            "available_balance": available,
+            "unrealized_pnl": unrealized_pnl,
+            "day_pnl": day_pnl,
+            "day_pnl_pct": day_pnl_pct,
+            "updated_at": int(time.time() * 1000),
+        })
+    except Exception as exc:
+        logger.warning("币安余额查询失败: %s", exc)
+        return jsonify({"error": f"查询失败：{exc}"}), 400
 
 
 @app.route("/api/copy/start", methods=["POST"])
 def api_copy_start():
     settings = _normalize_copy_settings(db.get_copy_settings())
-    if not settings.get("api_key") or not settings.get("api_secret") or not settings.get("api_passphrase"):
-        return jsonify({"error": "请先配置并保存 API Key"}), 400
-    enabled = settings.get("enabled_traders") or []
-    if isinstance(enabled, str):
-        enabled = json.loads(enabled)
+    has_bg = bool(settings.get("api_key") and settings.get("api_secret") and settings.get("api_passphrase"))
+    has_bn = bool(settings.get("binance_api_key") and settings.get("binance_api_secret"))
+    if not has_bg and not has_bn:
+        return jsonify({"error": "请至少配置并保存 Bitget 或币安模拟网的 API 密钥"}), 400
 
-    # 过滤掉已被删除的交易员 UID（防止残留 UID 导致计数异常）
-    valid_uids = {t["trader_uid"] for t in db.get_all_traders()}
-    clean_enabled = [uid for uid in enabled if uid in valid_uids]
-    if len(clean_enabled) != len(enabled):
-        stale = [uid for uid in enabled if uid not in valid_uids]
-        logger.warning("发现 %d 个已删除交易员仍在 enabled_traders 中，已自动清理: %s", len(stale), stale)
-        db.update_copy_settings(enabled_traders=json.dumps(clean_enabled))
-        enabled = clean_enabled
-
-    # 同时考虑已启用的币安交易员
+    # 检查已启用的币安交易员
     bn_traders_raw = settings.get("binance_traders") or "{}"
     try:
         bn_traders = json.loads(bn_traders_raw) if isinstance(bn_traders_raw, str) else bn_traders_raw
@@ -888,26 +746,23 @@ def api_copy_start():
         if isinstance(data, dict) and data.get("copy_enabled") is True
     ]
 
-    total_enabled = len(enabled) + len(bn_enabled)
-    if total_enabled == 0:
-        # 不再阻塞启动，避免旧前端缓存校验与后端状态不一致时误报
+    if len(bn_enabled) == 0:
         db.set_engine_enabled(True)
         copy_engine.start_engine()
-        return jsonify({"ok": True, "msg": "引擎已启动（当前未检测到启用对象，等待配置同步）"})
+        return jsonify({"ok": True, "msg": "引擎已启动（当前未检测到启用的币安交易员，请添加后启用跟单）"})
 
-    # 资金池未配置会导致下单失败（保证金=0），提前提醒
     total_cap = float(settings.get("total_capital") or 0)
     if total_cap <= 0:
         db.set_engine_enabled(True)
         copy_engine.start_engine()
         return jsonify({
             "ok": True,
-            "msg": f"引擎已启动，但⚠️资金池为0，跟单会全部失败。请填写「总资金」并保存后再试。Bitget {len(enabled)}人，Binance {len(bn_enabled)}人"
+            "msg": f"引擎已启动，但⚠️资金池为0，跟单会全部失败。请填写「总资金」并保存后再试。Binance {len(bn_enabled)}人"
         })
 
     db.set_engine_enabled(True)
     copy_engine.start_engine()
-    return jsonify({"ok": True, "msg": f"跟单引擎已启动，Bitget {len(enabled)} 人，Binance {len(bn_enabled)} 人"})
+    return jsonify({"ok": True, "msg": f"跟单引擎已启动，Binance {len(bn_enabled)} 人"})
 
 
 @app.route("/api/copy/stop", methods=["POST"])
@@ -926,7 +781,7 @@ def api_copy_orders():
     
     # 建立 UID -> Nickname 映射
     settings = _normalize_copy_settings(db.get_copy_settings())
-    name_map = {t['trader_uid']: t['nickname'] for t in db.get_all_traders()}
+    name_map = {}
     bn_raw = settings.get("binance_traders") or {}
     if isinstance(bn_raw, str):
         try: bn_raw = json.loads(bn_raw)
@@ -936,12 +791,12 @@ def api_copy_orders():
             name_map[str(pid)] = info["nickname"]
             name_map[pid] = info["nickname"]
             
-    # 注入 trader_name
     items = []
     for r in rows:
         d = dict(r)
         uid = str(d.get("trader_uid", ""))
         d["trader_name"] = name_map.get(uid, uid or "-")
+        d["platform"] = str(d.get("platform") or "bitget").lower()
         items.append(d)
 
     return jsonify({"items": items, "page": page, "page_size": page_size})
@@ -949,17 +804,16 @@ def api_copy_orders():
 
 @app.route("/api/copy/positions")
 def api_copy_positions():
-    """读取用户自己账户的当前合约持仓。"""
+    """读取用户自己账户的当前合约持仓，按 Bitget / Binance 分组返回。"""
     settings = _normalize_copy_settings(db.get_copy_settings())
     api_key = settings.get("api_key") or ""
     api_secret = settings.get("api_secret") or ""
     api_passphrase = settings.get("api_passphrase") or ""
-    if not api_key or not api_secret or not api_passphrase:
-        return jsonify({"error": "请先配置 API Key"}), 400
-    try:
-        raw = order_executor.get_my_positions(api_key, api_secret, api_passphrase)
-    except Exception as exc:
-        return jsonify({"error": f"读取持仓失败：{exc}"}), 400
+    bn_api_key = settings.get("binance_api_key") or ""
+    bn_api_secret = settings.get("binance_api_secret") or ""
+    account_overview = None
+    bitget_error = ""
+    binance_error = ""
 
     def _clean_symbol(symbol: str) -> str:
         s = str(symbol or "").upper()
@@ -983,10 +837,8 @@ def api_copy_positions():
     # 查找 copy_orders 里 filled 的开仓记录，用于显示"来源交易员"
     open_orders = db.get_copy_orders(limit=1000)
     
-    # 建立 UID -> Nickname 映射
-    # 1. Bitget 交易员
-    name_map = {t['trader_uid']: t['nickname'] for t in db.get_all_traders()}
-    # 2. 币安交易员
+    # 建立 UID -> Nickname 映射（币安交易员）
+    name_map = {}
     bn_raw = settings.get("binance_traders") or {}
     if isinstance(bn_raw, str):
         try: bn_raw = json.loads(bn_raw)
@@ -996,10 +848,14 @@ def api_copy_positions():
             name_map[str(pid)] = info["nickname"]
             name_map[pid] = info["nickname"]
 
-    # symbol+direction → 最近一条 filled open 的 trader_name / trader_uid
-    # db.get_copy_orders() 已按 timestamp DESC 返回，直接顺序遍历即可拿到“最近一条”。
-    source_map: dict[str, str] = {}
-    source_uid_map: dict[str, str] = {}
+    source_maps: dict[str, dict[str, str]] = {
+        "bitget": {},
+        "binance": {},
+    }
+    source_uid_maps: dict[str, dict[str, str]] = {
+        "bitget": {},
+        "binance": {},
+    }
     for o in open_orders:
         if o.get("action") == "open" and o.get("status") == "filled":
             symbol = _clean_symbol(o.get("symbol"))
@@ -1008,153 +864,134 @@ def api_copy_positions():
                 continue
             key = f"{symbol}_{direction}"
             uid = str(o.get("trader_uid", "-"))
-            if key not in source_uid_map:
-                source_uid_map[key] = uid
-                source_map[key] = name_map.get(uid, uid)
-
-    # symbol+direction → 来源实时指标（优先使用 snapshots）
-    source_metrics_map: dict[str, dict] = {}
-    source_metrics_by_uid_key: dict[str, dict] = {}
-    enabled_uids = settings.get("enabled_traders") or []
-    if isinstance(enabled_uids, str):
-        try:
-            enabled_uids = json.loads(enabled_uids)
-        except Exception:
-            enabled_uids = []
-    for uid in enabled_uids:
-        uid = str(uid)
-        try:
-            snaps = db.get_snapshots(uid)
-        except Exception:
-            snaps = {}
-        for snap in snaps.values():
-            symbol = _clean_symbol(snap.get("symbol"))
-            hold_side = str(snap.get("hold_side") or "").lower()
-            if not symbol or hold_side not in ("long", "short"):
+            platform = str(o.get("platform") or "bitget").lower()
+            if platform not in source_maps:
                 continue
-            key = f"{symbol}_{hold_side}"
-            ts = int(snap.get("timestamp") or 0)
-            metrics = {
-                "_ts": ts,
-                "leverage": snap.get("leverage"),
-                "margin_amount": snap.get("open_amount") or snap.get("margin_amount"),
-                "position_size": snap.get("position_size"),
-                "unrealized_pnl": snap.get("unrealized_pnl"),
-                "return_rate": snap.get("return_rate"),
-            }
+            if key not in source_uid_maps[platform]:
+                source_uid_maps[platform][key] = uid
+                source_maps[platform][key] = name_map.get(uid, uid)
 
-            prev = source_metrics_map.get(key)
-            if not prev or ts >= int(prev.get("_ts", 0)):
-                source_metrics_map[key] = metrics
+    bitget_positions = []
+    if api_key and api_secret and api_passphrase:
+        try:
+            raw = order_executor.get_my_positions(api_key, api_secret, api_passphrase)
+        except Exception as exc:
+            bitget_error = f"读取 Bitget 持仓失败：{exc}"
+            raw = []
+        try:
+            account_overview = _build_account_overview(api_key, api_secret, api_passphrase)
+        except Exception as exc:
+            logger.warning("读取账户总览失败：%s", exc)
 
-            scoped_key = f"{uid}|{key}"
-            prev_scoped = source_metrics_by_uid_key.get(scoped_key)
-            if not prev_scoped or ts >= int(prev_scoped.get("_ts", 0)):
-                source_metrics_by_uid_key[scoped_key] = metrics
+        for item in raw:
+            symbol = _clean_symbol(item.get("symbol") or "-")
+            hold_side = str(item.get("holdSide") or "-").lower()
+            if hold_side not in ("long", "short"):
+                hold_side = "-"
+            source_key = f"{symbol}_{hold_side}"
+            source = source_maps["bitget"].get(source_key, "-")
 
-    positions = []
-    for item in (raw or []):
-        symbol = _clean_symbol(item.get("symbol") or "-")
-        hold_side = str(item.get("holdSide") or "-").lower()
-        if hold_side not in ("long", "short"):
-            hold_side = "-"
-        source_key = f"{symbol}_{hold_side}"
-        source = source_map.get(source_key, "-")
-        source_uid = source_uid_map.get(source_key)
-        src_metrics = {}
-        if source_uid:
-            src_metrics = source_metrics_by_uid_key.get(f"{source_uid}|{source_key}", {})
-        if not src_metrics:
-            src_metrics = source_metrics_map.get(source_key, {})
+            account_leverage = item.get("leverage")
+            account_qty = _first_non_missing(
+                item.get("total"), item.get("size"), item.get("holdVolume"),
+                item.get("available"), item.get("pos"),
+            )
+            account_margin = _first_non_missing(item.get("marginSize"), item.get("margin"))
+            account_pnl = _first_non_missing(
+                item.get("unrealizedPL"), item.get("unrealizedPnl"),
+                item.get("upl"), item.get("unrealizedProfit"), item.get("profit"),
+            )
+            account_return_rate = _first_non_missing(
+                item.get("unrealizedProfitRate"), item.get("returnRate"),
+            )
 
-        # 关键显示字段优先使用“账户实时持仓”数据，确保和交易平台一致；
-        # 只有账户接口缺字段时，才回退到来源快照。
-        account_leverage = item.get("leverage")
-        account_qty = _first_non_missing(
-            item.get("total"),
-            item.get("size"),
-            item.get("holdVolume"),
-            item.get("available"),
-            item.get("pos"),
-        )
-        account_margin = _first_non_missing(item.get("marginSize"), item.get("margin"))
-        account_pnl = _first_non_missing(
-            item.get("unrealizedPL"),
-            item.get("unrealizedPnl"),
-            item.get("upl"),
-            item.get("unrealizedProfit"),
-            item.get("profit"),
-        )
-        account_return_rate = _first_non_missing(
-            item.get("unrealizedProfitRate"),
-            item.get("returnRate"),
-        )
+            bitget_positions.append({
+                "platform": "bitget",
+                "symbol": symbol,
+                "direction": hold_side,
+                "leverage": _first_non_missing(account_leverage, "-"),
+                "qty": _first_non_missing(account_qty, "-"),
+                "open_price": item.get("openPriceAvg") or item.get("openAvgPrice") or "-",
+                "margin": _first_non_missing(account_margin, "-"),
+                "pnl": _first_non_missing(account_pnl, "-"),
+                "return_rate": _first_non_missing(account_return_rate, "-"),
+                "source": source,
+                "sync_mode": "account",
+            })
+    else:
+        bitget_error = "Bitget API 未配置"
 
-        source_leverage = src_metrics.get("leverage")
-        source_qty = src_metrics.get("position_size")
-        source_margin = src_metrics.get("margin_amount")
-        source_pnl = src_metrics.get("unrealized_pnl")
-        source_return_rate = src_metrics.get("return_rate")
+    binance_positions = []
+    if bn_api_key and bn_api_secret:
+        import binance_executor
 
-        leverage = _first_non_missing(account_leverage, source_leverage, "-")
-        qty = _first_non_missing(account_qty, source_qty, "-")
-        margin = _first_non_missing(account_margin, source_margin, "-")
-        pnl = _first_non_missing(account_pnl, source_pnl, "-")
-        return_rate = _first_non_missing(account_return_rate, source_return_rate, "-")
+        try:
+            bn_raw = binance_executor.get_my_positions(bn_api_key, bn_api_secret)
+        except Exception as exc:
+            binance_error = f"读取 Binance 持仓失败：{exc}"
+            bn_raw = []
 
-        used_source_fallback = (
-            _is_missing(account_leverage)
-            or _is_missing(account_qty)
-            or _is_missing(account_margin)
-            or _is_missing(account_pnl)
-            or _is_missing(account_return_rate)
-        ) and bool(src_metrics)
+        for item in bn_raw:
+            symbol = _clean_symbol(item.get("symbol") or "-")
+            position_amt = _to_float_or_none(item.get("positionAmt"))
+            position_side = str(item.get("positionSide") or "").upper()
+            if position_side == "BOTH":
+                if position_amt and position_amt > 0:
+                    direction = "long"
+                elif position_amt and position_amt < 0:
+                    direction = "short"
+                else:
+                    direction = "-"
+            elif position_side in ("LONG", "SHORT"):
+                direction = position_side.lower()
+            else:
+                direction = "-"
 
-        positions.append({
-            "symbol": symbol,
-            "direction": hold_side,
-            "leverage": leverage,
-            "qty": qty,
-            "open_price": item.get("openPriceAvg") or item.get("openAvgPrice") or "-",
-            "margin": margin,
-            "pnl": pnl,
-            "return_rate": return_rate,
-            "source": source,
-            "sync_mode": "mixed" if used_source_fallback else "account",
-            "account_pnl": account_pnl if not _is_missing(account_pnl) else None,
-            "source_pnl": source_pnl if not _is_missing(source_pnl) else None,
-        })
-    return jsonify({"items": positions})
+            source_key = f"{symbol}_{direction}"
+            source = source_maps["binance"].get(source_key, "-")
+            pnl = _first_non_missing(item.get("unRealizedProfit"), item.get("unrealizedProfit"))
+            margin = _first_non_missing(
+                item.get("isolatedWallet"),
+                item.get("positionInitialMargin"),
+                item.get("initialMargin"),
+            )
+            margin_num = _to_float_or_none(margin)
+            pnl_num = _to_float_or_none(pnl)
+            return_rate = "-"
+            if margin_num and margin_num > 0 and pnl_num is not None:
+                return_rate = pnl_num / margin_num
 
+            qty = abs(position_amt) if position_amt is not None else "-"
+            binance_positions.append({
+                "platform": "binance",
+                "symbol": symbol,
+                "direction": direction,
+                "leverage": _first_non_missing(item.get("leverage"), "-"),
+                "qty": qty,
+                "open_price": item.get("entryPrice") or "-",
+                "margin": _first_non_missing(margin, "-"),
+                "pnl": _first_non_missing(pnl, "-"),
+                "return_rate": return_rate,
+                "source": source,
+                "sync_mode": "account",
+            })
 
-@app.route("/api/refresh/<trader_uid>", methods=["POST"])
-def api_refresh(trader_uid):
-    """手动刷新某个交易员的数据。"""
-    trader = db.get_trader(trader_uid)
-    if not trader:
-        return jsonify({"error": "交易员不存在"}), 404
-    try:
-        collector.init_trader(trader_uid, trader["nickname"])
-        return jsonify({"ok": True})
-    except Exception as exc:
-        return jsonify({"error": str(exc)}), 500
+    return jsonify({
+        "bitget_items": bitget_positions,
+        "binance_items": binance_positions,
+        "bitget_error": bitget_error,
+        "binance_error": binance_error,
+        "account_overview": account_overview,
+    })
 
-
-def _run_collector():
-    global _collector_running
-    try:
-        collector.run()
-    finally:
-        _collector_running = False
-
-
-# ── 启动 ──────────────────────────────────────────────────────────────────────
 
 # ── 启动 ──────────────────────────────────────────────────────────────────────
 
 def _migrate_binance_format():
     """将币安交易员从旧格式迁移，并重新获取真实信息"""
     try:
+        import binance_scraper
+
         settings = db.get_copy_settings()
         bn_traders_raw = settings.get("binance_traders") or "[]"
 
@@ -1166,10 +1003,8 @@ def _migrate_binance_format():
         needs_update = False
         bn_traders_dict = {}
 
-        # 处理旧格式（数组）
         if isinstance(bn_traders_data, list) and bn_traders_data:
             for pid in bn_traders_data:
-                # 重新从 API 获取信息
                 info = binance_scraper.fetch_trader_info(str(pid))
                 bn_traders_dict[str(pid)] = {
                     "nickname": info.get("nickname", f"币安交易员_{str(pid)[:8]}"),
@@ -1182,11 +1017,9 @@ def _migrate_binance_format():
             needs_update = True
             logger.info("币安交易员格式迁移：数组 → 字典，%d 个", len(bn_traders_dict))
 
-        # 处理新格式但昵称是默认值的（需要重新获取）
         elif isinstance(bn_traders_data, dict) and bn_traders_data:
             for pid, data in bn_traders_data.items():
                 old_nickname = data.get("nickname", "")
-                # 如果昵称是默认值，重新获取
                 if old_nickname.startswith("币安交易员_"):
                     info = binance_scraper.fetch_trader_info(str(pid))
                     bn_traders_dict[str(pid)] = {
@@ -1209,36 +1042,6 @@ def _migrate_binance_format():
         logger.warning("币安交易员格式迁移失败: %s", e)
 
 
-def _auto_start_collector():
-    """
-    启动后自动开启采集：
-    1. 对每个交易员做增量补全（补回关机期间漏掉的数据）
-    2. 启动持续采集循环
-    """
-    global _collector_thread, _collector_running
-    traders = db.get_all_traders()
-    if not traders:
-        logger.info("暂无追踪交易员，等待手动添加后采集")
-        return
-
-    logger.info("启动补全 + 采集，共 %d 名交易员", len(traders))
-
-    # 先逐个做增量补全（拉取关机期间新产生的历史订单）
-    for t in traders:
-        try:
-            collector.init_trader(t["trader_uid"], t["nickname"])
-        except Exception as exc:
-            logger.error("补全失败 [%s]: %s", t["nickname"], exc)
-
-    # 然后启动持续采集循环
-    import collector as _col
-    _col._running = True
-    _collector_running = True
-    _collector_thread = threading.Thread(target=_run_collector, daemon=True)
-    _collector_thread.start()
-    logger.info("采集器已自动启动")
-
-
 def _auto_start_copy_engine():
     """若上次关闭时引擎是启动状态，自动恢复。"""
     settings = _normalize_copy_settings(db.get_copy_settings())
@@ -1254,15 +1057,11 @@ def _cleanup():
     logger.info("════════════════════════════════════════════")
     
     try:
-        # 1. 停止采集器
-        collector._running = False
-        time.sleep(0.5)
-        
-        # 2. 停止跟单引擎
+        # 停止跟单引擎
         copy_engine.stop_engine()
         time.sleep(0.5)
         
-        # 3. 数据库优化
+        # 数据库优化
         logger.info("优化数据库 WAL…")
         try:
             with db.get_conn() as conn:
@@ -1295,7 +1094,7 @@ def _try_acquire_lock() -> bool:
     global _LOCK_FILE
     lock_path = os.path.join(os.path.dirname(__file__), ".bitgetfollow.lock")
     try:
-        import fcntl  # Unix/macOS only
+        import fcntl
         fd = open(lock_path, "w")
         fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         fd.write(str(os.getpid()))
@@ -1303,13 +1102,13 @@ def _try_acquire_lock() -> bool:
         _LOCK_FILE = fd
         return True
     except ImportError:
-        return True  # Windows 无 fcntl
+        return True
     except (IOError, OSError):
         return False
 
 
 def _port_in_use(port: int) -> bool:
-    """检测端口是否已有监听服务（避免 TIME_WAIT 误判）"""
+    """检测端口是否已有监听服务"""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.settimeout(0.2)
         try:
@@ -1322,7 +1121,6 @@ def main():
     port = int(os.getenv("PORT", "8080"))
     url = f"http://127.0.0.1:{port}"
 
-    # 防止双击/多击启动：文件锁 + 端口检测
     if not _try_acquire_lock():
         logger.info("已有实例在运行，请直接打开浏览器: %s", url)
         return
@@ -1332,24 +1130,22 @@ def main():
 
     db.init_db()
 
-    # 迁移币安交易员格式（从数组到字典）
+    # 迁移币安交易员格式
     _migrate_binance_format()
 
     logger.info("启动 Web 仪表盘：%s", url)
 
-    # 启动心跳监控线程（检测网页关闭并自动退出）
+    # 启动心跳监控线程
     threading.Thread(target=_heartbeat_monitor, daemon=True).start()
 
-    # 延迟 2 秒启动采集（等 Flask 先就绪）
-    threading.Timer(2.0, _auto_start_collector).start()
+    # 延迟启动跟单引擎
     threading.Timer(3.0, _auto_start_copy_engine).start()
-    # 浏览器打开交给外部启动器（.app/.command）统一处理，避免双击时重复打开多个页面
     try:
         app.run(host="127.0.0.1", port=port, debug=False)
     except OSError as e:
         if "Address already in use" in str(e) or getattr(e, "errno", 0) == 48:
             logger.info("端口 %d 已被占用，请直接打开浏览器: %s", port, url)
-            os._exit(0)  # 立即退出，避免 Timer 线程在 1.5 秒后打开多余浏览器
+            os._exit(0)
         else:
             raise
 

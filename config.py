@@ -14,6 +14,12 @@ BASE_URL          = "https://api.bitget.com"
 # 模拟盘模式：设为 "1" 时会在请求头加 paptrading=1，productType 自动切换为 SUMCBL
 SIMULATED         = os.getenv("BITGET_SIMULATED", "0") == "1"
 
+# Binance Futures API base URL.
+# Default uses Futures testnet for simulated trading.
+BINANCE_BASE_URL  = (os.getenv("BINANCE_BASE_URL", "https://testnet.binancefuture.com") or "").strip().rstrip("/")
+if not BINANCE_BASE_URL:
+    BINANCE_BASE_URL = "https://testnet.binancefuture.com"
+
 # ── 采集参数 ─────────────────────────────────────────────────────────────────
 POLL_INTERVAL     = int(os.getenv("POLL_INTERVAL", "5"))   # 秒
 HISTORY_DAYS      = 90                                      # 初始化时拉取历史天数

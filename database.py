@@ -164,8 +164,21 @@ CREATE TABLE IF NOT EXISTS copy_settings (
     price_tolerance REAL DEFAULT 0.0002,
     sl_pct          REAL DEFAULT 0.15,
     tp_pct          REAL DEFAULT 0.30,
+    binance_total_capital REAL DEFAULT 0,
+    binance_follow_ratio_pct REAL DEFAULT 0.003,
+    binance_max_margin_pct REAL DEFAULT 0.20,
+    binance_price_tolerance REAL DEFAULT 0.0002,
     enabled_traders TEXT DEFAULT '[]',
+    binance_traders TEXT DEFAULT '{}',
     engine_enabled  INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS account_daily_equity (
+    day             TEXT PRIMARY KEY, -- YYYY-MM-DD（本地时区）
+    start_equity    REAL NOT NULL,
+    start_ts        INTEGER NOT NULL,
+    last_equity     REAL NOT NULL,
+    updated_at      INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS copy_orders (
@@ -185,7 +198,8 @@ CREATE TABLE IF NOT EXISTS copy_orders (
     status          TEXT,      -- 'filled', 'skipped', 'failed'
     pnl             REAL,
     notes           TEXT,      -- 记录失败原因或信息
-    exec_qty        REAL DEFAULT 0
+    exec_qty        REAL DEFAULT 0,
+    platform        TEXT DEFAULT 'bitget'  -- 区分是下单在 bitget 还是 binance
 );
 
 
@@ -533,6 +547,12 @@ def _ensure_copy_settings(conn) -> None:
         ("sl_pct", "REAL", "0.15"),
         ("tp_pct", "REAL", "0.30"),
         ("binance_traders", "TEXT", "'[]'"),
+        ("binance_api_key", "TEXT", "''"),
+        ("binance_api_secret", "TEXT", "''"),
+        ("binance_total_capital", "REAL", "0"),
+        ("binance_follow_ratio_pct", "REAL", "0.003"),
+        ("binance_max_margin_pct", "REAL", "0.20"),
+        ("binance_price_tolerance", "REAL", "0.0002"),
     ]:
         try:
             conn.execute(f"ALTER TABLE copy_settings ADD COLUMN {col} {dtype} DEFAULT {default}")
@@ -555,6 +575,9 @@ _COPY_SETTINGS_COLS = frozenset({
     "total_capital", "follow_ratio_pct", "max_margin_pct", "price_tolerance",
     "sl_pct", "tp_pct",
     "enabled_traders", "binance_traders", "engine_enabled",
+    "binance_api_key", "binance_api_secret",
+    "binance_total_capital", "binance_follow_ratio_pct",
+    "binance_max_margin_pct", "binance_price_tolerance",
 })
 
 
@@ -598,11 +621,90 @@ def set_engine_enabled(enabled: bool) -> None:
     update_copy_settings(engine_enabled=1 if enabled else 0)
 
 
+# ── account_daily_equity（日收益基准） ─────────────────────────────────────────
+
+def _migrate_account_daily_equity(conn) -> None:
+    """为旧数据库补齐 account_daily_equity 字段（幂等）。"""
+    for col, dtype, default in [
+        ("start_ts", "INTEGER", "0"),
+        ("last_equity", "REAL", "0"),
+        ("updated_at", "INTEGER", "0"),
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE account_daily_equity ADD COLUMN {col} {dtype} DEFAULT {default}")
+        except Exception:
+            pass
+
+
+def upsert_account_daily_equity(day: str, equity: float) -> dict:
+    """
+    记录当日权益快照：
+    - 当天首次写入：start_equity = 当前 equity（作为当日基准）
+    - 后续写入：仅更新 last_equity/updated_at
+    """
+    now = int(time.time())
+    eq = float(equity)
+
+    with _db_write_lock:
+        with get_conn() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS account_daily_equity (
+                    day             TEXT PRIMARY KEY,
+                    start_equity    REAL NOT NULL,
+                    start_ts        INTEGER NOT NULL,
+                    last_equity     REAL NOT NULL,
+                    updated_at      INTEGER NOT NULL
+                )
+                """
+            )
+            _migrate_account_daily_equity(conn)
+            row = conn.execute(
+                "SELECT start_equity, start_ts FROM account_daily_equity WHERE day = ?",
+                (day,),
+            ).fetchone()
+            if row:
+                start_equity = float(row["start_equity"] or 0.0)
+                start_ts = int(row["start_ts"] or now)
+                conn.execute(
+                    "UPDATE account_daily_equity SET last_equity = ?, updated_at = ? WHERE day = ?",
+                    (eq, now, day),
+                )
+            else:
+                start_equity = eq
+                start_ts = now
+                conn.execute(
+                    """
+                    INSERT INTO account_daily_equity
+                        (day, start_equity, start_ts, last_equity, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (day, eq, now, eq, now),
+                )
+
+            # 仅保留近 60 天
+            cutoff = time.strftime("%Y-%m-%d", time.localtime(now - 60 * 86400))
+            conn.execute("DELETE FROM account_daily_equity WHERE day < ?", (cutoff,))
+            conn.commit()
+
+    return {
+        "day": day,
+        "start_equity": start_equity,
+        "start_ts": start_ts,
+        "current_equity": eq,
+        "day_pnl": eq - start_equity,
+    }
+
+
 # ── copy_orders CRUD ───────────────────────────────────────────────────────────
 
 def _migrate_copy_orders(conn) -> None:
     try:
         conn.execute("ALTER TABLE copy_orders ADD COLUMN exec_qty REAL DEFAULT 0")
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE copy_orders ADD COLUMN platform TEXT DEFAULT 'bitget'")
     except Exception:
         pass
 
@@ -617,13 +719,13 @@ def insert_copy_order(order: dict) -> int:
                 INSERT INTO copy_orders
                     (timestamp, trader_uid, tracking_no, my_order_id, symbol,
                      direction, leverage, margin_usdt, source_price, exec_price,
-                     deviation_pct, action, status, pnl, notes, exec_qty)
+                     deviation_pct, action, status, pnl, notes, exec_qty, platform)
                 VALUES
                     (:timestamp, :trader_uid, :tracking_no, :my_order_id, :symbol,
                      :direction, :leverage, :margin_usdt, :source_price, :exec_price,
-                     :deviation_pct, :action, :status, :pnl, :notes, :exec_qty)
+                     :deviation_pct, :action, :status, :pnl, :notes, :exec_qty, :platform)
                 """,
-                {**order, "exec_qty": order.get("exec_qty", 0.0)},
+                {**order, "exec_qty": order.get("exec_qty", 0.0), "platform": order.get("platform", "bitget")},
             )
             conn.commit()
             return int(cur.lastrowid)
@@ -689,23 +791,23 @@ def get_copy_orders_by_tracking(
     return [dict(r) for r in rows]
 
 
-def get_open_copy_orders(trader_uid: str, symbol: str, direction: str) -> list[dict]:
-    """获取指定交易员、币种、方向下所有已成单的开仓记录（用于币安合并平仓）"""
+def get_open_copy_orders(trader_uid: str, symbol: str, direction: str, platform: str = 'bitget') -> list[dict]:
+    """获取指定交易员、币种、方向、平台下所有已成单的开仓记录（用于合并平仓）"""
     with get_conn() as conn:
         rows = conn.execute('''
             SELECT * FROM copy_orders 
             WHERE trader_uid = ? AND symbol = ? AND direction = ? 
-              AND action = 'open' AND status = 'filled'
-        ''', (trader_uid, symbol, direction)).fetchall()
+              AND action = 'open' AND status = 'filled' AND platform = ?
+        ''', (trader_uid, symbol, direction, platform)).fetchall()
     return [dict(r) for r in rows]
 
 
-def has_tracking_no(trader_uid: str, tracking_no: str) -> bool:
-    """检查是否存在使用该 tracking_no 的任何记录（用于防重复执行币安信号）"""
+def has_tracking_no(trader_uid: str, tracking_no: str, platform: str = 'bitget') -> bool:
+    """检查指定平台是否存在使用该 tracking_no 的任何记录（用于防重复执行信号）"""
     with get_conn() as conn:
         row = conn.execute(
-            "SELECT 1 FROM copy_orders WHERE trader_uid = ? AND tracking_no = ? LIMIT 1",
-            (trader_uid, tracking_no)
+            "SELECT 1 FROM copy_orders WHERE trader_uid = ? AND tracking_no = ? AND platform = ? LIMIT 1",
+            (trader_uid, tracking_no, platform)
         ).fetchone()
     return bool(row)
 

@@ -11,6 +11,7 @@ import json
 import logging
 import time
 import urllib.parse
+from decimal import Decimal, ROUND_CEILING, ROUND_DOWN
 from typing import Any
 
 import requests
@@ -18,6 +19,7 @@ import requests
 import config
 
 logger = logging.getLogger(__name__)
+_SYMBOL_RULES: dict[str, dict] = {}
 
 
 def _clean_symbol(symbol: str) -> str:
@@ -62,9 +64,14 @@ def _is_non_retryable_error(exc: Exception) -> bool:
     return (
         "code=40034" in msg
         or "code=400172" in msg
+        or "code=40774" in msg
         or "code=40762" in msg
+        or "code=45110" in msg
+        or "code=45111" in msg
         or ("参数" in msg and "不存在" in msg)
         or ("订单金额" in msg and "超出账户余额" in msg)
+        or ("最小下单数量" in msg)
+        or ("最小下单价值" in msg)
         or "symbol does not exist" in lower_msg
         or "order amount exceeds account balance" in lower_msg
     )
@@ -84,6 +91,94 @@ def _normalize_size(size: float | str) -> str:
     if v <= 0:
         raise ValueError(f"下单张数过小，截断后为 0: {size}")
     return f"{v:.4f}".rstrip("0").rstrip(".")
+
+
+def _product_type_param(product_type: str = "USDT-FUTURES") -> str:
+    return str(_product_type(product_type)).lower()
+
+
+def _format_decimal_str(value: Decimal) -> str:
+    text = format(value.normalize(), "f")
+    return text.rstrip("0").rstrip(".") if "." in text else text
+
+
+def _ceil_decimal_to_step(value: Decimal, step: Decimal) -> Decimal:
+    if step <= 0:
+        return value
+    units = (value / step).to_integral_value(rounding=ROUND_CEILING)
+    return units * step
+
+
+def _raise_response_error(resp: requests.Response, default_msg: str) -> None:
+    try:
+        payload = resp.json()
+    except Exception:
+        payload = {}
+    error_msg = payload.get("msg") or payload.get("message") or resp.text[:200] or default_msg
+    error_code = payload.get("code", resp.status_code)
+    raise ValueError(f"HTTP {resp.status_code} | code={error_code} | {error_msg}")
+
+
+def get_symbol_rules(symbol: str, product_type: str = "USDT-FUTURES") -> dict:
+    """读取 Bitget 合约配置，用于最小下单量和状态预检查。"""
+    symbol = _clean_symbol(symbol)
+    cache_key = f"{_product_type_param(product_type)}:{symbol}:{int(config.SIMULATED)}"
+    if cache_key in _SYMBOL_RULES:
+        return _SYMBOL_RULES[cache_key]
+
+    resp = requests.get(
+        config.BASE_URL + "/api/v2/mix/market/contracts",
+        params={"productType": _product_type(product_type), "symbol": symbol},
+        timeout=10,
+        headers={"paptrading": "1"} if config.SIMULATED else {},
+    )
+    if not resp.ok:
+        _raise_response_error(resp, f"contracts request failed: {symbol}")
+    payload = resp.json()
+    if str(payload.get("code", "0")) != "00000":
+        raise ValueError(f"HTTP {resp.status_code} | code={payload.get('code')} | {payload.get('msg')}")
+
+    data = payload.get("data") or []
+    if isinstance(data, dict):
+        data = [data]
+
+    rule = next((item for item in data if _clean_symbol(item.get("symbol") or "") == symbol), None)
+    if not rule:
+        raise ValueError(f"symbol does not exist: {symbol}")
+
+    _SYMBOL_RULES[cache_key] = rule
+    return rule
+
+
+def get_min_order_requirements(symbol: str, leverage: int, price: float, product_type: str = "USDT-FUTURES") -> dict:
+    """计算 Bitget 在当前价格下的最小可成交数量和最低保证金。"""
+    if price <= 0:
+        raise ValueError(f"行情价非正值: {price}")
+
+    rules = get_symbol_rules(symbol, product_type)
+    min_trade_num = Decimal(str(rules.get("minTradeNum") or "0"))
+    size_multiplier = Decimal(str(rules.get("sizeMultiplier") or "0"))
+    min_trade_usdt = Decimal(str(rules.get("minTradeUSDT") or "0"))
+    qty_from_usdt = (min_trade_usdt / Decimal(str(price))) if min_trade_usdt > 0 else Decimal("0")
+    required_qty = max(min_trade_num, qty_from_usdt)
+
+    if size_multiplier > 0:
+        required_qty = _ceil_decimal_to_step(required_qty, size_multiplier)
+    if required_qty <= 0:
+        required_qty = min_trade_num
+
+    min_margin = (required_qty * Decimal(str(price))) / Decimal(str(max(leverage, 1)))
+    return {
+        "symbol": _clean_symbol(symbol),
+        "symbolStatus": str(rules.get("symbolStatus") or "normal").lower(),
+        "limitOpenTime": str(rules.get("limitOpenTime") or "-1"),
+        "minTradeNum": float(min_trade_num),
+        "sizeMultiplier": float(size_multiplier) if size_multiplier > 0 else 0.0,
+        "minTradeUSDT": float(min_trade_usdt),
+        "requiredQty": float(required_qty),
+        "requiredQtyStr": _format_decimal_str(required_qty),
+        "requiredMargin": float(min_margin),
+    }
 
 
 def _sign(secret: str, timestamp: str, method: str, request_path: str, body: str = "") -> str:
@@ -188,6 +283,11 @@ def test_connection(api_key: str, api_secret: str, api_passphrase: str) -> dict:
     return get_account_balance(api_key, api_secret, api_passphrase)
 
 
+def test_binance_connection(api_key: str, api_secret: str) -> dict:
+    import binance_executor
+    return binance_executor.get_account_balance(api_key, api_secret)
+
+
 def get_account_balance(
     api_key: str,
     api_secret: str,
@@ -259,10 +359,11 @@ def get_ticker_price(
         timeout=10,
         headers={"paptrading": "1"} if config.SIMULATED else {},
     )
-    resp.raise_for_status()
+    if not resp.ok:
+        _raise_response_error(resp, f"ticker request failed: {symbol}")
     payload = resp.json()
     if str(payload.get("code", "0")) != "00000":
-        raise ValueError(f"ticker error {payload.get('code')}: {payload.get('msg')}")
+        raise ValueError(f"HTTP {resp.status_code} | code={payload.get('code')} | {payload.get('msg')}")
     data = payload.get("data")
     if isinstance(data, list) and data:
         data = data[0]

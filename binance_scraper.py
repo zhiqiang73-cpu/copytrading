@@ -17,9 +17,16 @@ from typing import Optional
 
 import requests
 
+import config
+
 logger = logging.getLogger(__name__)
 
 _BN_BASE = "https://www.binance.com"
+_BN_FAPI_BASE = config.BINANCE_BASE_URL
+
+_BN_TIME_OFFSET_MS = 0
+_BN_TIME_OFFSET_AT = 0.0
+_BN_TIME_OFFSET_TTL_SEC = 60
 _HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -282,6 +289,198 @@ def _safe_float(val) -> float:
             return float(val.replace("%", "").strip())
         return 0.0
     except (ValueError, TypeError):
+        return 0.0
+
+
+# ── 币安 FAPI 签名接口（需要 API Key + Secret） ─────────────────────────────
+
+def _bn_refresh_server_time_offset(force: bool = False) -> None:
+    global _BN_TIME_OFFSET_MS, _BN_TIME_OFFSET_AT
+    now = time.time()
+    if (not force) and _BN_TIME_OFFSET_AT and (now - _BN_TIME_OFFSET_AT) < _BN_TIME_OFFSET_TTL_SEC:
+        return
+    resp = requests.get(f"{_BN_FAPI_BASE}/fapi/v1/time", timeout=5)
+    resp.raise_for_status()
+    payload = resp.json()
+    server_ms = int(payload["serverTime"])
+    local_ms = int(time.time() * 1000)
+    _BN_TIME_OFFSET_MS = server_ms - local_ms
+    _BN_TIME_OFFSET_AT = time.time()
+
+
+def _bn_signed_timestamp_ms() -> int:
+    try:
+        _bn_refresh_server_time_offset(force=False)
+    except Exception as exc:
+        logger.debug("sync binance time failed in scraper: %s", exc)
+    return int(time.time() * 1000) + int(_BN_TIME_OFFSET_MS) - 500
+
+
+def get_binance_futures_balance(api_key: str, api_secret: str) -> dict:
+    """
+    调用币安合约 FAPI 签名接口获取 USDT 余额。
+    返回: {"balance": float, "available": float, "unrealized_pnl": float}
+    """
+    import hmac
+    import hashlib
+    import urllib.parse
+
+    base_url = _BN_FAPI_BASE
+    endpoint = "/fapi/v2/balance"
+    timestamp = _bn_signed_timestamp_ms()
+
+    params = {
+        "timestamp": timestamp,
+        "recvWindow": 5000,
+    }
+    query_string = urllib.parse.urlencode(params)
+    signature = hmac.new(
+        api_secret.encode("utf-8"),
+        query_string.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    query_string += f"&signature={signature}"
+
+    headers = {
+        "X-MBX-APIKEY": api_key,
+    }
+
+    try:
+        resp = requests.get(
+            f"{base_url}{endpoint}?{query_string}",
+            headers=headers,
+            timeout=10,
+        )
+        try:
+            resp.raise_for_status()
+        except requests.exceptions.HTTPError as e:
+            try:
+                body = e.response.json()
+            except Exception:
+                body = {}
+            if body.get("code") == -1021:
+                _bn_refresh_server_time_offset(force=True)
+                params["timestamp"] = _bn_signed_timestamp_ms()
+                query_string = urllib.parse.urlencode(params)
+                signature = hmac.new(
+                    api_secret.encode("utf-8"),
+                    query_string.encode("utf-8"),
+                    hashlib.sha256,
+                ).hexdigest()
+                query_string += f"&signature={signature}"
+                resp = requests.get(
+                    f"{base_url}{endpoint}?{query_string}",
+                    headers=headers,
+                    timeout=10,
+                )
+                resp.raise_for_status()
+            else:
+                raise
+        data = resp.json()
+
+        # data 是一个列表，找到 USDT 资产
+        for asset in data:
+            if asset.get("asset") == "USDT":
+                return {
+                    "balance": float(asset.get("balance", 0)),
+                    "available": float(asset.get("availableBalance", 0)),
+                    "unrealized_pnl": float(asset.get("crossUnPnl", 0)),
+                }
+
+        # 没有 USDT 资产
+        return {"balance": 0.0, "available": 0.0, "unrealized_pnl": 0.0}
+
+    except requests.exceptions.HTTPError as e:
+        error_body = ""
+        try:
+            error_body = e.response.json()
+        except Exception:
+            error_body = e.response.text[:200]
+        logger.error("币安 FAPI 余额查询失败 HTTP %s: %s", e.response.status_code, error_body)
+        raise RuntimeError(f"币安 API 错误: {error_body}") from e
+    except requests.exceptions.Timeout:
+        raise RuntimeError("币安 API 连接超时") from None
+    except requests.exceptions.ConnectionError:
+        raise RuntimeError("无法连接币安 API，请检查网络") from None
+    except Exception as e:
+        raise RuntimeError(f"币安 API 未知错误: {str(e)[:200]}") from e
+
+
+def get_binance_futures_income_today(api_key: str, api_secret: str) -> float:
+    """
+    查询币安合约账户今日已实现收益（REALIZED_PNL + COMMISSION + FUNDING_FEE）。
+    """
+    import hmac
+    import hashlib
+    import urllib.parse
+    import datetime
+
+    base_url = _BN_FAPI_BASE
+    endpoint = "/fapi/v1/income"
+
+    # 今日零点（UTC+8）
+    now = datetime.datetime.now()
+    today_start = datetime.datetime(now.year, now.month, now.day)
+    start_ms = int(today_start.timestamp() * 1000)
+    timestamp = _bn_signed_timestamp_ms()
+
+    params = {
+        "timestamp": timestamp,
+        "recvWindow": 5000,
+        "startTime": start_ms,
+        "limit": 1000,
+    }
+    query_string = urllib.parse.urlencode(params)
+    signature = hmac.new(
+        api_secret.encode("utf-8"),
+        query_string.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    query_string += f"&signature={signature}"
+
+    headers = {"X-MBX-APIKEY": api_key}
+
+    try:
+        resp = requests.get(
+            f"{base_url}{endpoint}?{query_string}",
+            headers=headers,
+            timeout=10,
+        )
+        try:
+            resp.raise_for_status()
+        except requests.exceptions.HTTPError as e:
+            try:
+                body = e.response.json()
+            except Exception:
+                body = {}
+            if body.get("code") == -1021:
+                _bn_refresh_server_time_offset(force=True)
+                params["timestamp"] = _bn_signed_timestamp_ms()
+                query_string = urllib.parse.urlencode(params)
+                signature = hmac.new(
+                    api_secret.encode("utf-8"),
+                    query_string.encode("utf-8"),
+                    hashlib.sha256,
+                ).hexdigest()
+                query_string += f"&signature={signature}"
+                resp = requests.get(
+                    f"{base_url}{endpoint}?{query_string}",
+                    headers=headers,
+                    timeout=10,
+                )
+                resp.raise_for_status()
+            else:
+                raise
+        data = resp.json()
+
+        total_income = 0.0
+        for item in data:
+            income_type = item.get("incomeType", "")
+            if income_type in ("REALIZED_PNL", "COMMISSION", "FUNDING_FEE"):
+                total_income += float(item.get("income", 0))
+        return total_income
+    except Exception as e:
+        logger.warning("币安今日收益查询失败: %s", str(e)[:100])
         return 0.0
 
 

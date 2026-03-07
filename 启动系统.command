@@ -6,6 +6,48 @@
 
 cd "$(dirname "$0")"
 
+# === 可选代理: 默认自动探测本机 7890，可用时才启用；USE_PROXY=1 强制开启，USE_PROXY=0 强制关闭 ===
+USE_PROXY=${USE_PROXY:-auto}
+PROXY_URL=${PROXY_URL:-http://127.0.0.1:7890}
+PROXY_ADDR="${PROXY_URL#*://}"
+PROXY_ADDR="${PROXY_ADDR%%/*}"
+PROXY_HOST="${PROXY_ADDR%:*}"
+PROXY_PORT="${PROXY_ADDR##*:}"
+
+enable_proxy() {
+    export HTTP_PROXY="$PROXY_URL"
+    export HTTPS_PROXY="$PROXY_URL"
+    export NO_PROXY="127.0.0.1,localhost"
+    export http_proxy="$PROXY_URL"
+    export https_proxy="$PROXY_URL"
+    export no_proxy="$NO_PROXY"
+    echo "  已启用代理: $PROXY_URL"
+}
+
+proxy_reachable() {
+    if [ -z "$PROXY_HOST" ] || [ -z "$PROXY_PORT" ] || [ "$PROXY_HOST" = "$PROXY_PORT" ]; then
+        return 1
+    fi
+    if command -v nc >/dev/null 2>&1; then
+        nc -z "$PROXY_HOST" "$PROXY_PORT" >/dev/null 2>&1
+        return $?
+    fi
+    return 1
+}
+
+if [ "$USE_PROXY" = "1" ]; then
+    enable_proxy
+elif [ "$USE_PROXY" = "auto" ] && proxy_reachable; then
+    enable_proxy
+else
+    unset HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy
+    if [ "$USE_PROXY" = "0" ]; then
+        echo "  已关闭代理 (USE_PROXY=0)"
+    else
+        echo "  未检测到可用代理，当前使用直连"
+    fi
+fi
+
 LAUNCH_LOCK_DIR="/tmp/bitgetfollow_launch_once.lock"
 # 防止双击并发：脚本最早阶段就加锁，避免重复执行依赖安装与打开浏览器
 if ! mkdir "$LAUNCH_LOCK_DIR" 2>/dev/null; then
@@ -39,7 +81,7 @@ echo "  地址：http://127.0.0.1:8080"
 echo ""
 
 URL="http://127.0.0.1:8080"
-LOG_FILE="$(pwd)/bitgetfollow.log"
+LOG_FILE="$(pwd)/logs/bitgetfollow.log"
 PID_FILE="$(pwd)/bitgetfollow.pid"
 OPEN_STAMP_FILE="/tmp/bitgetfollow_last_open_ts"
 OPEN_COOLDOWN_SEC=8
@@ -78,13 +120,12 @@ if [ "$AUTO_OPEN_BROWSER" = "1" ]; then
         fi
         if [ $((NOW_TS - LAST_TS)) -ge "$OPEN_COOLDOWN_SEC" ]; then
             echo "$NOW_TS" > "$OPEN_STAMP_FILE"
-            # 优先复用已运行的 Chrome；若未运行则改用 Safari
-            if pgrep -x "Google Chrome" >/dev/null 2>&1; then
-                osascript -e "tell application \"Google Chrome\" to open location \"$URL\"" 2>/dev/null || open -a "Safari" "$URL"
-            elif pgrep -x "Safari" >/dev/null 2>&1; then
-                osascript -e "tell application \"Safari\" to open location \"$URL\"" 2>/dev/null || open -a "Safari" "$URL"
+            # 默认使用 Google Chrome，若系统未安装则退回使用默认浏览器
+            if open -a "Google Chrome" "$URL" 2>/dev/null; then
+                # 成功用 Chrome 打开
+                :
             else
-                open -a "Safari" "$URL" 2>/dev/null || open "$URL"
+                open "$URL" 2>/dev/null
             fi
         else
             echo "  浏览器已在冷却期，请手动访问: $URL"

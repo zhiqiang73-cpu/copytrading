@@ -1,15 +1,10 @@
 """
-copy_engine.py — 自动跟单引擎 (防并发、防重漏、精确局部平仓终极版本)
+copy_engine.py — 自动跟单引擎 (仅币安信号源 → Bitget 下单)
 
-修复记录 (2026-02):
-  P0#2: 移除开仓价检查对平仓的阻碍。
-  P0#3: Snapshot 完整双向同步 (内存与 DB SQLite 实时对照)，防重启漏单/重单。
-  P0#4: 引入了 copy_orders.exec_qty 字段和 posMode 识别，实现精准的“部分平仓”。
-  P1#13 [NEW]: 并发多线程扫描所有交易员；利用 clientOid 防 API 重放双杀；引入完美的状态机取代自愈循环补丁。
+通过监控币安交易员的操作记录，自动在 Bitget 执行对应的开仓/平仓操作。
 """
 from __future__ import annotations
 
-import concurrent.futures
 import hashlib
 import json
 import logging
@@ -22,13 +17,14 @@ import requests
 import config
 import database as db
 import order_executor
-import scraper
 import binance_scraper
 
 logger = logging.getLogger(__name__)
 
 _engine: "CopyEngine | None" = None
 
+
+_engine: CopyEngine | None = None
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
@@ -64,19 +60,84 @@ def _is_symbol_not_exist_error(exc: Exception) -> bool:
     return ("code=40034" in msg) or ("参数" in msg and "不存在" in msg) or ("symbol does not exist" in msg.lower())
 
 
+def _is_bitget_min_trade_error(exc: Exception) -> bool:
+    msg = str(exc)
+    lower = msg.lower()
+    return (
+        ("code=45110" in msg)
+        or ("code=45111" in msg)
+        or ("最小下单数量" in msg)
+        or ("最小下单价值" in msg)
+        or ("minimum order quantity" in lower)
+        or ("minimum order value" in lower)
+    )
+
+
+def _is_binance_min_notional_error(exc: Exception) -> bool:
+    msg = str(exc)
+    lower = msg.lower()
+    return ("code=-4164" in msg) or ("notional must be no smaller" in lower)
+
+
+def _is_binance_symbol_error(exc: Exception) -> bool:
+    msg = str(exc)
+    lower = msg.lower()
+    return ("code=-1121" in msg) or ("invalid symbol" in lower)
+
+
+def _is_bitget_balance_error(exc: Exception) -> bool:
+    msg = str(exc)
+    lower = msg.lower()
+    return (
+        ("code=40762" in msg)
+        or ("订单金额超出账户余额" in msg)
+        or ("账户余额" in msg and "不足" in msg)
+        or ("order amount exceeds account balance" in lower)
+    )
+
+
+def _is_binance_balance_error(exc: Exception) -> bool:
+    msg = str(exc)
+    lower = msg.lower()
+    return (
+        ("code=-2019" in msg)
+        or ("margin is insufficient" in lower)
+        or ("insufficient balance" in lower)
+    )
+
+
+def _is_local_min_size_error(exc: Exception) -> bool:
+    msg = str(exc)
+    return ("换算后张数为0或负数" in msg) or ("开仓数量因精度截断为 0" in msg)
+
+
+def _cap_limit_value(fallback_margin: float, available_usdt: float) -> float:
+    caps = []
+    if fallback_margin > 0:
+        caps.append(fallback_margin)
+    if available_usdt > 0:
+        caps.append(available_usdt * 0.95)
+    return min(caps) if caps else 0.0
+
+
 def get_ticker_price(symbol: str, product_type: str = "USDT-FUTURES") -> float:
-    # 修复: 转换 symbol 格式从 BTCUSDT_UMCBL -> BTCUSDT
-    # Bitget Ticker API 不接受 _UMCBL 后缀
     api_symbol = symbol.replace("_UMCBL", "").replace("_UM", "").replace("_DMCBL", "").replace("_DM", "")
     resp = requests.get(
         config.BASE_URL + "/api/v2/mix/market/ticker",
         params={"symbol": api_symbol, "productType": product_type},
         timeout=10,
     )
-    resp.raise_for_status()
+    if not resp.ok:
+        try:
+            payload = resp.json()
+        except Exception:
+            payload = {}
+        error_msg = payload.get("msg") or payload.get("message") or resp.text[:200] or "ticker request failed"
+        error_code = payload.get("code", resp.status_code)
+        raise ValueError(f"HTTP {resp.status_code} | code={error_code} | {error_msg}")
     payload = resp.json()
     if str(payload.get("code", "0")) != "00000":
-        raise ValueError(f"ticker error {payload.get('code')}: {payload.get('msg')}")
+        raise ValueError(f"HTTP {resp.status_code} | code={payload.get('code')} | {payload.get('msg')}")
     data = payload.get("data")
     if isinstance(data, list) and data:
         data = data[0]
@@ -138,38 +199,15 @@ def _binance_symbol_to_bitget(symbol: str) -> str:
     return _BN_TO_BG_SYMBOL.get(s, s)
 
 
-def _to_snap(uid: str, pos: dict) -> dict:
-    """转换 scraper 返回的 pos 字典为 snapshots 数据库格式"""
-    return {
-        "trader_uid": uid,
-        "tracking_no": pos.get("order_no") or pos.get("tracking_no", ""),
-        "symbol": _clean_symbol_str(pos.get("symbol", "")),  # 统一格式，移除 _UMCBL 后缀
-        "hold_side": pos.get("direction", ""),  # 数据库字段名
-        "leverage": int(pos.get("leverage") or 1),
-        "margin_mode": pos.get("margin_mode", "cross"),
-        "open_price": _safe_float(pos.get("open_price")),
-        "open_time": int(pos.get("open_time") or 0),
-        "open_amount": _safe_float(pos.get("margin_amount") or pos.get("open_amount") or 0.0),
-        "position_size": _safe_float(pos.get("position_size")),
-        "unrealized_pnl": _safe_float(pos.get("unrealized_pnl")),
-        "return_rate": _safe_float(pos.get("return_rate")),
-        "follow_count": int(pos.get("follow_count") or 0),
-        "tp_price": _safe_float(pos.get("tp_price")),  # 止盈价
-        "sl_price": _safe_float(pos.get("sl_price")),  # 止损价
-    }
-
-
 class CopyEngine:
     def __init__(self) -> None:
         self._running = False
-        self._thread: threading.Thread | None = None
-        self._prev_snaps: dict[str, dict[str, dict]] = {}
         self._fail_streak = 0
         self._pos_mode = "2"  # 1=单向, 2=双向
         # 币安监控
         self._bn_thread: threading.Thread | None = None
         self._bn_seen: dict[str, int] = {}  # portfolio_id -> 最新 order_time (ms)
-        self._last_bn_metadata_refresh = 0  # 上次刷新币安交易员元数据的时间戳
+        self._last_bn_metadata_refresh = 0
         self._state_lock = threading.RLock()
         self._unsupported_symbols: set[str] = set()
         self._bn_inflight: set[str] = set()
@@ -179,49 +217,28 @@ class CopyEngine:
         with self._state_lock:
             if self._running:
                 return
-            if self._thread and self._thread.is_alive():
-                logger.warning("检测到旧主线程仍在运行，跳过重复启动")
-                return
             if self._bn_thread and self._bn_thread.is_alive():
                 logger.warning("检测到旧币安线程仍在运行，跳过重复启动")
                 return
 
-            self._load_snaps_from_db()
             # 防重启信号重放：将所有已知币安交易员的起始时间戳设为当前时刻前 2 小时 (允许补票)
             self._bn_seen = {pid: int((time.time() - 7200) * 1000) for pid in self._bn_seen}
             self._bn_dup_logged.clear()
             self._running = True
-            self._thread = threading.Thread(target=self._run, daemon=True)
-            self._thread.start()
             # 启动币安监控线程
             self._bn_thread = threading.Thread(target=self._run_binance, daemon=True)
             self._bn_thread.start()
-            logger.info("跟单引擎启动 (高并发精准防重模式 + 币安信号源)")
-
-    def _load_snaps_from_db(self) -> None:
-        traders = db.get_all_traders()
-        for t in traders:
-            uid = t["trader_uid"]
-            snaps = db.get_snapshots(uid)
-            if snaps:
-                self._prev_snaps[uid] = {k: {**v, "order_no": k} for k, v in snaps.items()}
-                logger.info("加载内存快照 [%s]: %d 个", uid[:8], len(snaps))
+            logger.info("跟单引擎启动 (币安信号源模式)")
 
     def stop(self) -> None:
         with self._state_lock:
             self._running = False
-            t = self._thread
             bt = self._bn_thread
 
-        # 等待线程退出，避免“停止后立刻启动”导致旧线程与新线程并行。
-        if t and t.is_alive():
-            t.join(timeout=3.5)
         if bt and bt.is_alive():
             bt.join(timeout=3.5)
 
         with self._state_lock:
-            if self._thread and not self._thread.is_alive():
-                self._thread = None
             if self._bn_thread and not self._bn_thread.is_alive():
                 self._bn_thread = None
         logger.info("跟单引擎已停止")
@@ -246,55 +263,89 @@ class CopyEngine:
         if not settings or not settings.get("engine_enabled"):
             return
 
-        ak  = settings.get("api_key") or ""
-        sk  = settings.get("api_secret") or ""
-        pp  = settings.get("api_passphrase") or ""
-        if not (ak and sk and pp):
+        # Bitget API
+        bg_api_key = settings.get("api_key") or ""
+        bg_secret = settings.get("api_secret") or ""
+        bg_pass = settings.get("api_passphrase") or ""
+        bg_enabled = bool(bg_api_key and bg_secret and bg_pass)
+
+        # Binance API
+        bn_api_key = settings.get("binance_api_key") or ""
+        bn_secret = settings.get("binance_api_secret") or ""
+        bn_enabled = bool(bn_api_key and bn_secret)
+
+        if not (bg_enabled or bn_enabled):
             return
 
-        # 只获取启用了跟单的币安交易员
-        bn_traders_raw = settings.get("binance_traders", "")
+        # 解析币安交易员列表
+        bn_raw = settings.get("binance_traders") or "{}"
         try:
-            bn_traders_data = json.loads(bn_traders_raw) if bn_traders_raw else {}
-            if isinstance(bn_traders_data, dict):
-                # 新格式：只取 copy_enabled=true 的
-                bn_traders = [pid for pid, data in bn_traders_data.items() 
-                             if data.get("copy_enabled") == True]
-            else:
-                # 旧格式（列表）：默认全部启用
-                bn_traders = bn_traders_data if isinstance(bn_traders_data, list) else []
-        except:
-            bn_traders = []
+            bn_traders_data = json.loads(bn_raw) if isinstance(bn_raw, str) else bn_raw
+        except Exception:
+            bn_traders_data = {}
+        if not isinstance(bn_traders_data, dict):
+            bn_traders_data = {}
 
+        # 只处理已启用跟单的币安交易员
+        bn_traders = {
+            pid: data for pid, data in bn_traders_data.items()
+            if isinstance(data, dict) and data.get("copy_enabled") is True
+        }
         if not bn_traders:
             return
 
-        # 同步账户持仓模式 (防止 40774 错误)
-        try:
-            bal = order_executor.get_account_balance(ak, sk, pp)
-            self._pos_mode = str(bal.get("_posMode", "2"))
-            available_usdt = _extract_balance_usdt(bal)
-            if available_usdt <= 0:
-                logger.warning("账户可用余额为 0，跳过币安信号处理")
-                return
-        except Exception as exc:
-            logger.warning("币安循环同步模式失败: %s", exc)
+        bg_available_usdt = 0.0
+        bn_available_usdt = 0.0
+
+        # Bitget 余额
+        if bg_enabled:
+            try:
+                bal = order_executor.get_account_balance(bg_api_key, bg_secret, bg_pass)
+                self._pos_mode = str(bal.get("_posMode", "2"))
+                bg_available_usdt = _extract_balance_usdt(bal)
+            except Exception as exc:
+                logger.warning("Bitget 循环同步模式失败: %s", exc)
+                bg_enabled = False
+
+        # Binance 余额
+        if bn_enabled:
+            import binance_executor
+            try:
+                bn_bal = binance_executor.get_account_balance(bn_api_key, bn_secret)
+                bn_available_usdt = _safe_float(bn_bal.get("availableBalance", 0.0))
+            except Exception as exc:
+                logger.warning("币安 循环同步余额失败: %s", exc)
+                bn_enabled = False
+
+        if not (bg_enabled or bn_enabled):
+            logger.warning("所有账户可用余额同步失败，跳过币安信号处理")
             return
 
-        tol     = _safe_float(settings.get("price_tolerance"), 0.05)
-        follow_ratio = self._resolve_follow_ratio(settings)
-        # 兜底保证金（仅当币安信号缺失数量/价格时启用），正常优先使用来源信号反推
-        fallback_margin = 0.0
-        total_p = _safe_float(settings.get("total_capital"), 0.0)
-        max_m = _safe_float(settings.get("max_margin_pct"), 0.20)
-        if total_p > 0 and max_m > 0:
-            try:
-                bitget_raw = settings.get("enabled_traders", "")
-                bitget_count = len(json.loads(bitget_raw)) if bitget_raw else 0
-            except Exception:
-                bitget_count = 0
-            total_trader_count = max(len(bn_traders) + bitget_count, 1)
-            fallback_margin = (total_p / total_trader_count) * max_m
+        # ======== 风控参数（分平台独立计算） ========
+        total_trader_count = max(len(bn_traders), 1)
+
+        # 1. Bitget 全局参数
+        bg_tol = _safe_float(settings.get("price_tolerance"), 0.05)
+        bg_follow_ratio = self._resolve_follow_ratio(settings)
+        bg_fallback_margin = 0.0
+        bg_total_p = _safe_float(settings.get("total_capital"), 0.0)
+        bg_max_m = _safe_float(settings.get("max_margin_pct"), 0.20)
+        if bg_total_p > 0 and bg_max_m > 0:
+            bg_fallback_margin = (bg_total_p / total_trader_count) * bg_max_m
+
+        # 2. 币安独立参数
+        bn_tol = _safe_float(settings.get("binance_price_tolerance"), 0.05)
+        
+        bn_ratio_raw = _safe_float(settings.get("binance_follow_ratio_pct"), 0.003)
+        if bn_ratio_raw > 1:
+            bn_ratio_raw = bn_ratio_raw / 100.0
+        bn_follow_ratio = min(max(bn_ratio_raw, 0.0), 1.0)
+        
+        bn_fallback_margin = 0.0
+        bn_total_p = _safe_float(settings.get("binance_total_capital"), 0.0)
+        bn_max_m = _safe_float(settings.get("binance_max_margin_pct"), 0.20)
+        if bn_total_p > 0 and bn_max_m > 0:
+            bn_fallback_margin = (bn_total_p / total_trader_count) * bn_max_m
 
         now_ms = int(time.time() * 1000)
         for pid in bn_traders:
@@ -303,7 +354,6 @@ class CopyEngine:
                 if pid not in self._bn_seen:
                     self._bn_seen[pid] = now_ms - 7200000
                     logger.info("币安交易员 %s 首次初始化信号时间戳 (回溯 2 小时)", pid[:12])
-                    # 不用 continue，直接让它在下面 fetch_latest_orders 处拉取信号
 
                 since_ms = self._bn_seen[pid]
                 new_orders = binance_scraper.fetch_latest_orders(pid, since_ms=since_ms, limit=20)
@@ -316,9 +366,12 @@ class CopyEngine:
                     if order_key in seen_in_batch:
                         continue
                     seen_in_batch.add(order_key)
+                    bg_creds = {"ak": bg_api_key, "sk": bg_secret, "pp": bg_pass} if bg_enabled else None
+                    bn_creds = {"ak": bn_api_key, "sk": bn_secret} if bn_enabled else None
                     self._process_binance_order(
-                        ak, sk, pp, pid, order,
-                        fallback_margin, tol, available_usdt, follow_ratio,
+                        bg_creds, bn_creds, pid, order,
+                        bg_fallback_margin=bg_fallback_margin, bg_tol=bg_tol, bg_follow_ratio=bg_follow_ratio, bg_available_usdt=bg_available_usdt,
+                        bn_fallback_margin=bn_fallback_margin, bn_tol=bn_tol, bn_follow_ratio=bn_follow_ratio, bn_available_usdt=bn_available_usdt
                     )
                     # 更新已处理的最新时间戳
                     if order["order_time"] > self._bn_seen[pid]:
@@ -339,7 +392,6 @@ class CopyEngine:
             try:
                 info = binance_scraper.fetch_trader_info(pid)
                 if info and "_warning" not in info:
-                    # 更新元数据
                     current_data[pid].update({
                         "nickname": info.get("nickname"),
                         "follower_count": info.get("follower_count"),
@@ -369,7 +421,7 @@ class CopyEngine:
 
     def _apply_follow_ratio(self, source_margin: float, follow_ratio: float, fallback_margin: float) -> tuple[float, str]:
         """
-        按“来源保证金 * 跟随比例”计算目标保证金。
+        按"来源保证金 * 跟随比例"计算目标保证金。
         当来源保证金不可得时，退回兜底保证金。
         """
         if source_margin > 0 and follow_ratio > 0:
@@ -434,636 +486,394 @@ class CopyEngine:
         estimated = _estimate_margin_from_position(qty, price, lev)
         if estimated > 0:
             return estimated
-        # 缺失来源保证金时返回 0，由 _apply_follow_ratio 统一走 fallback_margin 兜底。
         return 0.0
 
-    def _process_binance_order(self, ak, sk, pp, pid, order, fallback_margin, tol, available_usdt, follow_ratio: float) -> None:
+    def _process_binance_order(
+        self,
+        bg_creds: dict | None,
+        bn_creds: dict | None,
+        pid: str,
+        order: dict,
+        bg_fallback_margin: float,
+        bg_tol: float,
+        bg_follow_ratio: float,
+        bg_available_usdt: float,
+        bn_fallback_margin: float,
+        bn_tol: float,
+        bn_follow_ratio: float,
+        bn_available_usdt: float,
+    ) -> None:
         """
-        处理单条币安操作记录，映射到 Bitget 开仓或平仓。
+        处理单条币安操作记录，分别映射到 Bitget 和 Binance 开仓或平仓。
         """
         action    = order["action"]      # open_long / close_long / open_short / close_short
-        symbol    = _binance_symbol_to_bitget(order.get("symbol", ""))  # 币安->Bitget symbol 映射
+        symbol    = order.get("symbol", "")
         direction = order["direction"]   # long / short
         price     = order["price"]
         order_id  = order["order_id"] or f"{pid}_{order['order_time']}"
 
         if action.startswith("open"):
-            # ── 开仓 ──
             signal_key = f"{pid}:{order_id}"
             with self._state_lock:
                 if signal_key in self._bn_inflight:
                     return
                 self._bn_inflight.add(signal_key)
-            try:
-                # 幂等防重（提前执行，避免重复信号触发误导性日志）
-                if db.has_tracking_no(pid, order_id):
-                    dup_key = f"{pid}:{order_id}"
-                    if dup_key not in self._bn_dup_logged:
-                        logger.info("[币安信号跳过] 已处理过，不重复下单: pid=%s symbol=%s order_id=%s", pid[:12], symbol, order_id)
-                        self._bn_dup_logged.add(dup_key)
-                    return
 
-                # 严格同步来源杠杆，不再强制替换为固定 20x。
+            try:
                 lev = max(1, int(order.get("leverage") or 1))
                 src_margin = self._estimate_binance_margin(order)
-                target_margin, ratio_note = self._apply_follow_ratio(src_margin, follow_ratio, fallback_margin)
-                margin, margin_note = self._cap_open_margin(
-                    target_margin,
-                    fallback_margin=fallback_margin,
-                    available_usdt=available_usdt,
-                    source_tag="Binance",
-                    symbol=symbol,
-                    direction=direction,
-                )
-
-                def _insert_unsupported_skip(reason: str) -> None:
-                    self._unsupported_symbols.add(symbol)
-                    if db.has_tracking_no(pid, order_id):
-                        return
-                    db.insert_copy_order({
-                        "timestamp": _now_ms(), "trader_uid": pid, "tracking_no": order_id,
-                        "my_order_id": "", "symbol": symbol, "direction": direction,
-                        "leverage": lev, "margin_usdt": margin,
-                        "source_price": price, "exec_price": 0,
-                        "deviation_pct": 0, "action": "open",
-                        "status": "skipped", "pnl": None,
-                        "notes": f"[跳过] Bitget 不支持该交易对: {symbol} ({reason}) {ratio_note} {margin_note}".strip(), "exec_qty": 0.0,
-                    })
-
-                if symbol in self._unsupported_symbols:
-                    _insert_unsupported_skip("cached unsupported")
-                    logger.warning("[币安信号跳过] %s 在当前 Bitget 环境不可交易（缓存）", symbol)
-                    return
 
                 short_hash = hashlib.md5(f"bn_{pid}_{order_id}".encode()).hexdigest()[:16]
                 client_oid = f"bn_{short_hash}"
 
-                if margin <= 0:
-                    logger.warning(
-                        "[币安信号跳过] 无法推导保证金: %s %s qty=%s price=%s lev=%s ratio=%.4f%%",
-                        symbol,
-                        direction.upper(),
-                        order.get("qty"),
-                        price,
-                        lev,
-                        follow_ratio * 100,
+                # ======== Bitget 处理 ========
+                if bg_creds:
+                    bg_symbol_mapped = _binance_symbol_to_bitget(symbol)
+                    bg_ak, bg_sk, bg_pp = bg_creds["ak"], bg_creds["sk"], bg_creds["pp"]
+                    bg_target_margin, bg_ratio_note = self._apply_follow_ratio(src_margin, bg_follow_ratio, bg_fallback_margin)
+                    self._execute_open_for_platform(
+                        platform="bitget",
+                        api_creds=(bg_ak, bg_sk, bg_pp),
+                        pid=pid, order_id=order_id, symbol=bg_symbol_mapped,
+                        direction=direction, price=price, lev=lev, tol=bg_tol,
+                        fallback_margin=bg_fallback_margin, target_margin=bg_target_margin,
+                        available_usdt=bg_available_usdt,
+                        src_margin=src_margin, ratio_note=bg_ratio_note, client_oid=client_oid
                     )
-                    return
 
-                # 价格容忍度检查 (补票上车逻辑)
-                try:
-                    ok, curr_p, dev = _price_ok(symbol, price, tol)
-                except Exception as exc:
-                    if _is_symbol_not_exist_error(exc):
-                        _insert_unsupported_skip(str(exc))
-                        logger.warning("[币安信号跳过] Bitget 不支持交易对 %s: %s", symbol, exc)
-                        return
-                    logger.warning("[币安价差检查失败] %s %s: %s", symbol, direction.upper(), exc)
-                    return
-                if not ok:
-                    logger.warning("[币安价差过大暂缓] %s %s 信号价=%.4f 现价=%.4f 偏差=%.2f%%", 
-                                   symbol, direction.upper(), price, curr_p, dev * 100)
-                    return
-
-                try:
-                    res = order_executor.place_market_order(
-                        ak, sk, pp, symbol, direction, lev,
-                        "isolated", margin, pos_mode=self._pos_mode, client_oid=client_oid,
-                        current_price=curr_p
+                # ======== Binance 处理 ========
+                if bn_creds:
+                    bn_ak, bn_sk = bn_creds["ak"], bn_creds["sk"]
+                    bn_target_margin, bn_ratio_note = self._apply_follow_ratio(src_margin, bn_follow_ratio, bn_fallback_margin)
+                    self._execute_open_for_platform(
+                        platform="binance",
+                        api_creds=(bn_ak, bn_sk, ""),
+                        pid=pid, order_id=order_id, symbol=symbol,
+                        direction=direction, price=price, lev=lev, tol=bn_tol,
+                        fallback_margin=bn_fallback_margin, target_margin=bn_target_margin,
+                        available_usdt=bn_available_usdt,
+                        src_margin=src_margin, ratio_note=bn_ratio_note, client_oid=client_oid
                     )
-                    oid = res.get("orderId") if isinstance(res, dict) else ""
-                    exec_qty = float(res.get("_calculated_size", 0) if isinstance(res, dict) else 0)
-                    db.insert_copy_order({
-                        "timestamp": _now_ms(), "trader_uid": pid, "tracking_no": order_id,
-                        "my_order_id": oid, "symbol": symbol, "direction": direction,
-                        "leverage": lev, "margin_usdt": margin,
-                        "source_price": price, "exec_price": curr_p,
-                        "deviation_pct": dev, "action": "open",
-                        "status": "filled", "pnl": None, "notes": f"[Binance Signal] src_margin={src_margin:.4f} {ratio_note} {margin_note}".strip(), "exec_qty": exec_qty,
-                    })
-                    logger.info("[币安信号→Bitget开仓] %s %s 价格=%s 数量=%s", symbol, direction.upper(), curr_p, exec_qty)
-                except Exception as exc:
-                    if _is_symbol_not_exist_error(exc):
-                        _insert_unsupported_skip(str(exc))
-                        logger.warning("[币安信号跳过] Bitget 不支持交易对 %s: %s", symbol, exc)
-                        return
-                    # 失败时用带"FAIL_"前缀的 tracking_no，确保下次轮询时不被 has_tracking_no 拦截，可以重试
-                    db.insert_copy_order({
-                        "timestamp": _now_ms(), "trader_uid": pid, "tracking_no": f"FAIL_{order_id}",
-                        "my_order_id": "", "symbol": symbol, "direction": direction,
-                        "leverage": lev, "margin_usdt": margin,
-                        "source_price": price, "exec_price": 0,
-                        "deviation_pct": 0, "action": "open",
-                        "status": "failed", "pnl": None, "notes": f"{exc} | src_margin={src_margin:.4f} {ratio_note} {margin_note}".strip(), "exec_qty": 0.0,
-                    })
-                    logger.error("[币安信号→Bitget开仓失败] %s: %s", symbol, exc)
+
             finally:
                 with self._state_lock:
                     self._bn_inflight.discard(signal_key)
 
-        if action.startswith("close"):
+        elif action.startswith("close"):
             # ── 平仓 ──
-            # 精确计算剩余持仓 = 总开仓量 - 已平仓量，避免超额平仓
-            from database import get_conn
-            with get_conn() as conn:
-                opened_sum = conn.execute('''
-                    SELECT COALESCE(SUM(exec_qty), 0) FROM copy_orders 
-                    WHERE trader_uid = ? AND symbol = ? AND direction = ? 
-                      AND action = 'open' AND status = 'filled'
-                ''', (pid, symbol, direction)).fetchone()[0]
-                closed_sum = conn.execute('''
-                    SELECT COALESCE(SUM(exec_qty), 0) FROM copy_orders 
-                    WHERE trader_uid = ? AND symbol = ? AND direction = ? 
-                      AND action = 'close' AND status = 'filled'
-                ''', (pid, symbol, direction)).fetchone()[0]
-            remaining_qty = float(opened_sum) - float(closed_sum)
-            
-            if remaining_qty <= 0:
-                logger.warning("[币安平仓信号] 本地未发现 %s %s 的剩余持仓 (pid=%s)，跳过", symbol, direction.upper(), pid[:8])
-                return
-
-            # 截断到4位小数
-            close_qty = int(remaining_qty * 10000) / 10000.0
-            if close_qty <= 0:
-                return
-
-            try:
-                order_executor.close_partial_position(
-                    ak, sk, pp, symbol, direction, str(close_qty),
-                    pos_mode=self._pos_mode, margin_mode="isolated"
+            # ======== Bitget 处理 ========
+            if bg_creds:
+                bg_symbol_mapped = _binance_symbol_to_bitget(symbol)
+                bg_ak, bg_sk, bg_pp = bg_creds["ak"], bg_creds["sk"], bg_creds["pp"]
+                self._execute_close_for_platform(
+                    platform="bitget",
+                    api_creds=(bg_ak, bg_sk, bg_pp),
+                    pid=pid, order_id=order_id, symbol=bg_symbol_mapped,
+                    direction=direction, price=price, order_pnl=order.get("pnl"), tol=bg_tol
                 )
-                db.insert_copy_order({
-                    "timestamp": _now_ms(), "trader_uid": pid, "tracking_no": order_id,
-                    "my_order_id": "", "symbol": symbol, "direction": direction,
-                    "leverage": 0, "margin_usdt": 0, "source_price": price, "exec_price": price,
-                    "deviation_pct": 0, "action": "close",
-                    "status": "filled", "pnl": order.get("pnl"), "notes": "[Binance Signal] Close",
-                    "exec_qty": close_qty,
-                })
-                logger.info("[币安信号→Bitget平仓] %s %s 数量=%s", symbol, direction.upper(), close_qty)
-            except Exception as exc:
-                logger.error("[币安信号→Bitget平仓失败] %s: %s", symbol, exc)
 
-
-    def _run(self) -> None:
-        while self._running:
-            try:
-                self._loop_once()
-            except Exception as exc:
-                logger.error("Engine loop error: %s", exc, exc_info=True)
-            time.sleep(2.5)
-
-    def _loop_once(self) -> None:
-        settings = db.get_copy_settings()
-        if not settings or not settings.get("engine_enabled"):
-            return
-
-        api_key = settings.get("api_key") or ""
-        api_secret = settings.get("api_secret") or ""
-        api_passphrase = settings.get("api_passphrase") or ""
-        if not (api_key and api_secret and api_passphrase):
-            return
-
-        enabled_traders = _parse_list(settings.get("enabled_traders", ""))
-        if not enabled_traders: return
-
-        # 1. 基础检查（并提取账户模式 posMode）
-        tol = _safe_float(settings.get("price_tolerance"), 0.0002)
-        follow_ratio = self._resolve_follow_ratio(settings)
-        # 资金池仅作为兜底保证金，不再作为硬性开仓门槛。
-        total_p = _safe_float(settings.get("total_capital"), 0.0)
-        max_m = _safe_float(settings.get("max_margin_pct"), 0.20)
-        fallback_margin = 0.0
-        try:
-            bn_raw = settings.get("binance_traders", "")
-            bn_data = json.loads(bn_raw) if bn_raw else {}
-            if isinstance(bn_data, dict):
-                bn_count = len([p for p, d in bn_data.items() if d.get("copy_enabled") == True])
-            else:
-                bn_count = len(bn_data) if isinstance(bn_data, list) else 0
-        except Exception:
-            bn_count = 0
-        total_trader_count = max(len(enabled_traders) + bn_count, 1)
-        if total_p > 0 and max_m > 0:
-            fallback_margin = (total_p / total_trader_count) * max_m
-
-        try:
-            bal = order_executor.get_account_balance(api_key, api_secret, api_passphrase)
-            available = _extract_balance_usdt(bal)
-            self._pos_mode = str(bal.get("_posMode", "2"))
-            if available <= 0:
-                logger.warning("账户可用余额为 0，跳过本轮")
-                return
-        except Exception as exc:
-            logger.warning("账户检查失败，跳过本轮: %s", exc)
-            return
-
-        # 2. 并发拉取交易员数据（极大降低轮询延迟从 O(N) 到 O(1)）
-        latest_trader_positions: dict[str, list[dict]] = {}
-
-        def _fetch_task(uid):
-            try:
-                curr = scraper.fetch_current_positions(uid)
-                if curr is None:
-                    # 持仓保护模式: API 返回 None
-                    # 此时 不能确定交易员的真实持仓情况，不能安全地耦动开/平仓
-                    # 返回一个特殊标记值 None，让主循环跳过该交易员
-                    logger.warning("交易员 %s 开启了持仓保护，本轮跳过开平仓操作", uid[:8])
-                    return uid, None  # None 表示"数据不可用"，区别于"有效的空列表"
-                if not curr:
-                    # API 正常返回了空列表，说明交易员确实没持仓
-                    return uid, []
-                return uid, curr
-            except Exception as e:
-                logger.warning("抓取交易员 %s 数据异常: %s", uid[:8], e)
-                return uid, None  # 异常情况也返回 None，跳过开平仓
-
-        try:
-            workers = min(10, max(1, len(enabled_traders)))
-            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-                futures = [executor.submit(_fetch_task, uid) for uid in enabled_traders]
-                for fut in concurrent.futures.as_completed(futures):
-                    uid, curr = fut.result()
-                    latest_trader_positions[uid] = curr
-        except Exception as e:
-            logger.warning("并发扫描异常，改用串行模式: %s", e)
-            for uid in enabled_traders:
-                if uid not in latest_trader_positions:
-                    _, curr = _fetch_task(uid)
-                    latest_trader_positions[uid] = curr
-
-        # 3. 驱动纯状态机（严谨管理增删改）
-        for uid in enabled_traders:
-            curr = latest_trader_positions.get(uid)  # 安全get，避免KeyError导致整轮崩溃
-            if curr is None:
-                logger.warning("交易员 %s 本轮数据缺失，跳过", uid[:8])
-                continue
-            curr_map = {p["order_no"]: p for p in curr if p.get("order_no")}
-            prev_map = self._prev_snaps.get(uid, {})
-
-            new_list = [p for k, p in curr_map.items() if k not in prev_map]
-            gone_list = [p for k, p in prev_map.items() if k not in curr_map]
-
-            # 同步检测：同一 order_no 存在但持仓规模或杠杆发生变化
-            changed_list = []
-            for k, curr_pos in curr_map.items():
-                if k in prev_map:
-                    prev_pos = prev_map[k]
-                    prev_size = _safe_float(prev_pos.get("position_size"), 0.0)
-                    curr_size = _safe_float(curr_pos.get("position_size"), 0.0)
-                    prev_lev = max(1, _safe_int(prev_pos.get("leverage"), 1))
-                    curr_lev = max(1, _safe_int(curr_pos.get("leverage"), 1))
-                    # 严格同步：只要仓位数量有可交易精度级别的变化就触发对齐
-                    size_changed = abs(curr_size - prev_size) > 0.0001
-                    lev_changed = curr_lev != prev_lev
-                    if size_changed or lev_changed:
-                        changed_list.append((prev_pos, curr_pos))
-
-            for pos in new_list:
-                status = self._handle_open(
-                    api_key, api_secret, api_passphrase,
-                    uid, pos, fallback_margin, tol, available, follow_ratio,
+            # ======== Binance 处理 ========
+            if bn_creds:
+                bn_ak, bn_sk = bn_creds["ak"], bn_creds["sk"]
+                self._execute_close_for_platform(
+                    platform="binance",
+                    api_creds=(bn_ak, bn_sk, ""),
+                    pid=pid, order_id=order_id, symbol=symbol,
+                    direction=direction, price=price, order_pnl=order.get("pnl"), tol=bn_tol
                 )
-                if status in ("filled", "skipped"):
-                    db.upsert_snapshot(_to_snap(uid, pos))
-                    self._prev_snaps.setdefault(uid, {})[pos["order_no"]] = pos
-                # failed 和 skipped_retry 均不录入快照，让下一轮继续重试。
 
-            for pos in gone_list:
-                success = self._handle_close(api_key, api_secret, api_passphrase, uid, pos)
-                if success:
-                    db.delete_snapshot(uid, pos["order_no"])
-                    self._prev_snaps[uid].pop(pos["order_no"], None)
-                # 若 false (failed API)，留在快照里，下一轮继续走 close
+    def _execute_open_for_platform(
+        self, platform: str, api_creds: tuple, pid: str, order_id: str, symbol: str,
+        direction: str, price: float, lev: int, tol: float,
+        fallback_margin: float, target_margin: float, available_usdt: float,
+        src_margin: float, ratio_note: str, client_oid: str
+    ):
+        """通用单平台开仓执行器，分别供 Bitget 和 Binance 使用"""
+        # 1. 幂等防重
+        if db.has_tracking_no(pid, order_id, platform=platform):
+            dup_key = f"{platform}:{pid}:{order_id}"
+            if dup_key not in self._bn_dup_logged:
+                logger.info("[%s信号跳过] 已处理过，不重复下单: pid=%s symbol=%s order_id=%s", platform.capitalize(), pid[:12], symbol, order_id)
+                self._bn_dup_logged.add(dup_key)
+            return
 
-            # 严格同步：同一 tracking_no 的仓位变化（加仓/减仓/杠杆调整）都实时对齐。
-            for prev_pos, curr_pos in changed_list:
-                success = self._handle_sync_change(api_key, api_secret, api_passphrase, uid, prev_pos, curr_pos)
-                if success:
-                    # 更新快照为最新的仓位数据
-                    db.upsert_snapshot(_to_snap(uid, curr_pos))
-                    self._prev_snaps[uid][curr_pos["order_no"]] = curr_pos
-
-
-    def _handle_open(self, ak, sk, pp, uid, pos, fallback_margin, tol, available_usdt, follow_ratio: float) -> str:
-        symbol = pos.get("symbol", "")
-        tn = pos.get("order_no", "")
-        side = pos.get("direction", "")
-        lev = max(1, int(pos.get("leverage") or 1))
-        ref_p = _safe_float(pos.get("open_price"), 0.0)
-        source_margin = _safe_float(pos.get("margin_amount"), 0.0)
-
-        if source_margin <= 0:
-            source_size = _safe_float(pos.get("position_size"), 0.0)
-            source_margin = _estimate_margin_from_position(source_size, ref_p, lev)
-        target_margin, ratio_note = self._apply_follow_ratio(source_margin, follow_ratio, fallback_margin)
         margin, margin_note = self._cap_open_margin(
             target_margin,
             fallback_margin=fallback_margin,
             available_usdt=available_usdt,
-            source_tag="Bitget",
+            source_tag=platform.capitalize(),
             symbol=symbol,
-            direction=side,
+            direction=direction,
         )
+        precheck_note = ""
+
+        def _insert_skip(reason: str, exec_p: float = 0.0, dev: float = 0.0):
+            db.insert_copy_order({
+                "timestamp": _now_ms(), "trader_uid": pid, "tracking_no": order_id,
+                "my_order_id": "", "symbol": symbol, "direction": direction,
+                "leverage": lev, "margin_usdt": margin,
+                "source_price": price, "exec_price": exec_p,
+                "deviation_pct": dev, "action": "open",
+                "status": "skipped", "pnl": None,
+                "notes": f"[跳过] {reason} {ratio_note} {margin_note} {precheck_note}".strip(), "exec_qty": 0.0,
+                "platform": platform
+            })
+
+        if platform == "bitget" and symbol in self._unsupported_symbols:
+            _insert_skip("Bitget 不支持该交易对(缓存)")
+            return
 
         if margin <= 0:
-            logger.warning("[来源数据缺失] 保证金无法推导，跳过开仓 %s %s", symbol, side.upper())
-            return "skipped_retry"
+            logger.warning(
+                "[%s信号跳过] 无法推导保证金: %s %s price=%s lev=%s",
+                platform.capitalize(), symbol, direction.upper(), price, lev
+            )
+            return
 
-        def _insert_unsupported_skip(reason: str) -> str:
-            self._unsupported_symbols.add(symbol)
-            if not db.has_tracking_no(uid, tn):
-                db.insert_copy_order({
-                    "timestamp": _now_ms(), "trader_uid": uid, "tracking_no": tn,
-                    "my_order_id": "", "symbol": symbol, "direction": side,
-                    "leverage": lev, "margin_usdt": margin, "source_price": ref_p,
-                    "exec_price": 0, "deviation_pct": 0, "action": "open",
-                    "status": "skipped", "pnl": None,
-                    "notes": f"[跳过] Bitget 不支持该交易对: {symbol} ({reason}) {ratio_note} {margin_note}".strip(), "exec_qty": 0.0,
-                })
-            logger.warning("[来源同步跳过] Bitget 不支持交易对 %s: %s", symbol, reason)
-            return "skipped"
-
-        if symbol in self._unsupported_symbols:
-            return _insert_unsupported_skip("cached unsupported")
-
-        # [Risk Management] 限制单个交易员最大持仓数，防止爆仓
-        prev_map = self._prev_snaps.get(uid, {})
-        if len(prev_map) >= 10:
-            logger.warning("[风控触发] 交易员 %s 已持仓 %d 个，达到上限，跳过新开仓", uid[:8], len(prev_map))
-            return "skipped"
-
+        # 2. 获取现价 & 容忍度检查
         try:
-            ok, curr_p, dev = _price_ok(symbol, ref_p, tol)
+            if platform == "binance":
+                import binance_executor
+                curr_p = binance_executor.get_ticker_price(symbol)
+                dev = abs(curr_p - price) / price if price > 0 else 1.0
+                ok = dev <= tol
+            else:
+                ok, curr_p, dev = _price_ok(symbol, price, tol)
         except Exception as exc:
-            if _is_symbol_not_exist_error(exc):
-                return _insert_unsupported_skip(str(exc))
-            logger.warning("[价差检查失败暂缓] %s %s: %s", symbol, side.upper(), exc)
-            return "skipped_retry"
+            if platform == "bitget" and _is_symbol_not_exist_error(exc):
+                self._unsupported_symbols.add(symbol)
+                _insert_skip(f"Bitget 不支持交易对: {exc}")
+            elif platform == "binance" and _is_binance_symbol_error(exc):
+                _insert_skip(f"Binance 不支持交易对: {exc}")
+            else:
+                logger.warning("[%s查价失败] %s %s: %s", platform.capitalize(), symbol, direction.upper(), exc)
+            return
+
         if not ok:
-            # 价差超限：只记录日志，不写入 DB 也不更新快照
-            # 这样下一轮循环时此持仓仍在 new_list 中，会继续重试，直到价差恢复
-            logger.warning("[价差过大暂缓] %s %s 偏差: %.2f%%，下轮继续重试", symbol, side.upper(), dev * 100)
-            return "skipped_retry"  # 特殊状态：不写快照，下轮重试
+            logger.warning("[%s价差过大暂缓] %s %s 信号=%.4f 现价=%.4f 偏差=%.2f%%", 
+                           platform.capitalize(), symbol, direction.upper(), price, curr_p, dev * 100)
+            return
 
-        # 生成 clientOid (幂等防重放双杀)
-        short_hash = hashlib.md5(f"{uid}_{tn}".encode()).hexdigest()[:16]
-        client_oid = f"kop_{short_hash}"
-
+        # 3. 最小下单量 / 交易状态预检查
         try:
-            res = order_executor.place_market_order(
-                ak, sk, pp, symbol, side, lev, pos.get("margin_mode") or "cross",
-                margin, pos_mode=self._pos_mode, current_price=curr_p, client_oid=client_oid
-            )
-            oid = res.get("orderId") if isinstance(res, dict) else ""
-            exec_qty = float(res.get("_calculated_size", "0") if isinstance(res, dict) else 0)
+            cap_limit = _cap_limit_value(fallback_margin, available_usdt)
+            if platform == "binance":
+                import binance_executor
 
-            db.insert_copy_order({
-                "timestamp": _now_ms(), "trader_uid": uid, "tracking_no": tn,
-                "my_order_id": oid, "symbol": symbol, "direction": side,
-                "leverage": lev, "margin_usdt": margin, "source_price": ref_p,
-                "exec_price": curr_p, "deviation_pct": dev, "action": "open",
-                "status": "filled", "pnl": None,
-                "notes": f"[来源同步] src_margin={source_margin:.4f} {ratio_note} {margin_note}".strip(),
-                "exec_qty": exec_qty,
-            })
-            self._fail_streak = 0
-            logger.info(
-                "[跟随开仓成功] %s %s 数量=%s 杠杆=%sx 保证金=%.4f(来源=%.4f)",
-                symbol,
-                side.upper(),
-                exec_qty,
-                lev,
-                margin,
-                source_margin,
-            )
-            return "filled"
+                req = binance_executor.get_min_order_requirements(symbol, lev, curr_p)
+                required_margin = _safe_float(req.get("requiredMargin"), 0.0)
+                if required_margin > 0 and margin + 1e-12 < required_margin:
+                    if cap_limit > 0 and required_margin > cap_limit + 1e-12:
+                        _insert_skip(f"Binance 最小下单不足 need={required_margin:.4f} cap={cap_limit:.4f}")
+                        return
+                    precheck_note = f"[最小下单抬升] target={margin:.4f} min={required_margin:.4f}"
+                    logger.info(
+                        "[Binance最小下单抬升] %s %s %.4f -> %.4f",
+                        symbol,
+                        direction.upper(),
+                        margin,
+                        required_margin,
+                    )
+                    margin = required_margin
+            else:
+                req = order_executor.get_min_order_requirements(symbol, lev, curr_p)
+                symbol_status = str(req.get("symbolStatus") or "").lower()
+                if symbol_status and symbol_status != "normal":
+                    self._unsupported_symbols.add(symbol)
+                    _insert_skip(f"Bitget 合约不可交易 status={symbol_status}")
+                    return
+
+                limit_open_time = str(req.get("limitOpenTime") or "-1")
+                if limit_open_time not in ("", "-1"):
+                    _insert_skip(f"Bitget 当前不可开仓 limitOpenTime={limit_open_time}")
+                    return
+
+                required_margin = _safe_float(req.get("requiredMargin"), 0.0)
+                if required_margin > 0 and margin + 1e-12 < required_margin:
+                    if cap_limit > 0 and required_margin > cap_limit + 1e-12:
+                        _insert_skip(f"Bitget 最小下单不足 need={required_margin:.4f} cap={cap_limit:.4f}")
+                        return
+                    precheck_note = f"[最小下单抬升] target={margin:.4f} min={required_margin:.4f}"
+                    logger.info(
+                        "[Bitget最小下单抬升] %s %s %.4f -> %.4f",
+                        symbol,
+                        direction.upper(),
+                        margin,
+                        required_margin,
+                    )
+                    margin = required_margin
         except Exception as exc:
-            if _is_symbol_not_exist_error(exc):
-                return _insert_unsupported_skip(str(exc))
-            db.insert_copy_order({
-                "timestamp": _now_ms(), "trader_uid": uid, "tracking_no": tn,
-                "my_order_id": "", "symbol": symbol, "direction": side,
-                "leverage": lev, "margin_usdt": margin, "source_price": ref_p,
-                "exec_price": curr_p, "deviation_pct": dev, "action": "open",
-                "status": "failed", "pnl": None, "notes": f"{exc} | src_margin={source_margin:.4f} {ratio_note} {margin_note}".strip(), "exec_qty": 0.0,
-            })
-            # fail_streak 只在同一个 uid+symbol 的连续失败时计数，避免跨交易员误触发熔断
-            self._fail_streak += 1
-            if self._fail_streak >= 5:  # 提高阈值到 5 次，减少误熔断
-                logger.error("故障熔断：开仓连续 %d 次失败（跨交易员），引擎挂起待维护", self._fail_streak)
-                db.set_engine_enabled(False)
-                self._running = False
-            return "failed"
+            if platform == "bitget" and _is_symbol_not_exist_error(exc):
+                self._unsupported_symbols.add(symbol)
+                _insert_skip(f"Bitget 不支持交易对: {exc}")
+            elif platform == "binance" and _is_binance_symbol_error(exc):
+                _insert_skip(f"Binance 不支持交易对: {exc}")
+            else:
+                logger.warning("[%s最小下单预检失败] %s %s: %s", platform.capitalize(), symbol, direction.upper(), exc)
+            return
 
-    def _remaining_exec_qty(self, uid: str, tracking_no: str) -> float:
-        opened = db.get_copy_orders_by_tracking(uid, tracking_no, action="open")
-        filled_opens = [o for o in opened if o.get("status") == "filled"]
-        closed = db.get_copy_orders_by_tracking(uid, tracking_no, action="close")
-        filled_closes = [o for o in closed if o.get("status") == "filled"]
-        total_opened = sum(o.get("exec_qty", 0.0) for o in filled_opens)
-        total_closed = sum(o.get("exec_qty", 0.0) for o in filled_closes)
-        return float(total_opened) - float(total_closed)
-
-    def _handle_sync_change(self, ak, sk, pp, uid, prev_pos, curr_pos) -> bool:
-        """
-        严格同步同一 tracking_no 的变化：
-        - 杠杆变化：立即同步到来源杠杆
-        - 仓位变化：按比例精确加仓/减仓
-        """
-        symbol = curr_pos.get("symbol", "")
-        tn = curr_pos.get("order_no", "")
-        side = curr_pos.get("direction", "") or curr_pos.get("hold_side", "")
-        margin_mode = curr_pos.get("margin_mode", "cross")
-        curr_lev = max(1, _safe_int(curr_pos.get("leverage"), 1))
-
-        remaining = self._remaining_exec_qty(uid, tn)
-        if remaining <= 0:
-            return True
-
-        # 无论是否加减仓，先强制对齐来源杠杆（严格同步）
+        # 3. 发起下单
+        ak, sk, pp = api_creds
         try:
-            order_executor.set_symbol_leverage(
-                ak, sk, pp,
-                symbol=symbol,
-                direction=side,
-                leverage=curr_lev,
-                margin_mode=margin_mode,
-                pos_mode=self._pos_mode,
-            )
-        except Exception as exc:
-            logger.error("杠杆同步失败 [%s %s %sx]: %s", symbol, side.upper(), curr_lev, exc)
-            return False
-
-        prev_size = _safe_float(prev_pos.get("position_size"), 0.0)
-        curr_size = _safe_float(curr_pos.get("position_size"), 0.0)
-        if prev_size <= 0 or curr_size <= 0:
-            return True
-
-        target_qty = remaining * (curr_size / prev_size)
-        delta_qty = _trunc4(target_qty - remaining)
-        if abs(delta_qty) < 0.0001:
-            return True
-
-        try:
-            if delta_qty < 0:
-                reduce_qty = _trunc4(-delta_qty)
-                if reduce_qty <= 0:
-                    return True
-                order_executor.close_partial_position(
-                    ak, sk, pp, symbol, side, str(reduce_qty),
-                    pos_mode=self._pos_mode,
-                    margin_mode=margin_mode,
+            if platform == "binance":
+                import binance_executor
+                res = binance_executor.place_market_order(
+                    ak, sk, symbol, direction, lev, "ISOLATED", margin,
+                    current_price=curr_p, client_oid=client_oid
                 )
-                db.insert_copy_order({
-                    "timestamp": _now_ms(), "trader_uid": uid, "tracking_no": tn,
-                    "my_order_id": "", "symbol": symbol, "direction": side,
-                    "leverage": curr_lev, "margin_usdt": 0, "source_price": _safe_float(curr_pos.get("open_price"), 0.0),
-                    "exec_price": _safe_float(curr_pos.get("open_price"), 0.0), "deviation_pct": 0, "action": "close",
-                    "status": "filled", "pnl": _safe_float(curr_pos.get("unrealized_pnl"), 0.0),
-                    "notes": "[来源同步] 仓位缩小", "exec_qty": reduce_qty,
-                })
-                logger.info("[来源同步减仓] %s %s 减仓=%s", symbol, side.upper(), reduce_qty)
-                return True
-
-            add_qty = _trunc4(delta_qty)
-            if add_qty <= 0:
-                return True
-            sync_oid = f"sync_{hashlib.md5(f'{uid}_{tn}_{_now_ms()}'.encode()).hexdigest()[:16]}"
-            try:
-                curr_price = get_ticker_price(symbol)
-            except Exception:
-                curr_price = _safe_float(curr_pos.get("open_price"), 0.0)
-            res = order_executor.place_market_order_by_size(
-                ak, sk, pp,
-                symbol=symbol,
-                direction=side,
-                leverage=curr_lev,
-                margin_mode=margin_mode,
-                size=add_qty,
-                pos_mode=self._pos_mode,
-                client_oid=sync_oid,
-            )
-            oid = res.get("orderId") if isinstance(res, dict) else ""
-            estimated_margin = _estimate_margin_from_position(add_qty, curr_price, curr_lev)
+            else:
+                res = order_executor.place_market_order(
+                    ak, sk, pp, symbol, direction, lev,
+                    "isolated", margin, pos_mode=self._pos_mode, client_oid=client_oid,
+                    current_price=curr_p
+                )
+                
+            oid = res.get("orderId") or res.get("clientId") or ""
+            exec_qty = float(res.get("_calculated_size", 0) if isinstance(res, dict) else 0)
             db.insert_copy_order({
-                "timestamp": _now_ms(), "trader_uid": uid, "tracking_no": tn,
-                "my_order_id": oid, "symbol": symbol, "direction": side,
-                "leverage": curr_lev, "margin_usdt": estimated_margin, "source_price": _safe_float(curr_pos.get("open_price"), 0.0),
-                "exec_price": curr_price, "deviation_pct": 0, "action": "open",
-                "status": "filled", "pnl": _safe_float(curr_pos.get("unrealized_pnl"), 0.0),
-                "notes": "[来源同步] 仓位扩大", "exec_qty": add_qty,
+                "timestamp": _now_ms(), "trader_uid": pid, "tracking_no": order_id,
+                "my_order_id": str(oid), "symbol": symbol, "direction": direction,
+                "leverage": lev, "margin_usdt": margin,
+                "source_price": price, "exec_price": curr_p,
+                "deviation_pct": dev, "action": "open",
+                "status": "filled", "pnl": None, "notes": f"[{platform.capitalize()} Signal] src={src_margin:.4f} {ratio_note} {margin_note} {precheck_note}".strip(), "exec_qty": exec_qty,
+                "platform": platform
             })
-            logger.info("[来源同步加仓] %s %s 加仓=%s", symbol, side.upper(), add_qty)
-            return True
+            logger.info("[%s开仓成功] %s %s 价=%.4f 量=%s", platform.capitalize(), symbol, direction.upper(), curr_p, exec_qty)
         except Exception as exc:
-            logger.error("来源仓位同步失败 [%s %s]: %s", symbol, side.upper(), exc)
-            return False
+            if platform == "bitget" and _is_symbol_not_exist_error(exc):
+                self._unsupported_symbols.add(symbol)
+                _insert_skip(f"Bitget 不支持交易对: {exc}")
+                return
+            if platform == "bitget" and (_is_bitget_min_trade_error(exc) or _is_local_min_size_error(exc)):
+                _insert_skip(f"Bitget 最小下单不足: {exc}", curr_p, dev)
+                return
+            if platform == "bitget" and _is_bitget_balance_error(exc):
+                _insert_skip(f"Bitget 余额不足: {exc}", curr_p, dev)
+                return
+            if platform == "binance" and (_is_binance_min_notional_error(exc) or _is_binance_symbol_error(exc) or _is_local_min_size_error(exc)):
+                _insert_skip(f"Binance 最小下单不足: {exc}", curr_p, dev)
+                return
+            if platform == "binance" and _is_binance_balance_error(exc):
+                _insert_skip(f"Binance 余额不足: {exc}", curr_p, dev)
+                return
+            db.insert_copy_order({
+                "timestamp": _now_ms(), "trader_uid": pid, "tracking_no": f"FAIL_{order_id}",
+                "my_order_id": "", "symbol": symbol, "direction": direction,
+                "leverage": lev, "margin_usdt": margin,
+                "source_price": price, "exec_price": curr_p,
+                "deviation_pct": dev, "action": "open",
+                "status": "failed", "pnl": None, "notes": f"{exc} | {ratio_note} {margin_note} {precheck_note}".strip(), "exec_qty": 0.0,
+                "platform": platform
+            })
+            logger.error("[%s开仓失败] %s: %s", platform.capitalize(), symbol, exc)
 
-    def _handle_close(self, ak, sk, pp, uid, pos) -> bool:
-        symbol = pos.get("symbol", "")
-        tn = pos.get("order_no", "")
-        side = pos.get("direction", "") or pos.get("hold_side", "")
-        remaining_qty = self._remaining_exec_qty(uid, tn)
 
+    def _execute_close_for_platform(
+        self, platform: str, api_creds: tuple, pid: str, order_id: str, symbol: str,
+        direction: str, price: float, order_pnl: float | None, tol: float
+    ):
+        """通用单平台平仓执行器"""
+        if platform == "bitget" and symbol in self._unsupported_symbols:
+            return
+
+        # 检查是否平仓过 (幂等防重)
+        if db.has_tracking_no(pid, order_id, platform=platform):
+            return
+
+        from database import get_conn
+        with get_conn() as conn:
+            opened_sum = conn.execute('''
+                SELECT COALESCE(SUM(exec_qty), 0) FROM copy_orders 
+                WHERE trader_uid = ? AND symbol = ? AND direction = ? 
+                  AND action = 'open' AND status = 'filled' AND platform = ?
+            ''', (pid, symbol, direction, platform)).fetchone()[0]
+            closed_sum = conn.execute('''
+                SELECT COALESCE(SUM(exec_qty), 0) FROM copy_orders 
+                WHERE trader_uid = ? AND symbol = ? AND direction = ? 
+                  AND action = 'close' AND status = 'filled' AND platform = ?
+            ''', (pid, symbol, direction, platform)).fetchone()[0]
+        
+        remaining_qty = float(opened_sum) - float(closed_sum)
+        
         if remaining_qty <= 0:
-            return True
+            logger.debug("[%s平仓信号] 本地未发现 %s的剩余持仓 (pid=%s)，跳过", platform.capitalize(), symbol, pid[:8])
+            return
 
+        # Binance 的数量精度可能不能轻易舍弃小数，但至少我们不增加新的小数
+        close_qty = remaining_qty
+        
+        if close_qty <= 0:
+            return
+
+        ak, sk, pp = api_creds
         try:
-            order_executor.close_partial_position(
-                ak, sk, pp, symbol, side, str(remaining_qty), 
-                pos_mode=self._pos_mode, 
-                margin_mode=pos.get("margin_mode", "cross")
-            )
-            
-            # 当前现价仅用于记录流水
-            try: curr_p = get_ticker_price(symbol)
-            except Exception: curr_p = 0.0
+            # 获取最新价并检查平仓滑点容忍度
+            if platform == "binance":
+                import binance_executor
+                curr_p = binance_executor.get_ticker_price(symbol)
+                dev = abs(curr_p - price) / price if price > 0 else 1.0
+                ok = dev <= tol
+            else:
+                ok, curr_p, dev = _price_ok(symbol, price, tol)
+                
+            if not ok:
+                logger.warning("[%s平仓暂缓] %s %s 信号价=%.4f 现价=%.4f 偏差=%.2f%% > %.2f%%", 
+                               platform.capitalize(), symbol, direction.upper(), price, curr_p, dev * 100, tol * 100)
+                return
 
+            if platform == "binance":
+                filters = binance_executor.get_symbol_filters(symbol)
+                qty_str = binance_executor._format_qty(close_qty, filters["stepSize"])
+                if float(qty_str) > 0:
+                    binance_executor.close_partial_position(
+                        ak, sk, symbol, direction, qty_str
+                    )
+                else:
+                    logger.warning("[%s平仓信号] 数量过小被截断: %s", platform.capitalize(), close_qty)
+                    return
+            else:
+                # Bitget
+                qty_str = str(int(close_qty * 10000) / 10000.0)
+                order_executor.close_partial_position(
+                    ak, sk, pp, symbol, direction, qty_str,
+                    pos_mode=self._pos_mode, margin_mode="isolated"
+                )
+                
             db.insert_copy_order({
-                "timestamp": _now_ms(), "trader_uid": uid, "tracking_no": tn,
-                "my_order_id": "", "symbol": symbol, "direction": side,
-                "leverage": 0, "margin_usdt": 0, "source_price": 0,
-                "exec_price": curr_p, "deviation_pct": 0, "action": "close",
-                "status": "filled", "pnl": None, "notes": "", "exec_qty": remaining_qty,
+                "timestamp": _now_ms(), "trader_uid": pid, "tracking_no": order_id,
+                "my_order_id": "", "symbol": symbol, "direction": direction,
+                "leverage": 0, "margin_usdt": 0, "source_price": price, "exec_price": price,
+                "deviation_pct": 0, "action": "close",
+                "status": "filled", "pnl": order_pnl, "notes": f"[{platform.capitalize()} Signal] Close",
+                "exec_qty": float(qty_str),
+                "platform": platform
             })
-            self._fail_streak = 0
-            logger.info("[跟随平仓成功] %s %s 释放数量: %s", symbol, side.upper(), remaining_qty)
-            return True
+            logger.info("[%s平仓成功] %s %s 数量=%s", platform.capitalize(), symbol, direction.upper(), qty_str)
         except Exception as exc:
-            logger.error("精确平仓失败将重试: %s", exc)
-            self._fail_streak += 1
-            if self._fail_streak >= 5:
-                logger.error("故障熔断：平仓连续 %d 次失败，引擎挂起待维护", self._fail_streak)
-                db.set_engine_enabled(False)
-                self._running = False
-            return False
-
-    def _handle_reduce(self, ak, sk, pp, uid, pos, ratio: float) -> bool:
-        """
-        处理减仓（部分平仓）：交易员的 position_size 缩小了 ratio 比例。
-        例如 ratio=0.7 表示交易员减了 70%，我们也应该平掉 70%。
-        """
-        symbol = pos.get("symbol", "")
-        tn = pos.get("order_no", "")
-        side = pos.get("direction", "") or pos.get("hold_side", "")
-
-        # 查出我们为这笔跟单开了多少
-        opened = db.get_copy_orders_by_tracking(uid, tn, action="open")
-        filled_opens = [o for o in opened if o.get("status") == "filled"]
-        if not filled_opens:
-            return True  # 没开过仓，无需减
-
-        # 已经平过的量
-        closed = db.get_copy_orders_by_tracking(uid, tn, action="close")
-        filled_closes = [o for o in closed if o.get("status") == "filled"]
-        total_opened = sum(o.get("exec_qty", 0.0) for o in filled_opens)
-        total_closed = sum(o.get("exec_qty", 0.0) for o in filled_closes)
-        remaining = total_opened - total_closed
-
-        if remaining <= 0:
-            return True  # 已经全平了
-
-        # 按比例计算要平的量
-        reduce_qty = remaining * ratio
-        # 截断到4位小数
-        reduce_qty = int(reduce_qty * 10000) / 10000.0
-        if reduce_qty <= 0:
-            return True  # 太小了，忽略
-
-        try:
-            order_executor.close_partial_position(
-                ak, sk, pp, symbol, side, str(reduce_qty),
-                pos_mode=self._pos_mode,
-                margin_mode=pos.get("margin_mode", "cross")
-            )
-            try: curr_p = get_ticker_price(symbol)
-            except Exception: curr_p = 0.0
-
             db.insert_copy_order({
-                "timestamp": _now_ms(), "trader_uid": uid, "tracking_no": tn,
-                "my_order_id": "", "symbol": symbol, "direction": side,
-                "leverage": 0, "margin_usdt": 0, "source_price": 0,
-                "exec_price": curr_p, "deviation_pct": 0, "action": "close",
-                "status": "filled", "pnl": None,
-                "notes": f"[减仓 {ratio*100:.0f}%]", "exec_qty": reduce_qty,
+                "timestamp": _now_ms(), "trader_uid": pid, "tracking_no": f"FAIL_{order_id}",
+                "my_order_id": "", "symbol": symbol, "direction": direction,
+                "leverage": 0, "margin_usdt": 0, "source_price": price, "exec_price": price,
+                "deviation_pct": 0, "action": "close",
+                "status": "failed", "pnl": 0.0, "notes": str(exc),
+                "exec_qty": 0.0,
+                "platform": platform
             })
-            self._fail_streak = 0
-            logger.info("[跟随减仓成功] %s %s 减仓比例=%.0f%% 平仓数量=%s", symbol, side.upper(), ratio * 100, reduce_qty)
-            return True
-        except Exception as exc:
-            logger.error("跟随减仓失败: %s", exc)
-            return False
+            logger.error("[%s平仓失败] %s: %s", platform.capitalize(), symbol, exc)
+
 
 
 def start_engine() -> None:
     global _engine
-    if _engine is None: _engine = CopyEngine()
+    if _engine is None:
+        _engine = CopyEngine()
     _engine.start()
 
 def stop_engine() -> None:
     global _engine
-    if _engine is not None: _engine.stop()
+    if _engine is not None:
+        _engine.stop()
 
 def is_engine_running() -> bool:
     return bool(_engine and _engine.is_running())
