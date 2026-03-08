@@ -22,6 +22,13 @@ _db_write_lock = threading.RLock()
 _deleted_traders: set[str] = set()
 _deleted_lock = threading.Lock()
 
+
+def _clean_symbol_value(symbol: Any) -> str:
+    s = str(symbol or "").upper()
+    for suffix in ("_UMCBL", "_UM", "_DMCBL", "_DM"):
+        s = s.replace(suffix, "")
+    return s
+
 def mark_deleted(uid: str):
     """标记交易员为已删除。"""
     with _deleted_lock:
@@ -164,6 +171,18 @@ CREATE TABLE IF NOT EXISTS copy_settings (
     price_tolerance REAL DEFAULT 0.0002,
     sl_pct          REAL DEFAULT 0.15,
     tp_pct          REAL DEFAULT 0.30,
+    daily_loss_limit_pct REAL DEFAULT 0.03,
+    total_drawdown_limit_pct REAL DEFAULT 0.10,
+    take_profit_enabled INTEGER DEFAULT 1,
+    stop_loss_pct   REAL DEFAULT 0.06,
+    tp1_roi_pct     REAL DEFAULT 0.08,
+    tp1_close_pct   REAL DEFAULT 0.30,
+    tp2_roi_pct     REAL DEFAULT 0.15,
+    tp2_close_pct   REAL DEFAULT 0.30,
+    tp3_roi_pct     REAL DEFAULT 0.25,
+    tp3_close_pct   REAL DEFAULT 0.40,
+    breakeven_buffer_pct REAL DEFAULT 0.005,
+    trail_callback_pct REAL DEFAULT 0.06,
     binance_total_capital REAL DEFAULT 0,
     binance_follow_ratio_pct REAL DEFAULT 0.003,
     binance_max_margin_pct REAL DEFAULT 0.20,
@@ -174,11 +193,40 @@ CREATE TABLE IF NOT EXISTS copy_settings (
 );
 
 CREATE TABLE IF NOT EXISTS account_daily_equity (
-    day             TEXT PRIMARY KEY, -- YYYY-MM-DD（本地时区）
+    day             TEXT PRIMARY KEY, -- YYYY-MM-DD??????
     start_equity    REAL NOT NULL,
     start_ts        INTEGER NOT NULL,
     last_equity     REAL NOT NULL,
     updated_at      INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS platform_daily_equity (
+    platform        TEXT NOT NULL,
+    day             TEXT NOT NULL,
+    start_equity    REAL NOT NULL,
+    start_ts        INTEGER NOT NULL,
+    last_equity     REAL NOT NULL,
+    updated_at      INTEGER NOT NULL,
+    PRIMARY KEY (platform, day)
+);
+
+CREATE TABLE IF NOT EXISTS copy_position_states (
+    platform        TEXT NOT NULL,
+    trader_uid      TEXT NOT NULL,
+    symbol          TEXT NOT NULL,
+    direction       TEXT NOT NULL,
+    stage           INTEGER DEFAULT 0,
+    peak_roi        REAL DEFAULT 0,
+    locked_roi_pct  REAL DEFAULT 0,
+    breakeven_armed INTEGER DEFAULT 0,
+    trail_active    INTEGER DEFAULT 0,
+    closed_by_system INTEGER DEFAULT 0,
+    freeze_reentry  INTEGER DEFAULT 0,
+    last_source_order_id TEXT DEFAULT '',
+    last_system_action TEXT DEFAULT '',
+    created_at      INTEGER NOT NULL,
+    updated_at      INTEGER NOT NULL,
+    PRIMARY KEY (platform, trader_uid, symbol, direction)
 );
 
 CREATE TABLE IF NOT EXISTS copy_orders (
@@ -541,11 +589,23 @@ def replace_all_snapshots(trader_uid: str, snaps: list[dict]):
 
 def _ensure_copy_settings(conn) -> None:
     conn.execute("INSERT OR IGNORE INTO copy_settings (id) VALUES (1)")
-    # 迁移：为旧数据库添加新字段（幂等）
+    # ?????????????????
     for col, dtype, default in [
         ("follow_ratio_pct", "REAL", "0.003"),
         ("sl_pct", "REAL", "0.15"),
         ("tp_pct", "REAL", "0.30"),
+        ("daily_loss_limit_pct", "REAL", str(config.DEFAULT_DAILY_LOSS_LIMIT_PCT)),
+        ("total_drawdown_limit_pct", "REAL", str(config.DEFAULT_TOTAL_DRAWDOWN_LIMIT_PCT)),
+        ("take_profit_enabled", "INTEGER", "1" if config.DEFAULT_TAKE_PROFIT_ENABLED else "0"),
+        ("stop_loss_pct", "REAL", str(config.DEFAULT_STOP_LOSS_PCT)),
+        ("tp1_roi_pct", "REAL", str(config.DEFAULT_TP1_ROI_PCT)),
+        ("tp1_close_pct", "REAL", str(config.DEFAULT_TP1_CLOSE_PCT)),
+        ("tp2_roi_pct", "REAL", str(config.DEFAULT_TP2_ROI_PCT)),
+        ("tp2_close_pct", "REAL", str(config.DEFAULT_TP2_CLOSE_PCT)),
+        ("tp3_roi_pct", "REAL", str(config.DEFAULT_TP3_ROI_PCT)),
+        ("tp3_close_pct", "REAL", str(config.DEFAULT_TP3_CLOSE_PCT)),
+        ("breakeven_buffer_pct", "REAL", str(config.DEFAULT_BREAKEVEN_BUFFER_PCT)),
+        ("trail_callback_pct", "REAL", str(config.DEFAULT_TRAIL_CALLBACK_PCT)),
         ("binance_traders", "TEXT", "'[]'"),
         ("binance_api_key", "TEXT", "''"),
         ("binance_api_secret", "TEXT", "''"),
@@ -560,20 +620,34 @@ def _ensure_copy_settings(conn) -> None:
             pass
 
 
-
 def get_copy_settings() -> dict:
     with get_conn() as conn:
         _ensure_copy_settings(conn)
         row = conn.execute("SELECT * FROM copy_settings WHERE id = 1").fetchone()
         conn.commit()
-    return dict(row) if row else {}
+
+    data = dict(row) if row else {}
+    if not data:
+        return {}
+
+    # ??????? .env ??????????? SQLite ???????
+    data["api_key"] = data.get("api_key") or config.BITGET_API_KEY
+    data["api_secret"] = data.get("api_secret") or config.BITGET_SECRET_KEY
+    data["api_passphrase"] = data.get("api_passphrase") or config.BITGET_PASSPHRASE
+    data["binance_api_key"] = data.get("binance_api_key") or config.BINANCE_API_KEY
+    data["binance_api_secret"] = data.get("binance_api_secret") or config.BINANCE_API_SECRET
+    return data
 
 
-# copy_settings 允许更新的列名白名单（防止 SQL 注入）
 _COPY_SETTINGS_COLS = frozenset({
     "api_key", "api_secret", "api_passphrase",
     "total_capital", "follow_ratio_pct", "max_margin_pct", "price_tolerance",
-    "sl_pct", "tp_pct",
+    "sl_pct", "tp_pct", "daily_loss_limit_pct", "total_drawdown_limit_pct",
+    "take_profit_enabled", "stop_loss_pct",
+    "tp1_roi_pct", "tp1_close_pct",
+    "tp2_roi_pct", "tp2_close_pct",
+    "tp3_roi_pct", "tp3_close_pct",
+    "breakeven_buffer_pct", "trail_callback_pct",
     "enabled_traders", "binance_traders", "engine_enabled",
     "binance_api_key", "binance_api_secret",
     "binance_total_capital", "binance_follow_ratio_pct",
@@ -598,11 +672,7 @@ def update_copy_settings(**kwargs: Any) -> None:
 
 
 def set_copy_api_credentials(api_key: str, api_secret: str, api_passphrase: str) -> None:
-    update_copy_settings(
-        api_key=api_key,
-        api_secret=api_secret,
-        api_passphrase=api_passphrase,
-    )
+    raise RuntimeError("set_copy_api_credentials ????????? .env????????? SQLite")
 
 
 def set_copy_params(total_capital: float, max_margin_pct: float, price_tolerance: float) -> None:
@@ -638,9 +708,9 @@ def _migrate_account_daily_equity(conn) -> None:
 
 def upsert_account_daily_equity(day: str, equity: float) -> dict:
     """
-    记录当日权益快照：
-    - 当天首次写入：start_equity = 当前 equity（作为当日基准）
-    - 后续写入：仅更新 last_equity/updated_at
+    ?????????
+    - ???????start_equity = ?? equity????????
+    - ???????? last_equity/updated_at
     """
     now = int(time.time())
     eq = float(equity)
@@ -682,7 +752,7 @@ def upsert_account_daily_equity(day: str, equity: float) -> dict:
                     (day, eq, now, eq, now),
                 )
 
-            # 仅保留近 60 天
+            # ???? 60 ?
             cutoff = time.strftime("%Y-%m-%d", time.localtime(now - 60 * 86400))
             conn.execute("DELETE FROM account_daily_equity WHERE day < ?", (cutoff,))
             conn.commit()
@@ -696,7 +766,336 @@ def upsert_account_daily_equity(day: str, equity: float) -> dict:
     }
 
 
-# ── copy_orders CRUD ───────────────────────────────────────────────────────────
+def upsert_platform_daily_equity(platform: str, day: str, equity: float) -> dict:
+    """?????????????????"""
+    now = int(time.time())
+    eq = float(equity)
+    platform_key = str(platform or "unknown").strip().lower() or "unknown"
+
+    with _db_write_lock:
+        with get_conn() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS platform_daily_equity (
+                    platform        TEXT NOT NULL,
+                    day             TEXT NOT NULL,
+                    start_equity    REAL NOT NULL,
+                    start_ts        INTEGER NOT NULL,
+                    last_equity     REAL NOT NULL,
+                    updated_at      INTEGER NOT NULL,
+                    PRIMARY KEY (platform, day)
+                )
+                """
+            )
+            row = conn.execute(
+                "SELECT start_equity, start_ts FROM platform_daily_equity WHERE platform = ? AND day = ?",
+                (platform_key, day),
+            ).fetchone()
+            if row:
+                start_equity = float(row["start_equity"] or 0.0)
+                start_ts = int(row["start_ts"] or now)
+                conn.execute(
+                    "UPDATE platform_daily_equity SET last_equity = ?, updated_at = ? WHERE platform = ? AND day = ?",
+                    (eq, now, platform_key, day),
+                )
+            else:
+                start_equity = eq
+                start_ts = now
+                conn.execute(
+                    """
+                    INSERT INTO platform_daily_equity
+                        (platform, day, start_equity, start_ts, last_equity, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (platform_key, day, eq, now, eq, now),
+                )
+
+            cutoff = time.strftime("%Y-%m-%d", time.localtime(now - 60 * 86400))
+            conn.execute("DELETE FROM platform_daily_equity WHERE day < ?", (cutoff,))
+            conn.commit()
+
+    return {
+        "platform": platform_key,
+        "day": day,
+        "start_equity": start_equity,
+        "start_ts": start_ts,
+        "current_equity": eq,
+        "day_pnl": eq - start_equity,
+    }
+
+
+def get_platform_equity_peak(platform: str, since_days: int = 60) -> float:
+    """??? N ????????????????"""
+    now = int(time.time())
+    cutoff = time.strftime("%Y-%m-%d", time.localtime(now - max(1, int(since_days)) * 86400))
+    platform_key = str(platform or "unknown").strip().lower() or "unknown"
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT start_equity, last_equity FROM platform_daily_equity WHERE platform = ? AND day >= ?",
+            (platform_key, cutoff),
+        ).fetchall()
+    peak = 0.0
+    for row in rows:
+        peak = max(peak, float(row["start_equity"] or 0.0), float(row["last_equity"] or 0.0))
+    return peak
+
+
+def _normalize_position_state_key(platform: str, trader_uid: str, symbol: str, direction: str) -> tuple[str, str, str, str]:
+    return (
+        str(platform or "unknown").strip().lower() or "unknown",
+        str(trader_uid or "").strip(),
+        _clean_symbol_value(symbol),
+        str(direction or "").strip().lower(),
+    )
+
+
+def _migrate_copy_position_states(conn) -> None:
+    for col, dtype, default in [
+        ("stage", "INTEGER", "0"),
+        ("peak_roi", "REAL", "0"),
+        ("locked_roi_pct", "REAL", "0"),
+        ("breakeven_armed", "INTEGER", "0"),
+        ("trail_active", "INTEGER", "0"),
+        ("closed_by_system", "INTEGER", "0"),
+        ("freeze_reentry", "INTEGER", "0"),
+        ("last_source_order_id", "TEXT", "''"),
+        ("last_system_action", "TEXT", "''"),
+        ("created_at", "INTEGER", "0"),
+        ("updated_at", "INTEGER", "0"),
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE copy_position_states ADD COLUMN {col} {dtype} DEFAULT {default}")
+        except Exception:
+            pass
+
+
+def get_copy_position_state(platform: str, trader_uid: str, symbol: str, direction: str) -> dict:
+    platform_key, trader_key, symbol_key, direction_key = _normalize_position_state_key(platform, trader_uid, symbol, direction)
+    with get_conn() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS copy_position_states (
+                platform        TEXT NOT NULL,
+                trader_uid      TEXT NOT NULL,
+                symbol          TEXT NOT NULL,
+                direction       TEXT NOT NULL,
+                stage           INTEGER DEFAULT 0,
+                peak_roi        REAL DEFAULT 0,
+                locked_roi_pct  REAL DEFAULT 0,
+                breakeven_armed INTEGER DEFAULT 0,
+                trail_active    INTEGER DEFAULT 0,
+                closed_by_system INTEGER DEFAULT 0,
+                freeze_reentry  INTEGER DEFAULT 0,
+                last_source_order_id TEXT DEFAULT '',
+                last_system_action TEXT DEFAULT '',
+                created_at      INTEGER NOT NULL,
+                updated_at      INTEGER NOT NULL,
+                PRIMARY KEY (platform, trader_uid, symbol, direction)
+            )
+            """
+        )
+        _migrate_copy_position_states(conn)
+        row = conn.execute(
+            """
+            SELECT * FROM copy_position_states
+            WHERE platform = ? AND trader_uid = ? AND symbol = ? AND direction = ?
+            """,
+            (platform_key, trader_key, symbol_key, direction_key),
+        ).fetchone()
+    return dict(row) if row else {}
+
+
+def upsert_copy_position_state(platform: str, trader_uid: str, symbol: str, direction: str, **fields: Any) -> dict:
+    platform_key, trader_key, symbol_key, direction_key = _normalize_position_state_key(platform, trader_uid, symbol, direction)
+    now = int(time.time())
+
+    with _db_write_lock:
+        with get_conn() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS copy_position_states (
+                    platform        TEXT NOT NULL,
+                    trader_uid      TEXT NOT NULL,
+                    symbol          TEXT NOT NULL,
+                    direction       TEXT NOT NULL,
+                    stage           INTEGER DEFAULT 0,
+                    peak_roi        REAL DEFAULT 0,
+                    locked_roi_pct  REAL DEFAULT 0,
+                    breakeven_armed INTEGER DEFAULT 0,
+                    trail_active    INTEGER DEFAULT 0,
+                    closed_by_system INTEGER DEFAULT 0,
+                    freeze_reentry  INTEGER DEFAULT 0,
+                    last_source_order_id TEXT DEFAULT '',
+                    last_system_action TEXT DEFAULT '',
+                    created_at      INTEGER NOT NULL,
+                    updated_at      INTEGER NOT NULL,
+                    PRIMARY KEY (platform, trader_uid, symbol, direction)
+                )
+                """
+            )
+            _migrate_copy_position_states(conn)
+            current = conn.execute(
+                """
+                SELECT * FROM copy_position_states
+                WHERE platform = ? AND trader_uid = ? AND symbol = ? AND direction = ?
+                """,
+                (platform_key, trader_key, symbol_key, direction_key),
+            ).fetchone()
+            payload = dict(current) if current else {
+                "platform": platform_key,
+                "trader_uid": trader_key,
+                "symbol": symbol_key,
+                "direction": direction_key,
+                "stage": 0,
+                "peak_roi": 0.0,
+                "locked_roi_pct": 0.0,
+                "breakeven_armed": 0,
+                "trail_active": 0,
+                "closed_by_system": 0,
+                "freeze_reentry": 0,
+                "last_source_order_id": "",
+                "last_system_action": "",
+                "created_at": now,
+                "updated_at": now,
+            }
+            payload.update(fields)
+            payload["platform"] = platform_key
+            payload["trader_uid"] = trader_key
+            payload["symbol"] = symbol_key
+            payload["direction"] = direction_key
+            payload["created_at"] = int(payload.get("created_at") or now)
+            payload["updated_at"] = now
+            conn.execute(
+                """
+                INSERT INTO copy_position_states (
+                    platform, trader_uid, symbol, direction, stage, peak_roi,
+                    locked_roi_pct, breakeven_armed, trail_active, closed_by_system,
+                    freeze_reentry, last_source_order_id, last_system_action, created_at, updated_at
+                ) VALUES (
+                    :platform, :trader_uid, :symbol, :direction, :stage, :peak_roi,
+                    :locked_roi_pct, :breakeven_armed, :trail_active, :closed_by_system,
+                    :freeze_reentry, :last_source_order_id, :last_system_action, :created_at, :updated_at
+                )
+                ON CONFLICT(platform, trader_uid, symbol, direction) DO UPDATE SET
+                    stage = excluded.stage,
+                    peak_roi = excluded.peak_roi,
+                    locked_roi_pct = excluded.locked_roi_pct,
+                    breakeven_armed = excluded.breakeven_armed,
+                    trail_active = excluded.trail_active,
+                    closed_by_system = excluded.closed_by_system,
+                    freeze_reentry = excluded.freeze_reentry,
+                    last_source_order_id = excluded.last_source_order_id,
+                    last_system_action = excluded.last_system_action,
+                    updated_at = excluded.updated_at
+                """,
+                payload,
+            )
+            conn.commit()
+    return get_copy_position_state(platform_key, trader_key, symbol_key, direction_key)
+
+
+def clear_copy_position_state(platform: str, trader_uid: str, symbol: str, direction: str) -> None:
+    platform_key, trader_key, symbol_key, direction_key = _normalize_position_state_key(platform, trader_uid, symbol, direction)
+    with _db_write_lock:
+        with get_conn() as conn:
+            conn.execute(
+                """
+                DELETE FROM copy_position_states
+                WHERE platform = ? AND trader_uid = ? AND symbol = ? AND direction = ?
+                """,
+                (platform_key, trader_key, symbol_key, direction_key),
+            )
+            conn.commit()
+
+
+def get_active_copy_position_summaries(platform: str | None = None) -> list[dict]:
+    with get_conn() as conn:
+        _migrate_copy_orders(conn)
+        rows = conn.execute(
+            """
+            SELECT timestamp, trader_uid, tracking_no, symbol, direction,
+                   leverage, margin_usdt, source_price, exec_price,
+                   action, status, notes, exec_qty, platform
+            FROM copy_orders
+            WHERE status = 'filled'
+            ORDER BY timestamp ASC, id ASC
+            """
+        ).fetchall()
+
+    active: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    for row in rows:
+        item = dict(row)
+        platform_key, trader_key, symbol_key, direction_key = _normalize_position_state_key(
+            item.get("platform") or "bitget",
+            item.get("trader_uid") or "",
+            item.get("symbol") or "",
+            item.get("direction") or "",
+        )
+        if platform and platform_key != str(platform).strip().lower():
+            continue
+        if not trader_key or not symbol_key or direction_key not in ("long", "short"):
+            continue
+        key = (platform_key, trader_key, symbol_key, direction_key)
+        pos = active.setdefault(key, {
+            "platform": platform_key,
+            "trader_uid": trader_key,
+            "symbol": symbol_key,
+            "direction": direction_key,
+            "remaining_qty": 0.0,
+            "remaining_margin": 0.0,
+            "avg_entry_price": 0.0,
+            "cycle_open_qty": 0.0,
+            "cycle_open_margin": 0.0,
+            "last_open_tracking_no": "",
+            "last_open_ts": 0,
+            "last_action_ts": 0,
+            "leverage": 0,
+        })
+        pos["last_action_ts"] = max(int(item.get("timestamp") or 0), pos["last_action_ts"])
+
+        action = str(item.get("action") or "").lower()
+        qty = abs(float(item.get("exec_qty") or 0.0))
+        if qty <= 0:
+            continue
+
+        if action == "open":
+            if pos["remaining_qty"] <= 1e-12:
+                pos["remaining_qty"] = 0.0
+                pos["remaining_margin"] = 0.0
+                pos["avg_entry_price"] = 0.0
+                pos["cycle_open_qty"] = 0.0
+                pos["cycle_open_margin"] = 0.0
+            price = float(item.get("exec_price") or item.get("source_price") or 0.0)
+            before_qty = pos["remaining_qty"]
+            if price > 0:
+                if before_qty > 0:
+                    pos["avg_entry_price"] = ((pos["avg_entry_price"] * before_qty) + (price * qty)) / (before_qty + qty)
+                else:
+                    pos["avg_entry_price"] = price
+            pos["remaining_qty"] = before_qty + qty
+            pos["remaining_margin"] += float(item.get("margin_usdt") or 0.0)
+            pos["cycle_open_qty"] += qty
+            pos["cycle_open_margin"] += float(item.get("margin_usdt") or 0.0)
+            pos["last_open_tracking_no"] = str(item.get("tracking_no") or "")
+            pos["last_open_ts"] = int(item.get("timestamp") or 0)
+            pos["leverage"] = int(item.get("leverage") or pos["leverage"] or 0)
+        elif action == "close" and pos["remaining_qty"] > 0:
+            close_qty = min(qty, pos["remaining_qty"])
+            before_qty = pos["remaining_qty"]
+            pos["remaining_qty"] = max(0.0, before_qty - close_qty)
+            if before_qty > 0:
+                pos["remaining_margin"] = max(0.0, pos["remaining_margin"] * (1.0 - (close_qty / before_qty)))
+            if pos["remaining_qty"] <= 1e-12:
+                pos["remaining_qty"] = 0.0
+                pos["remaining_margin"] = 0.0
+                pos["avg_entry_price"] = 0.0
+                pos["cycle_open_qty"] = 0.0
+                pos["cycle_open_margin"] = 0.0
+                pos["last_open_tracking_no"] = ""
+                pos["last_open_ts"] = 0
+
+    return [pos for pos in active.values() if pos.get("remaining_qty", 0.0) > 1e-12]
+
 
 def _migrate_copy_orders(conn) -> None:
     try:

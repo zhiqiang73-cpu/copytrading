@@ -32,6 +32,7 @@
 
     <!-- 配置表单 -->
     <form method="POST" class="space-y-5">
+        <input type="hidden" name="_app_token" value="{{ app_ui_token }}">
         <div>
             <label class="block text-sm font-medium text-gray-300 mb-1.5">API Key</label>
             <input type="text" name="api_key" value="{{ current.api_key }}"

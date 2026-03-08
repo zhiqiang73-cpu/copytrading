@@ -266,6 +266,83 @@
                 </div>
             </div>
 
+            <div class="border-t border-dark-border/40 pt-4 mt-2">
+                <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-4">
+                    <div>
+                        <div class="flex items-center space-x-2 mb-1">
+                            <span class="text-xs font-bold text-emerald-400 uppercase tracking-widest">????</span>
+                            <span class="text-xs text-gray-600">??????????? TP1 / TP2 ?????</span>
+                        </div>
+                        <p class="text-xs text-gray-500">TP1 ?? 30%?TP2 ?? 30%?TP3 ????? TP2 ??????????</p>
+                    </div>
+                    <label class="inline-flex items-center gap-3 rounded-xl border border-emerald-500/20 bg-emerald-500/5 px-4 py-2 text-sm text-white">
+                        <input id="take_profit_enabled" type="checkbox" onchange="setTakeProfitEnabledState()" class="h-4 w-4 rounded border-emerald-400/50 bg-dark-bg text-emerald-500 focus:ring-emerald-500">
+                        <span>????????</span>
+                    </label>
+                </div>
+                <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+                    <div>
+                        <label class="block text-sm text-gray-300 mb-1.5">??? ROI?%?</label>
+                        <input id="stop_loss_pct" data-tp-field="1" type="number" min="0" step="0.1"
+                            class="w-full bg-dark-bg border border-emerald-500/20 rounded-lg px-4 py-2.5 text-white focus:outline-none focus:border-emerald-400 text-sm"
+                            placeholder="6">
+                    </div>
+                    <div>
+                        <label class="block text-sm text-gray-300 mb-1.5">TP1 ?? ROI?%?</label>
+                        <input id="tp1_roi_pct" data-tp-field="1" type="number" min="0" step="0.1"
+                            class="w-full bg-dark-bg border border-emerald-500/20 rounded-lg px-4 py-2.5 text-white focus:outline-none focus:border-emerald-400 text-sm"
+                            placeholder="8">
+                    </div>
+                    <div>
+                        <label class="block text-sm text-gray-300 mb-1.5">TP1 ?????%?</label>
+                        <input id="tp1_close_pct" data-tp-field="1" type="number" min="0" max="100" step="0.1"
+                            class="w-full bg-dark-bg border border-emerald-500/20 rounded-lg px-4 py-2.5 text-white focus:outline-none focus:border-emerald-400 text-sm"
+                            placeholder="30">
+                    </div>
+                    <div>
+                        <label class="block text-sm text-gray-300 mb-1.5">?????%?</label>
+                        <input id="breakeven_buffer_pct" data-tp-field="1" type="number" min="0" step="0.1"
+                            class="w-full bg-dark-bg border border-emerald-500/20 rounded-lg px-4 py-2.5 text-white focus:outline-none focus:border-emerald-400 text-sm"
+                            placeholder="0.5">
+                    </div>
+                    <div>
+                        <label class="block text-sm text-gray-300 mb-1.5">TP2 ?? ROI?%?</label>
+                        <input id="tp2_roi_pct" data-tp-field="1" type="number" min="0" step="0.1"
+                            class="w-full bg-dark-bg border border-emerald-500/20 rounded-lg px-4 py-2.5 text-white focus:outline-none focus:border-emerald-400 text-sm"
+                            placeholder="15">
+                    </div>
+                    <div>
+                        <label class="block text-sm text-gray-300 mb-1.5">TP2 ?????%?</label>
+                        <input id="tp2_close_pct" data-tp-field="1" type="number" min="0" max="100" step="0.1"
+                            class="w-full bg-dark-bg border border-emerald-500/20 rounded-lg px-4 py-2.5 text-white focus:outline-none focus:border-emerald-400 text-sm"
+                            placeholder="30">
+                    </div>
+                    <div>
+                        <label class="block text-sm text-gray-300 mb-1.5">TP3 ?? ROI?%?</label>
+                        <input id="tp3_roi_pct" data-tp-field="1" type="number" min="0" step="0.1"
+                            class="w-full bg-dark-bg border border-emerald-500/20 rounded-lg px-4 py-2.5 text-white focus:outline-none focus:border-emerald-400 text-sm"
+                            placeholder="25">
+                    </div>
+                    <div>
+                        <label class="block text-sm text-gray-300 mb-1.5">?????%?</label>
+                        <input id="trail_callback_pct" data-tp-field="1" type="number" min="0" step="0.1"
+                            class="w-full bg-dark-bg border border-emerald-500/20 rounded-lg px-4 py-2.5 text-white focus:outline-none focus:border-emerald-400 text-sm"
+                            placeholder="6">
+                    </div>
+                </div>
+                <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mt-4">
+                    <div>
+                        <label class="block text-sm text-gray-300 mb-1.5">TP3 ?????%?</label>
+                        <input id="tp3_close_pct" data-tp-field="1" type="number" min="0" max="100" step="0.1"
+                            class="w-full bg-dark-bg border border-emerald-500/20 rounded-lg px-4 py-2.5 text-white focus:outline-none focus:border-emerald-400 text-sm"
+                            placeholder="40">
+                    </div>
+                </div>
+                <div class="mt-3 rounded-lg border border-emerald-500/10 bg-emerald-500/5 px-4 py-3 text-xs text-gray-400">
+                    ???????????????????????????????????????????????????????????????????
+                </div>
+            </div>
+
             <div class="flex justify-end pt-2">
                 <button onclick="saveSettings()"
                     class="bg-yellow-600 hover:bg-yellow-700 text-white px-6 py-2.5 rounded-lg text-sm font-bold transition-all shadow-lg shadow-yellow-600/20 flex items-center space-x-2">
@@ -603,6 +680,7 @@
     });
 
     const state = { settings: null, traders: [] };
+    const MASKED_SECRET = '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022';
 
     function setMsg(text, type) {
         const box = document.getElementById('page-msg');
@@ -671,6 +749,35 @@
         if (!raw) return Number(fallback || 0);
         const n = parseFloat(raw);
         return Number.isFinite(n) ? n : Number(fallback || 0);
+    }
+
+    function buildTakeProfitPayload() {
+        const current = state.settings || {};
+        const pctFallback = (value, defaultValue) => {
+            const n = Number(value);
+            return Number.isFinite(n) ? n * 100 : defaultValue * 100;
+        };
+
+        return {
+            take_profit_enabled: !!document.getElementById('take_profit_enabled')?.checked,
+            stop_loss_pct: parseNumberOrFallback('stop_loss_pct', pctFallback(current.stop_loss_pct, 0.06)) / 100,
+            tp1_roi_pct: parseNumberOrFallback('tp1_roi_pct', pctFallback(current.tp1_roi_pct, 0.08)) / 100,
+            tp1_close_pct: parseNumberOrFallback('tp1_close_pct', pctFallback(current.tp1_close_pct, 0.30)) / 100,
+            tp2_roi_pct: parseNumberOrFallback('tp2_roi_pct', pctFallback(current.tp2_roi_pct, 0.15)) / 100,
+            tp2_close_pct: parseNumberOrFallback('tp2_close_pct', pctFallback(current.tp2_close_pct, 0.30)) / 100,
+            tp3_roi_pct: parseNumberOrFallback('tp3_roi_pct', pctFallback(current.tp3_roi_pct, 0.25)) / 100,
+            tp3_close_pct: parseNumberOrFallback('tp3_close_pct', pctFallback(current.tp3_close_pct, 0.40)) / 100,
+            breakeven_buffer_pct: parseNumberOrFallback('breakeven_buffer_pct', pctFallback(current.breakeven_buffer_pct, 0.005)) / 100,
+            trail_callback_pct: parseNumberOrFallback('trail_callback_pct', pctFallback(current.trail_callback_pct, 0.06)) / 100,
+        };
+    }
+
+    function setTakeProfitEnabledState() {
+        const enabled = !!document.getElementById('take_profit_enabled')?.checked;
+        document.querySelectorAll('[data-tp-field="1"]').forEach((el) => {
+            el.disabled = !enabled;
+            el.classList.toggle('opacity-50', !enabled);
+        });
     }
 
     function fmtMoney(n, digits = 2) {
@@ -847,11 +954,10 @@
         state.traders = data.traders || [];
 
         document.getElementById('api_key').value = data.api_key || '';
-        document.getElementById('api_secret').value = data.api_secret ? '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022' : '';
-        document.getElementById('api_passphrase').value = data.api_passphrase ? '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022' : '';
-        // 币安 API
+        document.getElementById('api_secret').value = data.api_secret ? MASKED_SECRET : '';
+        document.getElementById('api_passphrase').value = data.api_passphrase ? MASKED_SECRET : '';
         document.getElementById('binance_api_key').value = data.binance_api_key || '';
-        document.getElementById('binance_api_secret').value = data.binance_api_secret ? '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022' : '';
+        document.getElementById('binance_api_secret').value = data.binance_api_secret ? MASKED_SECRET : '';
         document.getElementById('total_capital').value = data.total_capital || '';
         document.getElementById('follow_ratio_pct').value = ((data.follow_ratio_pct || 0.003) * 100).toFixed(2);
         const pctVal = Math.round((data.max_margin_pct || 0.2) * 100);
@@ -859,7 +965,6 @@
         document.getElementById('max_margin_pct_label').textContent = pctVal + '%';
         document.getElementById('price_tolerance').value = ((data.price_tolerance || 0.0002) * 100).toFixed(4);
 
-        // 加载币安专用风控参数
         document.getElementById('binance_total_capital').value = data.binance_total_capital || '';
         document.getElementById('binance_follow_ratio_pct').value = ((data.binance_follow_ratio_pct || 0.003) * 100).toFixed(2);
         const bnPctVal = Math.round((data.binance_max_margin_pct || 0.2) * 100);
@@ -867,17 +972,27 @@
         document.getElementById('binance_max_margin_pct_label').textContent = bnPctVal + '%';
         document.getElementById('binance_price_tolerance').value = ((data.binance_price_tolerance || 0.0002) * 100).toFixed(4);
 
-        // 加载币安交易员列表（新格式：字典）
+        document.getElementById('take_profit_enabled').checked = !!data.take_profit_enabled;
+        document.getElementById('stop_loss_pct').value = ((data.stop_loss_pct || 0.06) * 100).toFixed(2);
+        document.getElementById('tp1_roi_pct').value = ((data.tp1_roi_pct || 0.08) * 100).toFixed(2);
+        document.getElementById('tp1_close_pct').value = ((data.tp1_close_pct || 0.30) * 100).toFixed(2);
+        document.getElementById('tp2_roi_pct').value = ((data.tp2_roi_pct || 0.15) * 100).toFixed(2);
+        document.getElementById('tp2_close_pct').value = ((data.tp2_close_pct || 0.30) * 100).toFixed(2);
+        document.getElementById('tp3_roi_pct').value = ((data.tp3_roi_pct || 0.25) * 100).toFixed(2);
+        document.getElementById('tp3_close_pct').value = ((data.tp3_close_pct || 0.40) * 100).toFixed(2);
+        document.getElementById('breakeven_buffer_pct').value = ((data.breakeven_buffer_pct || 0.005) * 100).toFixed(2);
+        document.getElementById('trail_callback_pct').value = ((data.trail_callback_pct || 0.06) * 100).toFixed(2);
+        setTakeProfitEnabledState();
+
         let rawBn = data.binance_traders || {};
         if (typeof rawBn === 'string') {
             try { rawBn = JSON.parse(rawBn); } catch (e) { rawBn = {}; }
         }
 
-        // 转换为数组格式
         if (typeof rawBn === 'object' && !Array.isArray(rawBn)) {
             bnTraders = Object.entries(rawBn).map(([pid, info]) => ({
                 pid,
-                name: info.nickname || `币安_${pid.substring(0, 8)}`,
+                name: info.nickname || `???_${pid.substring(0, 8)}`,
                 copy_enabled: info.copy_enabled === true,
                 copier_pnl: info.copier_pnl || 0,
                 aum: info.aum || 0,
@@ -886,135 +1001,12 @@
                 avatar: info.avatar || ''
             }));
         } else if (Array.isArray(rawBn)) {
-            // 旧格式兼容
             bnTraders = rawBn.map(pid => ({ pid, name: pid, copy_enabled: true, copier_pnl: 0, aum: 0, followers: 0, total_trades: 0, avatar: '' }));
         }
         renderBnList();
-
-        // 关键：重新渲染（刷新DOM）
         renderTraders();
         computeAllocation();
         updateEngineBadge(data.engine_enabled);
-    }
-
-    // ── 币安交易员管理（只显示已启用跟单的） ──
-    let bnTraders = []; // [{pid, name, copy_enabled, ...}]
-
-    function renderBnList() {
-        const list = document.getElementById('bn-list');
-        const empty = document.getElementById('bn-empty');
-        const countEl = document.getElementById('binance-copy-count');
-        list.innerHTML = '';
-
-        // 只显示已启用跟单的
-        const enabledBn = bnTraders.filter(t => t.copy_enabled === true);
-
-        // 更新计数
-        if (countEl) countEl.textContent = enabledBn.length > 0 ? `(${enabledBn.length}人)` : '';
-
-        if (!enabledBn.length) { empty.classList.remove('hidden'); return; }
-        empty.classList.add('hidden');
-
-        enabledBn.forEach((t) => {
-            const card = document.createElement('div');
-            card.className = 'flex items-start space-x-3 bg-dark-bg border border-yellow-400/30 rounded-xl p-4 transition-all hover:border-yellow-400/50';
-
-            // 格式化数字
-            function formatNum(n) {
-                if (n >= 1000000) return (n / 1000000).toFixed(2) + 'M';
-                if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
-                return n.toFixed(0);
-            }
-            const pnlStr = t.copier_pnl > 0 ? `+$${formatNum(t.copier_pnl)}` : t.copier_pnl < 0 ? `-$${formatNum(Math.abs(t.copier_pnl))}` : '$0';
-            const pnlColor = t.copier_pnl > 0 ? 'text-green-400' : t.copier_pnl < 0 ? 'text-red-400' : 'text-gray-400';
-
-            card.innerHTML = `
-            <div class="w-8 h-8 rounded-full bg-yellow-500/20 flex items-center justify-center flex-shrink-0">
-                <span class="text-yellow-400 text-sm">✓</span>
-            </div>
-            <div class="flex-1 min-w-0">
-                <div class="text-white font-medium text-sm">${t.name || '未命名'}</div>
-                <div class="text-xs text-gray-500 font-mono mt-0.5">${t.pid.substring(0, 16)}…</div>
-                <div class="flex gap-4 mt-2 text-xs">
-                    <span class="text-gray-500">收益: <span class="${pnlColor} font-medium">${pnlStr}</span></span>
-                    <span class="text-gray-500">跟单: <span class="text-yellow-400 font-medium">${t.followers || '—'}</span></span>
-                </div>
-            </div>
-            <button class="bn-stop shrink-0 text-gray-500 hover:text-red-400 transition-colors text-xs px-2 py-1 rounded border border-gray-700 hover:border-red-500/50"
-                    data-pid="${t.pid}" data-name="${(t.name || '').replace(/"/g, '&quot;')}"
-                    title="停止跟单">停止跟单</button>`;
-            list.appendChild(card);
-        });
-
-        // 绑定"停止跟单"按钮
-        document.querySelectorAll('.bn-stop').forEach(btn => {
-            btn.addEventListener('click', async e => {
-                e.preventDefault();
-                e.stopPropagation();
-                const pid = btn.dataset.pid;
-                const name = btn.dataset.name;
-                if (!confirm(`确定停止跟单 ${name}？`)) return;
-
-                btn.disabled = true;
-                btn.textContent = '...';
-
-                const res = await apiPost('/api/toggle_copy', { uid: pid, source: 'binance', enabled: false });
-                if (res.ok) {
-                    setMsg(`已停止跟单 ${name}`, 'success');
-                    await loadSettings();
-                } else {
-                    setMsg(res.error || '操作失败', 'error');
-                    btn.disabled = false;
-                    btn.textContent = '停止跟单';
-                }
-            });
-        });
-    }
-
-    async function addBinanceTrader() {
-        const urlOrPid = document.getElementById('bn-pid').value.trim();
-        if (!urlOrPid) { setMsg('请输入 URL 或 Portfolio ID', 'error'); return; }
-
-        setMsg('正在添加…', 'info');
-
-        try {
-            const res = await apiPost('/api/add_binance_trader', { url: urlOrPid });
-            if (res.error) {
-                setMsg('❌ ' + res.error, 'error');
-                return;
-            }
-
-            const info = res.info || {};
-            const pid = res.portfolio_id;
-
-            // 如果已存在则跳过
-            if (!bnTraders.find(t => t.pid === pid)) {
-                bnTraders.push({
-                    pid,
-                    name: info.nickname || pid,
-                    copy_enabled: true,
-                    copier_pnl: info.copier_pnl || 0,
-                    aum: info.aum || 0,
-                    followers: info.follower_count || 0,
-                    total_trades: info.total_trades || 0,
-                    avatar: info.avatar || ''
-                });
-            }
-
-            document.getElementById('bn-pid').value = '';
-            document.getElementById('bn-name').value = '';
-            renderBnList();
-            await saveSettings();
-
-            // 显示成功消息
-            if (info._warning) {
-                setMsg(`✓ 已添加 ${info.nickname || pid}（需要等待第一次操作记录同步）`, 'success');
-            } else {
-                setMsg(`✓ 已添加 ${info.nickname || pid}`, 'success');
-            }
-        } catch (e) {
-            setMsg('❌ 添加失败：' + (e.message || e), 'error');
-        }
     }
 
     async function saveSettings() {
@@ -1028,7 +1020,6 @@
         const fallbackFollowRatio = ((state.settings && state.settings.follow_ratio_pct) || 0.003) * 100;
         const fallbackMarginPct = ((state.settings && state.settings.max_margin_pct) || 0.2) * 100;
         const fallbackTolerance = ((state.settings && state.settings.price_tolerance) || 0.0002) * 100;
-
         const fallbackBnTotal = (state.settings && state.settings.binance_total_capital) || 0;
         const fallbackBnFollowRatio = ((state.settings && state.settings.binance_follow_ratio_pct) || 0.003) * 100;
         const fallbackBnMarginPct = ((state.settings && state.settings.binance_max_margin_pct) || 0.2) * 100;
@@ -1036,10 +1027,10 @@
 
         const payload = {
             api_key: apiKey,
-            api_secret: apiSecret === '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022' ? '' : apiSecret,
-            api_passphrase: apiPass === '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022' ? '' : apiPass,
+            api_secret: apiSecret === MASKED_SECRET ? '' : apiSecret,
+            api_passphrase: apiPass === MASKED_SECRET ? '' : apiPass,
             binance_api_key: binanceApiKey,
-            binance_api_secret: binanceApiSecret === '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022' ? '' : binanceApiSecret,
+            binance_api_secret: binanceApiSecret === MASKED_SECRET ? '' : binanceApiSecret,
             total_capital: parseNumberOrFallback('total_capital', fallbackTotal),
             follow_ratio_pct: parseNumberOrFallback('follow_ratio_pct', fallbackFollowRatio) / 100,
             max_margin_pct: parseNumberOrFallback('max_margin_pct', fallbackMarginPct) / 100,
@@ -1050,10 +1041,11 @@
             binance_price_tolerance: parseNumberOrFallback('binance_price_tolerance', fallbackBnTolerance) / 100,
             enabled_traders: enabled,
             binance_traders: serializeBinanceTraders(),
+            ...buildTakeProfitPayload(),
         };
         const res = await apiPost('/api/copy/settings', payload);
         if (res.error) { setMsg(res.error, 'error'); return; }
-        setMsg('\u914d\u7f6e\u5df2\u4fdd\u5b58', 'success');
+        setMsg('?????', 'success');
         await loadSettings();
     }
 
@@ -1061,11 +1053,8 @@
         const apiKey = document.getElementById('api_key').value.trim();
         const apiSecret = document.getElementById('api_secret').value.trim();
         const apiPass = document.getElementById('api_passphrase').value.trim();
-        if (!apiKey || (!apiSecret || apiSecret === '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022') || (!apiPass || apiPass === '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022')) {
-            // 如果密码字段是掩码，说明已配置过，允许保存其他字段
-        }
         const status = document.getElementById('api-status');
-        status.textContent = '保存中…';
+        status.textContent = '???...';
         status.className = 'text-xs text-gray-400';
         const fallbackTotal = (state.settings && state.settings.total_capital) || 0;
         const fallbackFollowRatio = ((state.settings && state.settings.follow_ratio_pct) || 0.003) * 100;
@@ -1074,20 +1063,21 @@
 
         const payload = {
             api_key: apiKey,
-            api_secret: apiSecret === '••••••••' ? '' : apiSecret,
-            api_passphrase: apiPass === '••••••••' ? '' : apiPass,
+            api_secret: apiSecret === MASKED_SECRET ? '' : apiSecret,
+            api_passphrase: apiPass === MASKED_SECRET ? '' : apiPass,
             total_capital: parseNumberOrFallback('total_capital', fallbackTotal),
             follow_ratio_pct: parseNumberOrFallback('follow_ratio_pct', fallbackFollowRatio) / 100,
             max_margin_pct: parseNumberOrFallback('max_margin_pct', fallbackMarginPct) / 100,
             price_tolerance: parseNumberOrFallback('price_tolerance', fallbackTolerance) / 100,
+            ...buildTakeProfitPayload(),
         };
         const res = await apiPost('/api/copy/settings', payload);
         if (res.error) {
-            status.textContent = '✗ ' + res.error;
+            status.textContent = '??: ' + res.error;
             status.className = 'text-xs text-red-400';
             return;
         }
-        status.textContent = '✓ Bitget 配置已保存';
+        status.textContent = 'Bitget ?????';
         status.className = 'text-xs text-green-400';
         await loadSettings();
     }
@@ -1096,7 +1086,7 @@
         const binanceApiKey = document.getElementById('binance_api_key').value.trim();
         const binanceApiSecret = document.getElementById('binance_api_secret').value.trim();
         const status = document.getElementById('binance-api-status');
-        status.textContent = '保存中…';
+        status.textContent = '???...';
         status.className = 'text-xs text-gray-400';
         const fallbackBnTotal = (state.settings && state.settings.binance_total_capital) || 0;
         const fallbackBnFollowRatio = ((state.settings && state.settings.binance_follow_ratio_pct) || 0.003) * 100;
@@ -1105,22 +1095,22 @@
 
         const payload = {
             binance_api_key: binanceApiKey,
-            binance_api_secret: binanceApiSecret === '••••••••' ? '' : binanceApiSecret,
+            binance_api_secret: binanceApiSecret === MASKED_SECRET ? '' : binanceApiSecret,
             binance_total_capital: parseNumberOrFallback('binance_total_capital', fallbackBnTotal),
             binance_follow_ratio_pct: parseNumberOrFallback('binance_follow_ratio_pct', fallbackBnFollowRatio) / 100,
             binance_max_margin_pct: parseNumberOrFallback('binance_max_margin_pct', fallbackBnMarginPct) / 100,
             binance_price_tolerance: parseNumberOrFallback('binance_price_tolerance', fallbackBnTolerance) / 100,
+            ...buildTakeProfitPayload(),
         };
         const res = await apiPost('/api/copy/settings', payload);
         if (res.error) {
-            status.textContent = '✗ ' + res.error;
+            status.textContent = '??: ' + res.error;
             status.className = 'text-xs text-red-400';
             return;
         }
-        status.textContent = '✓ 币安配置已保存';
+        status.textContent = 'Binance ?????';
         status.className = 'text-xs text-green-400';
         await loadSettings();
-        // 保存后自动加载币安余额
         loadBinanceBalance();
     }
 
@@ -1129,19 +1119,19 @@
         const apiSecret = document.getElementById('api_secret').value.trim();
         const apiPass = document.getElementById('api_passphrase').value.trim();
         const status = document.getElementById('api-status');
-        status.textContent = '测试中…';
+        status.textContent = '???...';
         status.className = 'text-xs text-gray-400';
         const res = await apiPost('/api/copy/test_api', {
             api_key: apiKey,
-            api_secret: apiSecret === '••••••••' ? '' : apiSecret,
-            api_passphrase: apiPass === '••••••••' ? '' : apiPass,
+            api_secret: apiSecret === MASKED_SECRET ? '' : apiSecret,
+            api_passphrase: apiPass === MASKED_SECRET ? '' : apiPass,
         });
         if (res.error) {
-            status.textContent = '✗ ' + res.error;
+            status.textContent = '??: ' + res.error;
             status.className = 'text-xs text-red-400';
             return;
         }
-        status.textContent = '✓ ' + (res.msg || '连接成功');
+        status.textContent = res.msg || '????';
         status.className = 'text-xs text-green-400';
     }
 
@@ -1149,19 +1139,19 @@
         const binanceApiKey = document.getElementById('binance_api_key').value.trim();
         const binanceApiSecret = document.getElementById('binance_api_secret').value.trim();
         const status = document.getElementById('binance-api-status');
-        status.textContent = '测试中…';
+        status.textContent = '???...';
         status.className = 'text-xs text-yellow-400';
         const res = await apiPost('/api/copy/test_api', {
             source: 'binance',
             binance_api_key: binanceApiKey,
-            binance_api_secret: binanceApiSecret === '••••••••' ? '' : binanceApiSecret,
+            binance_api_secret: binanceApiSecret === MASKED_SECRET ? '' : binanceApiSecret,
         });
         if (res.error) {
-            status.textContent = '✗ ' + res.error;
+            status.textContent = '??: ' + res.error;
             status.className = 'text-xs text-red-400';
             return;
         }
-        status.textContent = '✓ ' + (res.msg || '连接成功');
+        status.textContent = res.msg || '????';
         status.className = 'text-xs text-green-400';
     }
 
@@ -1253,7 +1243,6 @@
     async function toggleEngine(start) {
         try {
             if (start) {
-                // 启动前先自动保存当前勾选的交易员和所有参数，确保引擎用最新数据
                 const enabled = getEnabledBitgetUids();
                 const apiKey = document.getElementById('api_key').value.trim();
                 const apiSecret = document.getElementById('api_secret').value.trim();
@@ -1271,41 +1260,40 @@
 
                 const savePayload = {
                     api_key: apiKey,
-                    api_secret: apiSecret === '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022' ? '' : apiSecret,
-                    api_passphrase: apiPass === '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022' ? '' : apiPass,
+                    api_secret: apiSecret === MASKED_SECRET ? '' : apiSecret,
+                    api_passphrase: apiPass === MASKED_SECRET ? '' : apiPass,
                     binance_api_key: binanceApiKey,
-                    binance_api_secret: binanceApiSecret === '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022' ? '' : binanceApiSecret,
+                    binance_api_secret: binanceApiSecret === MASKED_SECRET ? '' : binanceApiSecret,
                     total_capital: parseNumberOrFallback('total_capital', fallbackTotal),
                     follow_ratio_pct: parseNumberOrFallback('follow_ratio_pct', fallbackFollowRatio) / 100,
                     max_margin_pct: parseNumberOrFallback('max_margin_pct', fallbackMarginPct) / 100,
                     price_tolerance: parseNumberOrFallback('price_tolerance', fallbackTolerance) / 100,
-
                     binance_total_capital: parseNumberOrFallback('binance_total_capital', fallbackBnTotal),
                     binance_follow_ratio_pct: parseNumberOrFallback('binance_follow_ratio_pct', fallbackBnFollowRatio) / 100,
                     binance_max_margin_pct: parseNumberOrFallback('binance_max_margin_pct', fallbackBnMarginPct) / 100,
                     binance_price_tolerance: parseNumberOrFallback('binance_price_tolerance', fallbackBnTolerance) / 100,
-
                     enabled_traders: enabled,
                     binance_traders: serializeBinanceTraders(),
+                    ...buildTakeProfitPayload(),
                 };
                 const saveRes = await apiPost('/api/copy/settings', savePayload);
-                if (saveRes.error) { setMsg('\u4fdd\u5b58\u914d\u7f6e\u5931\u8d25\uff1a' + saveRes.error, 'error'); return; }
+                if (saveRes.error) { setMsg('???????' + saveRes.error, 'error'); return; }
             }
 
             const res = await apiPost(start ? '/api/copy/start' : '/api/copy/stop', {});
             if (res.error) { setMsg(res.error, 'error'); return; }
-            setMsg(res.msg || '操作成功', 'success');
+            setMsg(res.msg || '????', 'success');
             updateEngineBadge(start);
             if (start) {
                 const enabledCount = getEnabledBitgetUids().length + getEnabledBinancePids().length;
                 document.getElementById('engine-start-time').textContent =
-                    '启动于 ' + new Date().toLocaleTimeString('zh-CN') +
-                    '，跟踪 ' + enabledCount + ' 名交易员，每 2.5 秒自动扫描持仓变动';
+                    '??? ' + new Date().toLocaleTimeString('zh-CN') +
+                    '??? ' + enabledCount + ' ?????? 2.5 ?????????';
                 setTimeout(refreshPositions, 3000);
             }
         } catch (e) {
-            console.error('切换引擎失败:', e);
-            setMsg('引擎操作失败：' + (e && e.message ? e.message : '未知错误'), 'error');
+            console.error('??????:', e);
+            setMsg('???????' + (e && e.message ? e.message : '????'), 'error');
         }
     }
 

@@ -12,8 +12,9 @@ import json
 import atexit
 import sys
 import signal
+import secrets
 
-from flask import Flask, render_template, request, jsonify, redirect, url_for, make_response
+from flask import Flask, render_template, request, jsonify, redirect, url_for, make_response, abort
 
 import api_client
 import config
@@ -37,6 +38,9 @@ _last_heartbeat = time.time()
 _heartbeat_lock = threading.Lock()
 _config_lock = threading.RLock()
 _AUTO_EXIT_ON_HEARTBEAT_LOSS = os.getenv("AUTO_EXIT_ON_HEARTBEAT_LOSS", "1") == "1"
+APP_UI_TOKEN = os.getenv("BITGETFOLLOW_UI_TOKEN") or secrets.token_urlsafe(24)
+_ALLOWED_LOCAL_ORIGINS = ("http://127.0.0.1", "http://localhost")
+_SECRET_DB_FIELDS = ("api_key", "api_secret", "api_passphrase", "binance_api_key", "binance_api_secret")
 
 @app.route("/api/heartbeat", methods=["POST"])
 def api_heartbeat():
@@ -71,7 +75,7 @@ def _heartbeat_monitor():
 # ── 工具函数 ──────────────────────────────────────────────────────────────────
 
 def _api_configured() -> bool:
-    """检查 API Key 是否已配置。"""
+    """?? API Key ??????"""
     return bool(
         config.BITGET_API_KEY
         and config.BITGET_API_KEY != "your_api_key_here"
@@ -80,17 +84,130 @@ def _api_configured() -> bool:
     )
 
 
+@app.context_processor
+def _inject_template_globals():
+    return {"app_ui_token": APP_UI_TOKEN}
+
+
+@app.before_request
+def _protect_local_mutations():
+    if request.method not in {"POST", "PUT", "PATCH", "DELETE"}:
+        return None
+    if request.path.startswith("/static/"):
+        return None
+
+    origin = request.headers.get("Origin") or request.headers.get("Referer") or ""
+    if origin and not origin.startswith(_ALLOWED_LOCAL_ORIGINS):
+        abort(403)
+
+    token = request.headers.get("X-App-Token") or request.form.get("_app_token") or request.args.get("_app_token")
+    if token != APP_UI_TOKEN:
+        return jsonify({"error": "?????????????????"}), 403
+    return None
+
+
+def _env_path() -> str:
+    return os.path.join(os.path.dirname(__file__), ".env")
+
+
+def _read_env_map() -> dict[str, str]:
+    env: dict[str, str] = {}
+    env_path = _env_path()
+    if not os.path.exists(env_path):
+        return env
+    with open(env_path, "r", encoding="utf-8") as f:
+        for raw_line in f:
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            env[key.strip()] = value.strip()
+    return env
+
+
+def _write_env_map(updates: dict[str, str]) -> None:
+    env = _read_env_map()
+    env.update({k: str(v) for k, v in updates.items() if v is not None})
+    ordered_keys = [
+        "BITGET_API_KEY", "BITGET_SECRET_KEY", "BITGET_PASSPHRASE",
+        "BINANCE_API_KEY", "BINANCE_API_SECRET", "BINANCE_BASE_URL",
+        "BITGET_SIMULATED", "POLL_INTERVAL", "LOG_LEVEL",
+        "DEFAULT_DAILY_LOSS_LIMIT_PCT", "DEFAULT_TOTAL_DRAWDOWN_LIMIT_PCT",
+    ]
+    all_keys = ordered_keys + sorted(k for k in env.keys() if k not in ordered_keys)
+    seen: set[str] = set()
+    with open(_env_path(), "w", encoding="utf-8") as f:
+        for key in all_keys:
+            if key in seen or key not in env:
+                continue
+            seen.add(key)
+            f.write(f"{key}={env[key]}\n")
+
+
+def _mask_secret(value: str, keep: int = 4) -> str:
+    value = str(value or "")
+    if not value:
+        return ""
+    if len(value) <= keep * 2:
+        return "*" * len(value)
+    return value[:keep] + "****" + value[-keep:]
+
+
+def _migrate_plaintext_secrets_out_of_db() -> None:
+    try:
+        with db.get_conn() as conn:
+            row = conn.execute(
+                "SELECT api_key, api_secret, api_passphrase, binance_api_key, binance_api_secret FROM copy_settings WHERE id = 1"
+            ).fetchone()
+        if not row:
+            return
+        raw = dict(row)
+        if not any(raw.get(key) for key in _SECRET_DB_FIELDS):
+            return
+
+        updates: dict[str, str] = {}
+        if raw.get("api_key"):
+            updates["BITGET_API_KEY"] = raw["api_key"]
+        if raw.get("api_secret"):
+            updates["BITGET_SECRET_KEY"] = raw["api_secret"]
+        if raw.get("api_passphrase"):
+            updates["BITGET_PASSPHRASE"] = raw["api_passphrase"]
+        if raw.get("binance_api_key"):
+            updates["BINANCE_API_KEY"] = raw["binance_api_key"]
+        if raw.get("binance_api_secret"):
+            updates["BINANCE_API_SECRET"] = raw["binance_api_secret"]
+        if updates:
+            updates.setdefault("BINANCE_BASE_URL", config.BINANCE_BASE_URL)
+            updates.setdefault("BITGET_SIMULATED", "1" if config.SIMULATED else "0")
+            updates.setdefault("POLL_INTERVAL", str(config.POLL_INTERVAL))
+            updates.setdefault("LOG_LEVEL", config.LOG_LEVEL)
+            _write_env_map(updates)
+            _reload_config()
+        db.update_copy_settings(
+            api_key="", api_secret="", api_passphrase="",
+            binance_api_key="", binance_api_secret="",
+        )
+        logger.warning("????????????????? .env ??? SQLite ??")
+    except Exception as exc:
+        logger.warning("???????????: %s", exc)
+
+
 def _reload_config():
-    """重新加载 .env 文件到 config 模块（线程安全）。"""
+    """???? .env ??? config ?????????"""
     from dotenv import load_dotenv
     with _config_lock:
-        env_path = os.path.join(os.path.dirname(__file__), ".env")
+        env_path = _env_path()
         load_dotenv(env_path, override=True)
-        config.BITGET_API_KEY    = os.getenv("BITGET_API_KEY", "")
+        config.BITGET_API_KEY = os.getenv("BITGET_API_KEY", "")
         config.BITGET_SECRET_KEY = os.getenv("BITGET_SECRET_KEY", "")
         config.BITGET_PASSPHRASE = os.getenv("BITGET_PASSPHRASE", "")
-    config.POLL_INTERVAL     = int(os.getenv("POLL_INTERVAL", "5"))
-    config.LOG_LEVEL         = os.getenv("LOG_LEVEL", "INFO")
+        config.BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "")
+        config.BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "")
+        config.BINANCE_BASE_URL = (os.getenv("BINANCE_BASE_URL", config.BINANCE_BASE_URL) or "").strip().rstrip("/")
+        if not config.BINANCE_BASE_URL:
+            config.BINANCE_BASE_URL = "https://testnet.binancefuture.com"
+    config.POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "5"))
+    config.LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
 
 def _fmt_ts(ms_ts):
@@ -192,28 +309,43 @@ def _build_account_overview(api_key: str, api_secret: str, api_passphrase: str):
 
 def _normalize_copy_settings(raw: dict) -> dict:
     defaults = {
-        "api_key": "",
-        "api_secret": "",
-        "api_passphrase": "",
+        "api_key": config.BITGET_API_KEY or "",
+        "api_secret": config.BITGET_SECRET_KEY or "",
+        "api_passphrase": config.BITGET_PASSPHRASE or "",
         "total_capital": 0.0,
         "follow_ratio_pct": 0.003,
         "max_margin_pct": 0.20,
         "price_tolerance": 0.0002,
         "sl_pct": 0.15,
         "tp_pct": 0.30,
+        "daily_loss_limit_pct": config.DEFAULT_DAILY_LOSS_LIMIT_PCT,
+        "total_drawdown_limit_pct": config.DEFAULT_TOTAL_DRAWDOWN_LIMIT_PCT,
+        "take_profit_enabled": 1 if config.DEFAULT_TAKE_PROFIT_ENABLED else 0,
+        "stop_loss_pct": config.DEFAULT_STOP_LOSS_PCT,
+        "tp1_roi_pct": config.DEFAULT_TP1_ROI_PCT,
+        "tp1_close_pct": config.DEFAULT_TP1_CLOSE_PCT,
+        "tp2_roi_pct": config.DEFAULT_TP2_ROI_PCT,
+        "tp2_close_pct": config.DEFAULT_TP2_CLOSE_PCT,
+        "tp3_roi_pct": config.DEFAULT_TP3_ROI_PCT,
+        "tp3_close_pct": config.DEFAULT_TP3_CLOSE_PCT,
+        "breakeven_buffer_pct": config.DEFAULT_BREAKEVEN_BUFFER_PCT,
+        "trail_callback_pct": config.DEFAULT_TRAIL_CALLBACK_PCT,
         "enabled_traders": [],
         "binance_traders": {},
         "engine_enabled": 0,
-        "binance_api_key": "",
-        "binance_api_secret": "",
+        "binance_api_key": config.BINANCE_API_KEY or "",
+        "binance_api_secret": config.BINANCE_API_SECRET or "",
         "binance_total_capital": 0.0,
         "binance_follow_ratio_pct": 0.003,
         "binance_max_margin_pct": 0.20,
         "binance_price_tolerance": 0.0002,
     }
-    if not raw:
-        return defaults
-    settings = {**defaults, **raw}
+    settings = {**defaults, **(raw or {})}
+
+    def _coerce_float(name: str, default: float) -> None:
+        value = _to_float_or_none(settings.get(name))
+        settings[name] = default if value is None else value
+
     try:
         et = settings.get("enabled_traders") or "[]"
         if isinstance(et, list):
@@ -222,7 +354,7 @@ def _normalize_copy_settings(raw: dict) -> dict:
             settings["enabled_traders"] = json.loads(et)
     except Exception:
         settings["enabled_traders"] = []
-    # 兼容 dict / list / json 字符串 / 双重序列化字符串
+
     bt = settings.get("binance_traders")
     if isinstance(bt, str):
         try:
@@ -234,14 +366,39 @@ def _normalize_copy_settings(raw: dict) -> dict:
     if not isinstance(bt, (dict, list)):
         bt = {}
     settings["binance_traders"] = bt
-    settings["engine_enabled"] = int(settings.get("engine_enabled") or 0)
-    
-    # 填充币安的独立风控参数（兼容旧表数据，防 None）
-    settings["binance_total_capital"] = _to_float_or_none(settings.get("binance_total_capital")) or 0.0
-    settings["binance_follow_ratio_pct"] = _to_float_or_none(settings.get("binance_follow_ratio_pct")) or 0.003
-    settings["binance_max_margin_pct"] = _to_float_or_none(settings.get("binance_max_margin_pct")) or 0.20
-    settings["binance_price_tolerance"] = _to_float_or_none(settings.get("binance_price_tolerance")) or 0.0002
 
+    raw_take_profit_enabled = settings.get("take_profit_enabled", defaults["take_profit_enabled"])
+    if isinstance(raw_take_profit_enabled, str):
+        settings["take_profit_enabled"] = 1 if raw_take_profit_enabled.strip().lower() in ("1", "true", "yes", "on") else 0
+    else:
+        settings["take_profit_enabled"] = 1 if raw_take_profit_enabled else 0
+
+    settings["engine_enabled"] = int(settings.get("engine_enabled") or 0)
+    _coerce_float("follow_ratio_pct", defaults["follow_ratio_pct"])
+    _coerce_float("max_margin_pct", defaults["max_margin_pct"])
+    _coerce_float("price_tolerance", defaults["price_tolerance"])
+    _coerce_float("sl_pct", defaults["sl_pct"])
+    _coerce_float("tp_pct", defaults["tp_pct"])
+    _coerce_float("daily_loss_limit_pct", defaults["daily_loss_limit_pct"])
+    _coerce_float("total_drawdown_limit_pct", defaults["total_drawdown_limit_pct"])
+    _coerce_float("stop_loss_pct", defaults["stop_loss_pct"])
+    _coerce_float("tp1_roi_pct", defaults["tp1_roi_pct"])
+    _coerce_float("tp1_close_pct", defaults["tp1_close_pct"])
+    _coerce_float("tp2_roi_pct", defaults["tp2_roi_pct"])
+    _coerce_float("tp2_close_pct", defaults["tp2_close_pct"])
+    _coerce_float("tp3_roi_pct", defaults["tp3_roi_pct"])
+    _coerce_float("tp3_close_pct", defaults["tp3_close_pct"])
+    _coerce_float("breakeven_buffer_pct", defaults["breakeven_buffer_pct"])
+    _coerce_float("trail_callback_pct", defaults["trail_callback_pct"])
+    _coerce_float("binance_total_capital", defaults["binance_total_capital"])
+    _coerce_float("binance_follow_ratio_pct", defaults["binance_follow_ratio_pct"])
+    _coerce_float("binance_max_margin_pct", defaults["binance_max_margin_pct"])
+    _coerce_float("binance_price_tolerance", defaults["binance_price_tolerance"])
+    settings["api_key"] = settings.get("api_key") or config.BITGET_API_KEY
+    settings["api_secret"] = settings.get("api_secret") or config.BITGET_SECRET_KEY
+    settings["api_passphrase"] = settings.get("api_passphrase") or config.BITGET_PASSPHRASE
+    settings["binance_api_key"] = settings.get("binance_api_key") or config.BINANCE_API_KEY
+    settings["binance_api_secret"] = settings.get("binance_api_secret") or config.BINANCE_API_SECRET
     return settings
 
 
@@ -268,33 +425,38 @@ def settings():
     msg = ""
     msg_type = ""
     if request.method == "POST":
-        api_key    = request.form.get("api_key", "").strip()
-        secret_key = request.form.get("secret_key", "").strip()
-        passphrase = request.form.get("passphrase", "").strip()
-        poll_interval = request.form.get("poll_interval", "5").strip()
+        api_key = request.form.get("api_key", "").strip() or config.BITGET_API_KEY or ""
+        secret_key = request.form.get("secret_key", "").strip() or config.BITGET_SECRET_KEY or ""
+        passphrase = request.form.get("passphrase", "").strip() or config.BITGET_PASSPHRASE or ""
+        poll_interval = request.form.get("poll_interval", "5").strip() or str(config.POLL_INTERVAL)
 
         if not api_key or not secret_key or not passphrase:
-            msg = "所有字段都必须填写"
+            msg = "?????????"
             msg_type = "error"
         else:
-            env_path = os.path.join(os.path.dirname(__file__), ".env")
-            simulated = os.getenv("BITGET_SIMULATED", "0")
-            with open(env_path, "w", encoding="utf-8") as f:
-                f.write(f"BITGET_API_KEY={api_key}\n")
-                f.write(f"BITGET_SECRET_KEY={secret_key}\n")
-                f.write(f"BITGET_PASSPHRASE={passphrase}\n")
-                f.write(f"BITGET_SIMULATED={simulated}\n")
-                f.write(f"POLL_INTERVAL={poll_interval}\n")
-                f.write("LOG_LEVEL=INFO\n")
+            _write_env_map({
+                "BITGET_API_KEY": api_key,
+                "BITGET_SECRET_KEY": secret_key,
+                "BITGET_PASSPHRASE": passphrase,
+                "BITGET_SIMULATED": os.getenv("BITGET_SIMULATED", "0"),
+                "POLL_INTERVAL": poll_interval,
+                "LOG_LEVEL": os.getenv("LOG_LEVEL", config.LOG_LEVEL),
+                "BINANCE_BASE_URL": config.BINANCE_BASE_URL,
+                "DEFAULT_DAILY_LOSS_LIMIT_PCT": os.getenv("DEFAULT_DAILY_LOSS_LIMIT_PCT", str(config.DEFAULT_DAILY_LOSS_LIMIT_PCT)),
+                "DEFAULT_TOTAL_DRAWDOWN_LIMIT_PCT": os.getenv("DEFAULT_TOTAL_DRAWDOWN_LIMIT_PCT", str(config.DEFAULT_TOTAL_DRAWDOWN_LIMIT_PCT)),
+            })
+            db.update_copy_settings(api_key="", api_secret="", api_passphrase="")
             _reload_config()
-            msg = "API 配置已保存"
+            msg = "API ?????"
             msg_type = "success"
 
     current = {
-        "api_key":    config.BITGET_API_KEY or "",
-        "secret_key": config.BITGET_SECRET_KEY or "",
-        "passphrase": config.BITGET_PASSPHRASE or "",
+        "api_key": config.BITGET_API_KEY or "",
+        "secret_key": "",
+        "passphrase": "",
         "poll_interval": config.POLL_INTERVAL,
+        "has_secret": bool(config.BITGET_SECRET_KEY),
+        "has_passphrase": bool(config.BITGET_PASSPHRASE),
     }
     configured = _api_configured()
     return render_template("settings.html", current=current, configured=configured, msg=msg, msg_type=msg_type)
@@ -534,9 +696,9 @@ def api_copy_settings():
         api_key = (payload.get("api_key") or "").strip() or config.BITGET_API_KEY or ""
         api_secret = (payload.get("api_secret") or "").strip() or config.BITGET_SECRET_KEY or ""
         api_passphrase = (payload.get("api_passphrase") or "").strip() or config.BITGET_PASSPHRASE or ""
-        # 币安 API（可选）
-        binance_api_key = (payload.get("binance_api_key") or "").strip() or existing.get("binance_api_key") or ""
-        binance_api_secret = (payload.get("binance_api_secret") or "").strip() or existing.get("binance_api_secret") or ""
+        binance_api_key = (payload.get("binance_api_key") or "").strip() or config.BINANCE_API_KEY or ""
+        binance_api_secret = (payload.get("binance_api_secret") or "").strip() or config.BINANCE_API_SECRET or ""
+
         def _float_or(raw_v, default_v):
             if raw_v is None or raw_v == "":
                 return float(default_v)
@@ -545,17 +707,40 @@ def api_copy_settings():
             except Exception:
                 return float(default_v)
 
+        def _ratio_or(raw_v, default_v):
+            value = _float_or(raw_v, default_v)
+            if value > 1:
+                value = value / 100.0
+            return min(max(value, 0.0), 1.0)
+
+        def _bool_or(raw_v, default_v):
+            if raw_v is None or raw_v == "":
+                return 1 if default_v else 0
+            if isinstance(raw_v, bool):
+                return 1 if raw_v else 0
+            if isinstance(raw_v, (int, float)):
+                return 1 if raw_v else 0
+            return 1 if str(raw_v).strip().lower() in ("1", "true", "yes", "on") else 0
+
         total_capital = _float_or(payload.get("total_capital"), existing.get("total_capital", 0.0))
-        follow_ratio_pct = _float_or(payload.get("follow_ratio_pct"), existing.get("follow_ratio_pct", 0.003))
-        if follow_ratio_pct > 1:
-            follow_ratio_pct = follow_ratio_pct / 100.0
-        follow_ratio_pct = min(max(follow_ratio_pct, 0.0), 1.0)
-        max_margin_pct = _float_or(payload.get("max_margin_pct"), existing.get("max_margin_pct", 0.2))
-        price_tolerance = _float_or(payload.get("price_tolerance"), existing.get("price_tolerance", 0.0002))
-        sl_pct = _float_or(payload.get("sl_pct"), existing.get("sl_pct", 0.15))
-        tp_pct = _float_or(payload.get("tp_pct"), existing.get("tp_pct", 0.30))
-        
-        # 币安交易员配置
+        follow_ratio_pct = _ratio_or(payload.get("follow_ratio_pct"), existing.get("follow_ratio_pct", 0.003))
+        max_margin_pct = _ratio_or(payload.get("max_margin_pct"), existing.get("max_margin_pct", 0.2))
+        price_tolerance = _ratio_or(payload.get("price_tolerance"), existing.get("price_tolerance", 0.0002))
+        sl_pct = _ratio_or(payload.get("sl_pct"), existing.get("sl_pct", 0.15))
+        tp_pct = _ratio_or(payload.get("tp_pct"), existing.get("tp_pct", 0.30))
+        daily_loss_limit_pct = _ratio_or(payload.get("daily_loss_limit_pct"), existing.get("daily_loss_limit_pct", config.DEFAULT_DAILY_LOSS_LIMIT_PCT))
+        total_drawdown_limit_pct = _ratio_or(payload.get("total_drawdown_limit_pct"), existing.get("total_drawdown_limit_pct", config.DEFAULT_TOTAL_DRAWDOWN_LIMIT_PCT))
+        take_profit_enabled = _bool_or(payload.get("take_profit_enabled"), existing.get("take_profit_enabled", 1 if config.DEFAULT_TAKE_PROFIT_ENABLED else 0))
+        stop_loss_pct = _ratio_or(payload.get("stop_loss_pct"), existing.get("stop_loss_pct", config.DEFAULT_STOP_LOSS_PCT))
+        tp1_roi_pct = _ratio_or(payload.get("tp1_roi_pct"), existing.get("tp1_roi_pct", config.DEFAULT_TP1_ROI_PCT))
+        tp1_close_pct = _ratio_or(payload.get("tp1_close_pct"), existing.get("tp1_close_pct", config.DEFAULT_TP1_CLOSE_PCT))
+        tp2_roi_pct = _ratio_or(payload.get("tp2_roi_pct"), existing.get("tp2_roi_pct", config.DEFAULT_TP2_ROI_PCT))
+        tp2_close_pct = _ratio_or(payload.get("tp2_close_pct"), existing.get("tp2_close_pct", config.DEFAULT_TP2_CLOSE_PCT))
+        tp3_roi_pct = _ratio_or(payload.get("tp3_roi_pct"), existing.get("tp3_roi_pct", config.DEFAULT_TP3_ROI_PCT))
+        tp3_close_pct = _ratio_or(payload.get("tp3_close_pct"), existing.get("tp3_close_pct", config.DEFAULT_TP3_CLOSE_PCT))
+        breakeven_buffer_pct = _ratio_or(payload.get("breakeven_buffer_pct"), existing.get("breakeven_buffer_pct", config.DEFAULT_BREAKEVEN_BUFFER_PCT))
+        trail_callback_pct = _ratio_or(payload.get("trail_callback_pct"), existing.get("trail_callback_pct", config.DEFAULT_TRAIL_CALLBACK_PCT))
+
         binance_traders = payload.get("binance_traders")
         if binance_traders is None:
             binance_traders = existing.get("binance_traders") or {}
@@ -572,7 +757,7 @@ def api_copy_settings():
                 if not spid:
                     continue
                 normalized_bn[spid] = {
-                    "nickname": f"币安交易员_{spid[:8]}",
+                    "nickname": f"Trader_{spid[:8]}",
                     "copy_enabled": True,
                 }
         elif isinstance(binance_traders, dict):
@@ -581,73 +766,75 @@ def api_copy_settings():
                 if not spid:
                     continue
                 row = dict(info) if isinstance(info, dict) else {}
-                row["nickname"] = row.get("nickname") or f"币安交易员_{spid[:8]}"
+                row["nickname"] = row.get("nickname") or f"Trader_{spid[:8]}"
                 row["copy_enabled"] = bool(row.get("copy_enabled", True))
                 normalized_bn[spid] = row
 
         if not normalized_bn and isinstance(existing.get("binance_traders"), dict):
             normalized_bn = existing.get("binance_traders")
 
-        # 币安风控参数
         binance_total_capital = _float_or(payload.get("binance_total_capital"), existing.get("binance_total_capital", 0.0))
-        binance_follow_ratio_pct = _float_or(payload.get("binance_follow_ratio_pct"), existing.get("binance_follow_ratio_pct", 0.003))
-        if binance_follow_ratio_pct > 1:
-            binance_follow_ratio_pct = binance_follow_ratio_pct / 100.0
-        binance_follow_ratio_pct = min(max(binance_follow_ratio_pct, 0.0), 1.0)
-        binance_max_margin_pct = _float_or(payload.get("binance_max_margin_pct"), existing.get("binance_max_margin_pct", 0.2))
-        binance_price_tolerance = _float_or(payload.get("binance_price_tolerance"), existing.get("binance_price_tolerance", 0.0002))
+        binance_follow_ratio_pct = _ratio_or(payload.get("binance_follow_ratio_pct"), existing.get("binance_follow_ratio_pct", 0.003))
+        binance_max_margin_pct = _ratio_or(payload.get("binance_max_margin_pct"), existing.get("binance_max_margin_pct", 0.2))
+        binance_price_tolerance = _ratio_or(payload.get("binance_price_tolerance"), existing.get("binance_price_tolerance", 0.0002))
 
         enabled_traders = payload.get("enabled_traders")
         if enabled_traders is None:
             enabled_traders = existing.get("enabled_traders", [])
 
+        _write_env_map({
+            "BITGET_API_KEY": api_key,
+            "BITGET_SECRET_KEY": api_secret,
+            "BITGET_PASSPHRASE": api_passphrase,
+            "BINANCE_API_KEY": binance_api_key,
+            "BINANCE_API_SECRET": binance_api_secret,
+            "BINANCE_BASE_URL": config.BINANCE_BASE_URL,
+            "BITGET_SIMULATED": os.getenv("BITGET_SIMULATED", "0"),
+            "POLL_INTERVAL": str(config.POLL_INTERVAL),
+            "LOG_LEVEL": config.LOG_LEVEL,
+            "DEFAULT_DAILY_LOSS_LIMIT_PCT": str(daily_loss_limit_pct),
+            "DEFAULT_TOTAL_DRAWDOWN_LIMIT_PCT": str(total_drawdown_limit_pct),
+        })
+        _reload_config()
+
         db.update_copy_settings(
-            api_key=api_key,
-            api_secret=api_secret,
-            api_passphrase=api_passphrase,
+            api_key="",
+            api_secret="",
+            api_passphrase="",
             total_capital=total_capital,
             follow_ratio_pct=follow_ratio_pct,
             max_margin_pct=max_margin_pct,
             price_tolerance=price_tolerance,
             sl_pct=sl_pct,
             tp_pct=tp_pct,
+            daily_loss_limit_pct=daily_loss_limit_pct,
+            total_drawdown_limit_pct=total_drawdown_limit_pct,
+            take_profit_enabled=take_profit_enabled,
+            stop_loss_pct=stop_loss_pct,
+            tp1_roi_pct=tp1_roi_pct,
+            tp1_close_pct=tp1_close_pct,
+            tp2_roi_pct=tp2_roi_pct,
+            tp2_close_pct=tp2_close_pct,
+            tp3_roi_pct=tp3_roi_pct,
+            tp3_close_pct=tp3_close_pct,
+            breakeven_buffer_pct=breakeven_buffer_pct,
+            trail_callback_pct=trail_callback_pct,
             enabled_traders=json.dumps(enabled_traders),
             binance_traders=json.dumps(normalized_bn, ensure_ascii=False),
-            binance_api_key=binance_api_key,
-            binance_api_secret=binance_api_secret,
+            binance_api_key="",
+            binance_api_secret="",
             binance_total_capital=binance_total_capital,
             binance_follow_ratio_pct=binance_follow_ratio_pct,
             binance_max_margin_pct=binance_max_margin_pct,
             binance_price_tolerance=binance_price_tolerance,
         )
-        
-        config.BITGET_API_KEY = api_key
-        config.BITGET_SECRET_KEY = api_secret
-        config.BITGET_PASSPHRASE = api_passphrase
-
-        env_path = os.path.join(os.path.dirname(__file__), ".env")
-        simulated = os.getenv("BITGET_SIMULATED", "0")
-        with open(env_path, "w", encoding="utf-8") as f:
-            f.write(f"BITGET_API_KEY={api_key}\n")
-            f.write(f"BITGET_SECRET_KEY={api_secret}\n")
-            f.write(f"BITGET_PASSPHRASE={api_passphrase}\n")
-            f.write(f"BINANCE_API_KEY={binance_api_key}\n")
-            f.write(f"BINANCE_API_SECRET={binance_api_secret}\n")
-            f.write(f"BINANCE_BASE_URL={config.BINANCE_BASE_URL}\n")
-            f.write(f"BITGET_SIMULATED={simulated}\n")
-            if os.getenv("BITGET_BASE_URL"):
-                f.write(f"BITGET_BASE_URL={os.getenv('BITGET_BASE_URL')}\n")
-            f.write(f"POLL_INTERVAL={config.POLL_INTERVAL}\n")
-            f.write(f"LOG_LEVEL={config.LOG_LEVEL}\n")
 
         return jsonify({"ok": True})
 
     settings = _normalize_copy_settings(db.get_copy_settings())
     safe_settings = dict(settings)
     for field in ("api_secret", "api_passphrase", "binance_api_secret"):
-        val = safe_settings.get(field, "")
-        if val and len(val) > 8:
-            safe_settings[field] = val[:4] + "****" + val[-4:]
+        safe_settings[field] = _mask_secret(str(safe_settings.get(field) or ""))
     return jsonify(safe_settings)
 
 
@@ -1129,6 +1316,7 @@ def main():
         return
 
     db.init_db()
+    _migrate_plaintext_secrets_out_of_db()
 
     # 迁移币安交易员格式
     _migrate_binance_format()

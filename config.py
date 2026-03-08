@@ -16,6 +16,8 @@ SIMULATED         = os.getenv("BITGET_SIMULATED", "0") == "1"
 
 # Binance Futures API base URL.
 # Default uses Futures testnet for simulated trading.
+BINANCE_API_KEY   = os.getenv("BINANCE_API_KEY", "")
+BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "")
 BINANCE_BASE_URL  = (os.getenv("BINANCE_BASE_URL", "https://testnet.binancefuture.com") or "").strip().rstrip("/")
 if not BINANCE_BASE_URL:
     BINANCE_BASE_URL = "https://testnet.binancefuture.com"
@@ -49,3 +51,18 @@ FILTER = {
 # 默认价差容忍度：0.005 (0.5%)。
 # 调高此值可以更轻松地对已有仓位进行“补票上车”，但过高可能导致在极端行情下接盘。
 DEFAULT_PRICE_TOLERANCE = 0.005
+
+# ?? ???????????????? 0.03 = 3%??????????????????????????????
+DEFAULT_DAILY_LOSS_LIMIT_PCT = float(os.getenv("DEFAULT_DAILY_LOSS_LIMIT_PCT", "0.03"))
+DEFAULT_TOTAL_DRAWDOWN_LIMIT_PCT = float(os.getenv("DEFAULT_TOTAL_DRAWDOWN_LIMIT_PCT", "0.10"))
+DEFAULT_TAKE_PROFIT_ENABLED = os.getenv("DEFAULT_TAKE_PROFIT_ENABLED", "1") == "1"
+DEFAULT_STOP_LOSS_PCT = float(os.getenv("DEFAULT_STOP_LOSS_PCT", "0.06"))
+DEFAULT_TP1_ROI_PCT = float(os.getenv("DEFAULT_TP1_ROI_PCT", "0.08"))
+DEFAULT_TP1_CLOSE_PCT = float(os.getenv("DEFAULT_TP1_CLOSE_PCT", "0.30"))
+DEFAULT_TP2_ROI_PCT = float(os.getenv("DEFAULT_TP2_ROI_PCT", "0.15"))
+DEFAULT_TP2_CLOSE_PCT = float(os.getenv("DEFAULT_TP2_CLOSE_PCT", "0.30"))
+DEFAULT_TP3_ROI_PCT = float(os.getenv("DEFAULT_TP3_ROI_PCT", "0.25"))
+DEFAULT_TP3_CLOSE_PCT = float(os.getenv("DEFAULT_TP3_CLOSE_PCT", "0.40"))
+DEFAULT_BREAKEVEN_BUFFER_PCT = float(os.getenv("DEFAULT_BREAKEVEN_BUFFER_PCT", "0.005"))
+DEFAULT_TRAIL_CALLBACK_PCT = float(os.getenv("DEFAULT_TRAIL_CALLBACK_PCT", "0.06"))
+DEFAULT_TP2_LOCKED_ROI_PCT = float(os.getenv("DEFAULT_TP2_LOCKED_ROI_PCT", "0.06"))

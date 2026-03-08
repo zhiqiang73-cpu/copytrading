@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="app-token" content="{{ app_ui_token }}">
     <title>{% block title %}BitgetFollow{% endblock %}</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
@@ -95,9 +96,11 @@
         }
 
         // 心跳机制：告诉后端网页还开着，防止后端自动关闭
+        const APP_TOKEN = document.querySelector('meta[name="app-token"]')?.content || "";
+
         async function sendHeartbeat() {
             try {
-                await fetch('/api/heartbeat', { method: 'POST' });
+                await fetch('/api/heartbeat', { method: 'POST', headers: {'X-App-Token': APP_TOKEN} });
             } catch (e) {
                 // 如果后端已经关闭，心跳会失败
                 console.log('Heartbeat failed, backend might be offline.');
@@ -112,7 +115,7 @@
         async function apiPost(url, body) {
             const res = await fetch(url, {
                 method: 'POST',
-                headers: {'Content-Type': 'application/json'},
+                headers: {'Content-Type': 'application/json', 'X-App-Token': APP_TOKEN},
                 body: JSON.stringify(body || {})
             });
             return await res.json();
