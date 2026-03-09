@@ -9,8 +9,10 @@ import hmac
 import json
 import logging
 import time
+import threading
 import urllib.parse
-from decimal import Decimal, ROUND_CEILING
+from contextlib import contextmanager
+from decimal import Decimal, ROUND_CEILING, ROUND_DOWN
 from typing import Any
 
 import requests
@@ -19,13 +21,36 @@ import config
 
 logger = logging.getLogger(__name__)
 
-# 模拟盘基础 URL
-BASE_URL = config.BINANCE_BASE_URL
+_DEFAULT_BASE_URL = config.BINANCE_BASE_URL
+_RUNTIME = threading.local()
+_RUNTIME_SENTINEL = object()
 
-# 币安不同币种的价格和数量精度缓存 (动态更新)
+# ???????????????????????? (???????
 _SYMBOL_FILTERS: dict[str, dict] = {}
 
-# ????????????server_ms - local_ms?
+
+def _resolve_base_url() -> str:
+    runtime_value = getattr(_RUNTIME, "base_url", _RUNTIME_SENTINEL)
+    if runtime_value is _RUNTIME_SENTINEL:
+        runtime_value = config.BINANCE_BASE_URL or _DEFAULT_BASE_URL
+    return str(runtime_value or _DEFAULT_BASE_URL).strip().rstrip("/")
+
+
+@contextmanager
+def use_runtime(base_url: str | None = None):
+    previous = getattr(_RUNTIME, "base_url", _RUNTIME_SENTINEL)
+    if base_url:
+        _RUNTIME.base_url = str(base_url).strip().rstrip("/")
+    try:
+        yield
+    finally:
+        if previous is _RUNTIME_SENTINEL:
+            if hasattr(_RUNTIME, "base_url"):
+                delattr(_RUNTIME, "base_url")
+        else:
+            _RUNTIME.base_url = previous
+
+
 _TIME_OFFSET_MS = 0
 _TIME_OFFSET_AT = 0.0
 _TIME_OFFSET_TTL_SEC = 60
@@ -77,7 +102,7 @@ def _refresh_server_time_offset(force: bool = False) -> None:
     if (not force) and _TIME_OFFSET_AT and (now - _TIME_OFFSET_AT) < _TIME_OFFSET_TTL_SEC:
         return
 
-    resp = requests.get(f"{BASE_URL}/fapi/v1/time", timeout=5)
+    resp = requests.get(f"{_resolve_base_url()}/fapi/v1/time", timeout=5)
     resp.raise_for_status()
     payload = resp.json()
     server_ms = int(payload["serverTime"])
@@ -125,15 +150,18 @@ def _request(
             "Content-Type": "application/json"
         }
         
-        if method.upper() == "GET":
+        method_upper = method.upper()
+        if method_upper == "GET":
             req_func = requests.get
+        elif method_upper == "DELETE":
+            req_func = requests.delete
         else:
             req_func = requests.post
-            # POST / DELETE 也经常用 query string 传递，但也可能需要 url 但 params=None
-            
+            # POST / DELETE ???? query string ????????? url ? params=None
+
         try:
             resp = req_func(
-                f"{BASE_URL}{endpoint}",
+                f"{_resolve_base_url()}{endpoint}",
                 headers=headers,
                 params=query_string, # requests accept string as raw query
                 timeout=15,
@@ -233,9 +261,9 @@ def get_my_positions(api_key: str, api_secret: str) -> list[dict]:
 
 
 def get_ticker_price(symbol: str) -> float:
-    """获取最新价格 (无需签名)"""
+    """?????? (????)"""
     symbol = _clean_symbol(symbol)
-    resp = requests.get(f"{BASE_URL}/fapi/v1/ticker/price", params={"symbol": symbol}, timeout=10)
+    resp = requests.get(f"{_resolve_base_url()}/fapi/v1/ticker/price", params={"symbol": symbol}, timeout=10)
     if not resp.ok:
         _raise_response_error(resp, f"ticker request failed: {symbol}")
     payload = resp.json()
@@ -244,16 +272,29 @@ def get_ticker_price(symbol: str) -> float:
     return float(payload["price"])
 
 
-def get_symbol_filters(symbol: str) -> dict:
-    """获取币种的精度等规则"""
+def get_book_ticker(symbol: str) -> dict:
     symbol = _clean_symbol(symbol)
-    if symbol in _SYMBOL_FILTERS:
-        return _SYMBOL_FILTERS[symbol]
-    
-    resp = requests.get(f"{BASE_URL}/fapi/v1/exchangeInfo", timeout=10)
+    resp = requests.get(f"{_resolve_base_url()}/fapi/v1/ticker/bookTicker", params={"symbol": symbol}, timeout=10)
+    if not resp.ok:
+        _raise_response_error(resp, f"bookTicker request failed: {symbol}")
+    payload = resp.json()
+    if payload.get("code") not in (None, 0, "0") and payload.get("bidPrice") is None:
+        raise ValueError(f"HTTP {resp.status_code} | code={payload.get('code')} | {payload.get('msg')}")
+    return payload if isinstance(payload, dict) else {}
+
+
+def get_symbol_filters(symbol: str) -> dict:
+    """???????????????"""
+    symbol = _clean_symbol(symbol)
+    base_url = _resolve_base_url()
+    cache_key = f"{base_url}:{symbol}"
+    if cache_key in _SYMBOL_FILTERS:
+        return _SYMBOL_FILTERS[cache_key]
+
+    resp = requests.get(f"{base_url}/fapi/v1/exchangeInfo", timeout=10)
     resp.raise_for_status()
     data = resp.json()
-    
+
     for s_info in data.get("symbols", []):
         sym = s_info["symbol"]
         qty_filter = next(f for f in s_info["filters"] if f["filterType"] == "LOT_SIZE")
@@ -270,7 +311,7 @@ def get_symbol_filters(symbol: str) -> dict:
             or notional_filter.get("minNotional")
             or 0
         )
-        _SYMBOL_FILTERS[sym] = {
+        _SYMBOL_FILTERS[f"{base_url}:{sym}"] = {
             "quantityPrecision": s_info["quantityPrecision"],
             "pricePrecision": s_info["pricePrecision"],
             "stepSize": step_size,
@@ -278,21 +319,32 @@ def get_symbol_filters(symbol: str) -> dict:
             "tickSize": float(price_filter["tickSize"]),
             "minNotional": min_notional,
         }
-        
-    if symbol not in _SYMBOL_FILTERS:
-        raise ValueError(f"USDT-M exchangeInfo 中不存在 symbol: {symbol}")
-        
-    return _SYMBOL_FILTERS[symbol]
+
+    if cache_key not in _SYMBOL_FILTERS:
+        raise ValueError(f"USDT-M exchangeInfo ?????? symbol: {symbol}")
+
+    return _SYMBOL_FILTERS[cache_key]
 
 
 def _format_qty(qty: float, step_size: float) -> str:
-    """根据 stepSize 格式化数量"""
+    """?? stepSize ?????"""
     import math
-    if step_size <= 0: return str(qty)
-    # 按步长向下取整
+    if step_size <= 0:
+        return str(qty)
     precision = max(0, int(round(-math.log10(step_size))))
     formatted_qty = math.floor(qty / step_size) * step_size
     return f"{formatted_qty:.{precision}f}"
+
+
+def _format_price(price: float, tick_size: float, round_up: bool = False) -> str:
+    if price <= 0:
+        raise ValueError(f"?????????: {price}")
+    if tick_size <= 0:
+        return format(Decimal(str(price)).normalize(), "f")
+    step = Decimal(str(tick_size))
+    value = Decimal(str(price))
+    units = (value / step).to_integral_value(rounding=ROUND_CEILING if round_up else ROUND_DOWN)
+    return format((units * step).normalize(), "f")
 
 
 def _ceil_qty(qty: float, step_size: float) -> float:
@@ -337,44 +389,40 @@ def place_market_order(
     current_price: float = 0.0,
     client_oid: str = "",
 ) -> dict:
-    """币安市价开仓 (双向持仓模式下)"""
+    """?????? (???????)"""
     symbol = _clean_symbol(symbol)
     direction = direction.lower() # "long" or "short"
     margin_mode = "ISOLATED" if margin_mode.lower() in ["isolated", "fixed"] else "CROSSED"
-    
-    # 1. 设置双向持仓 (失败忽略，可能是已经设置过了)
+
     try:
         set_position_mode(api_key, api_secret, dual_side=True)
     except Exception:
         pass
-        
-    # 2. 设置杠杆
+
     try:
         set_symbol_leverage(api_key, api_secret, symbol, leverage)
     except Exception as e:
-        logger.warning(f"币安设置杠杆异常(按原杠杆执行): {e}")
+        logger.warning(f"????????(??????): {e}")
 
-    # 3. 设置逐仓/全仓
     try:
         set_margin_type(api_key, api_secret, symbol, margin_mode)
     except Exception:
         pass
 
-    # 计算数量
     price = current_price if current_price > 0 else get_ticker_price(symbol)
     raw_qty = (usdt_margin * leverage) / price
-    
+
     filters = get_symbol_filters(symbol)
     if raw_qty < filters["minQty"]:
-        raise ValueError(f"开仓数量 {raw_qty} 小于币安要求的最小数量 {filters['minQty']} (保证金: {usdt_margin})")
-        
+        raise ValueError(f"???? {raw_qty} ??????????? {filters['minQty']} (???: {usdt_margin})")
+
     qty_str = _format_qty(raw_qty, filters["stepSize"])
     if float(qty_str) == 0:
-        raise ValueError(f"开仓数量因精度截断为 0: {raw_qty}")
+        raise ValueError(f"?????????? 0: {raw_qty}")
 
     position_side = "LONG" if direction == "long" else "SHORT"
     side = "BUY" if direction == "long" else "SELL"
-    
+
     payload = {
         "symbol": symbol,
         "side": side,
@@ -385,12 +433,110 @@ def place_market_order(
     if client_oid:
         payload["newClientOrderId"] = client_oid
 
-    logger.info("币安按量下单: %s %s POS_SIDE=%s 数量=%s 预期保证金=%.2f", symbol, side, position_side, qty_str, usdt_margin)
-    
+    logger.info("??????: %s %s POS_SIDE=%s ??=%s ?????=%.2f", symbol, side, position_side, qty_str, usdt_margin)
+
     res = _request(api_key, api_secret, "POST", "/fapi/v1/order", params=payload)
     if isinstance(res, dict):
         res["_calculated_size"] = qty_str
     return res
+
+
+def place_limit_order(
+    api_key: str,
+    api_secret: str,
+    symbol: str,
+    direction: str,
+    leverage: int,
+    margin_mode: str,
+    usdt_margin: float,
+    limit_price: float,
+    client_oid: str = "",
+    post_only: bool = True,
+) -> dict:
+    symbol = _clean_symbol(symbol)
+    direction = direction.lower()
+    margin_mode = "ISOLATED" if margin_mode.lower() in ["isolated", "fixed"] else "CROSSED"
+
+    try:
+        set_position_mode(api_key, api_secret, dual_side=True)
+    except Exception:
+        pass
+
+    try:
+        set_symbol_leverage(api_key, api_secret, symbol, leverage)
+    except Exception as e:
+        logger.warning(f"????????(??????): {e}")
+
+    try:
+        set_margin_type(api_key, api_secret, symbol, margin_mode)
+    except Exception:
+        pass
+
+    filters = get_symbol_filters(symbol)
+    raw_qty = (usdt_margin * leverage) / limit_price
+    if raw_qty < filters["minQty"]:
+        raise ValueError(f"???? {raw_qty} ??????????? {filters['minQty']} (???: {usdt_margin})")
+
+    qty_str = _format_qty(raw_qty, filters["stepSize"])
+    if float(qty_str) == 0:
+        raise ValueError(f"?????????? 0: {raw_qty}")
+
+    price_str = _format_price(limit_price, float(filters.get("tickSize") or 0.0), round_up=direction == "short")
+    position_side = "LONG" if direction == "long" else "SHORT"
+    side = "BUY" if direction == "long" else "SELL"
+    payload = {
+        "symbol": symbol,
+        "side": side,
+        "positionSide": position_side,
+        "type": "LIMIT",
+        "timeInForce": "GTX" if post_only else "GTC",
+        "quantity": qty_str,
+        "price": price_str,
+    }
+    if client_oid:
+        payload["newClientOrderId"] = client_oid
+
+    res = _request(api_key, api_secret, "POST", "/fapi/v1/order", params=payload)
+    if isinstance(res, dict):
+        res["_calculated_size"] = qty_str
+        res["_limit_price"] = price_str
+    return res
+
+
+def get_order(
+    api_key: str,
+    api_secret: str,
+    symbol: str,
+    order_id: str = "",
+    client_oid: str = "",
+) -> dict:
+    params = {"symbol": _clean_symbol(symbol)}
+    if order_id:
+        params["orderId"] = str(order_id)
+    elif client_oid:
+        params["origClientOrderId"] = client_oid
+    else:
+        raise ValueError("get_order ?? order_id ? client_oid")
+    data = _request(api_key, api_secret, "GET", "/fapi/v1/order", params=params, max_retries=1)
+    return data if isinstance(data, dict) else {}
+
+
+def cancel_order(
+    api_key: str,
+    api_secret: str,
+    symbol: str,
+    order_id: str = "",
+    client_oid: str = "",
+) -> dict:
+    params = {"symbol": _clean_symbol(symbol)}
+    if order_id:
+        params["orderId"] = str(order_id)
+    elif client_oid:
+        params["origClientOrderId"] = client_oid
+    else:
+        raise ValueError("cancel_order ?? order_id ? client_oid")
+    data = _request(api_key, api_secret, "DELETE", "/fapi/v1/order", params=params, max_retries=1)
+    return data if isinstance(data, dict) else {}
 
 
 def close_partial_position(

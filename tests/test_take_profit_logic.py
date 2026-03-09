@@ -16,7 +16,7 @@ for module_name in ("requests", "order_executor", "binance_scraper"):
 
 import config
 import database as db
-from copy_engine import _decide_take_profit_action, _estimate_position_pnl_roi
+from copy_engine import _decide_take_profit_action, _estimate_position_pnl_roi, _pick_maker_limit_price
 
 
 class CopyPositionSummaryTests(unittest.TestCase):
@@ -80,6 +80,28 @@ class CopyPositionSummaryTests(unittest.TestCase):
         self.assertAlmostEqual(3.0, pos["cycle_open_qty"], places=6)
         self.assertAlmostEqual(30.0, pos["remaining_margin"], places=6)
         self.assertAlmostEqual(120.0, pos["avg_entry_price"], places=6)
+
+    def test_live_profile_settings_inherit_non_secret_defaults_from_sim_profile(self):
+        db.update_copy_settings(
+            total_capital=321.0,
+            follow_ratio_pct=0.012,
+            binance_traders='{"p1": {"nickname": "Trader 1", "copy_enabled": true}}',
+        )
+
+        settings = db.get_copy_settings_profile("live")
+        self.assertAlmostEqual(321.0, settings["total_capital"], places=6)
+        self.assertAlmostEqual(0.012, settings["follow_ratio_pct"], places=6)
+        self.assertIn("p1", settings["binance_traders"])
+
+    def test_get_copy_orders_can_filter_by_profile_platforms(self):
+        self._insert_order(timestamp=1, tracking_no="sim-open", platform="bitget", exec_qty=1.0)
+        self._insert_order(timestamp=2, tracking_no="live-open", platform="live_bitget", exec_qty=2.0)
+
+        live_rows = db.get_copy_orders(limit=10, offset=0, platforms=["live_bitget"])
+        sim_rows = db.get_copy_orders(limit=10, offset=0, platforms=["bitget"])
+
+        self.assertEqual(["live-open"], [row["tracking_no"] for row in live_rows])
+        self.assertEqual(["sim-open"], [row["tracking_no"] for row in sim_rows])
 
 
 class TakeProfitDecisionTests(unittest.TestCase):
@@ -147,6 +169,24 @@ class TakeProfitDecisionTests(unittest.TestCase):
         )
         self.assertEqual("System Stop Loss", decision["action"]["label"])
         self.assertEqual("close_all", decision["action"]["kind"])
+
+
+class MakerEntryDecisionTests(unittest.TestCase):
+    def test_long_keeps_bid_when_spread_is_one_tick(self):
+        price = _pick_maker_limit_price("long", 100.0, 100.1, 100.05, 0.1, 1)
+        self.assertAlmostEqual(100.0, price, places=6)
+
+    def test_long_can_improve_bid_inside_wider_spread(self):
+        price = _pick_maker_limit_price("long", 100.0, 100.3, 100.15, 0.1, 1)
+        self.assertAlmostEqual(100.1, price, places=6)
+
+    def test_short_can_improve_ask_inside_wider_spread(self):
+        price = _pick_maker_limit_price("short", 100.0, 100.3, 100.15, 0.1, 1)
+        self.assertAlmostEqual(100.2, price, places=6)
+
+    def test_price_falls_back_to_small_discount_without_quotes(self):
+        price = _pick_maker_limit_price("long", 0.0, 0.0, 100.0, 0.0, 1)
+        self.assertAlmostEqual(99.95, price, places=6)
 
 
 if __name__ == "__main__":

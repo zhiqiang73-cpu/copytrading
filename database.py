@@ -4,6 +4,7 @@ SQLite 数据库：建表 + CRUD 封装
 """
 from __future__ import annotations
 import logging
+import json
 import os
 import sqlite3
 import threading
@@ -183,6 +184,10 @@ CREATE TABLE IF NOT EXISTS copy_settings (
     tp3_close_pct   REAL DEFAULT 0.40,
     breakeven_buffer_pct REAL DEFAULT 0.005,
     trail_callback_pct REAL DEFAULT 0.06,
+    entry_order_mode TEXT DEFAULT 'maker_limit',
+    entry_maker_levels INTEGER DEFAULT 1,
+    entry_limit_timeout_sec INTEGER DEFAULT 10,
+    entry_limit_fallback_to_market INTEGER DEFAULT 1,
     binance_total_capital REAL DEFAULT 0,
     binance_follow_ratio_pct REAL DEFAULT 0.003,
     binance_max_margin_pct REAL DEFAULT 0.20,
@@ -190,6 +195,12 @@ CREATE TABLE IF NOT EXISTS copy_settings (
     enabled_traders TEXT DEFAULT '[]',
     binance_traders TEXT DEFAULT '{}',
     engine_enabled  INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS copy_profile_settings (
+    profile         TEXT PRIMARY KEY,
+    settings_json   TEXT NOT NULL DEFAULT '{}',
+    updated_at      INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS account_daily_equity (
@@ -606,6 +617,10 @@ def _ensure_copy_settings(conn) -> None:
         ("tp3_close_pct", "REAL", str(config.DEFAULT_TP3_CLOSE_PCT)),
         ("breakeven_buffer_pct", "REAL", str(config.DEFAULT_BREAKEVEN_BUFFER_PCT)),
         ("trail_callback_pct", "REAL", str(config.DEFAULT_TRAIL_CALLBACK_PCT)),
+        ("entry_order_mode", "TEXT", f"'{config.DEFAULT_ENTRY_ORDER_MODE}'"),
+        ("entry_maker_levels", "INTEGER", str(config.DEFAULT_ENTRY_MAKER_LEVELS)),
+        ("entry_limit_timeout_sec", "INTEGER", str(config.DEFAULT_ENTRY_LIMIT_TIMEOUT_SEC)),
+        ("entry_limit_fallback_to_market", "INTEGER", "1" if config.DEFAULT_ENTRY_LIMIT_FALLBACK_TO_MARKET else "0"),
         ("binance_traders", "TEXT", "'[]'"),
         ("binance_api_key", "TEXT", "''"),
         ("binance_api_secret", "TEXT", "''"),
@@ -648,6 +663,8 @@ _COPY_SETTINGS_COLS = frozenset({
     "tp2_roi_pct", "tp2_close_pct",
     "tp3_roi_pct", "tp3_close_pct",
     "breakeven_buffer_pct", "trail_callback_pct",
+    "entry_order_mode", "entry_maker_levels",
+    "entry_limit_timeout_sec", "entry_limit_fallback_to_market",
     "enabled_traders", "binance_traders", "engine_enabled",
     "binance_api_key", "binance_api_secret",
     "binance_total_capital", "binance_follow_ratio_pct",
@@ -689,6 +706,164 @@ def set_enabled_traders(enabled_traders_json: str) -> None:
 
 def set_engine_enabled(enabled: bool) -> None:
     update_copy_settings(engine_enabled=1 if enabled else 0)
+
+
+def _normalize_copy_profile_name(profile: str | None) -> str:
+    profile_key = str(profile or "sim").strip().lower()
+    if profile_key in {"", "default", "paper", "sim", "simulation"}:
+        return "sim"
+    if profile_key in {"live", "real", "production", "prod"}:
+        return "live"
+    return profile_key
+
+
+def _ensure_copy_profile_settings(conn) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS copy_profile_settings (
+            profile         TEXT PRIMARY KEY,
+            settings_json   TEXT NOT NULL DEFAULT '{}',
+            updated_at      INTEGER NOT NULL DEFAULT 0
+        )
+        """
+    )
+
+
+def _default_copy_settings_payload(profile: str = "sim") -> dict[str, Any]:
+    profile_key = _normalize_copy_profile_name(profile)
+    payload: dict[str, Any] = {
+        "api_key": "",
+        "api_secret": "",
+        "api_passphrase": "",
+        "total_capital": 0.0,
+        "follow_ratio_pct": 0.003,
+        "max_margin_pct": 0.20,
+        "price_tolerance": 0.0002,
+        "sl_pct": 0.15,
+        "tp_pct": 0.30,
+        "daily_loss_limit_pct": config.DEFAULT_DAILY_LOSS_LIMIT_PCT,
+        "total_drawdown_limit_pct": config.DEFAULT_TOTAL_DRAWDOWN_LIMIT_PCT,
+        "take_profit_enabled": 1 if config.DEFAULT_TAKE_PROFIT_ENABLED else 0,
+        "stop_loss_pct": config.DEFAULT_STOP_LOSS_PCT,
+        "tp1_roi_pct": config.DEFAULT_TP1_ROI_PCT,
+        "tp1_close_pct": config.DEFAULT_TP1_CLOSE_PCT,
+        "tp2_roi_pct": config.DEFAULT_TP2_ROI_PCT,
+        "tp2_close_pct": config.DEFAULT_TP2_CLOSE_PCT,
+        "tp3_roi_pct": config.DEFAULT_TP3_ROI_PCT,
+        "tp3_close_pct": config.DEFAULT_TP3_CLOSE_PCT,
+        "breakeven_buffer_pct": config.DEFAULT_BREAKEVEN_BUFFER_PCT,
+        "trail_callback_pct": config.DEFAULT_TRAIL_CALLBACK_PCT,
+        "entry_order_mode": config.DEFAULT_ENTRY_ORDER_MODE,
+        "entry_maker_levels": config.DEFAULT_ENTRY_MAKER_LEVELS,
+        "entry_limit_timeout_sec": config.DEFAULT_ENTRY_LIMIT_TIMEOUT_SEC,
+        "entry_limit_fallback_to_market": 1 if config.DEFAULT_ENTRY_LIMIT_FALLBACK_TO_MARKET else 0,
+        "enabled_traders": "[]",
+        "binance_traders": "{}",
+        "engine_enabled": 0,
+        "binance_api_key": "",
+        "binance_api_secret": "",
+        "binance_total_capital": 0.0,
+        "binance_follow_ratio_pct": 0.003,
+        "binance_max_margin_pct": 0.20,
+        "binance_price_tolerance": 0.0002,
+    }
+    if profile_key == "live":
+        payload["api_key"] = os.getenv("LIVE_BITGET_API_KEY", "")
+        payload["api_secret"] = os.getenv("LIVE_BITGET_SECRET_KEY", "")
+        payload["api_passphrase"] = os.getenv("LIVE_BITGET_PASSPHRASE", "")
+        payload["binance_api_key"] = os.getenv("LIVE_BINANCE_API_KEY", "")
+        payload["binance_api_secret"] = os.getenv("LIVE_BINANCE_API_SECRET", "")
+    else:
+        payload["api_key"] = config.BITGET_API_KEY
+        payload["api_secret"] = config.BITGET_SECRET_KEY
+        payload["api_passphrase"] = config.BITGET_PASSPHRASE
+        payload["binance_api_key"] = config.BINANCE_API_KEY
+        payload["binance_api_secret"] = config.BINANCE_API_SECRET
+    return payload
+
+
+def get_copy_settings_profile(profile: str | None = "sim") -> dict:
+    profile_key = _normalize_copy_profile_name(profile)
+    if profile_key == "sim":
+        return get_copy_settings()
+
+    with get_conn() as conn:
+        _ensure_copy_profile_settings(conn)
+        row = conn.execute(
+            "SELECT settings_json FROM copy_profile_settings WHERE profile = ?",
+            (profile_key,),
+        ).fetchone()
+        conn.commit()
+
+    data = _default_copy_settings_payload(profile_key)
+    if profile_key == "live":
+        sim_data = get_copy_settings()
+        for key in _COPY_SETTINGS_COLS:
+            if key in {"api_key", "api_secret", "api_passphrase", "binance_api_key", "binance_api_secret"}:
+                continue
+            if key in sim_data:
+                data[key] = sim_data[key]
+    if row and row["settings_json"]:
+        try:
+            payload = json.loads(row["settings_json"])
+            if isinstance(payload, dict):
+                data.update(payload)
+        except Exception:
+            pass
+
+    data["api_key"] = data.get("api_key") or os.getenv("LIVE_BITGET_API_KEY", "")
+    data["api_secret"] = data.get("api_secret") or os.getenv("LIVE_BITGET_SECRET_KEY", "")
+    data["api_passphrase"] = data.get("api_passphrase") or os.getenv("LIVE_BITGET_PASSPHRASE", "")
+    data["binance_api_key"] = data.get("binance_api_key") or os.getenv("LIVE_BINANCE_API_KEY", "")
+    data["binance_api_secret"] = data.get("binance_api_secret") or os.getenv("LIVE_BINANCE_API_SECRET", "")
+    return data
+
+
+def update_copy_settings_profile(profile: str | None = "sim", **kwargs: Any) -> None:
+    profile_key = _normalize_copy_profile_name(profile)
+    if profile_key == "sim":
+        update_copy_settings(**kwargs)
+        return
+    if not kwargs:
+        return
+
+    invalid = set(kwargs.keys()) - _COPY_SETTINGS_COLS
+    if invalid:
+        raise ValueError(f"update_copy_settings_profile: ???? {invalid}")
+
+    with _db_write_lock:
+        with get_conn() as conn:
+            _ensure_copy_profile_settings(conn)
+            row = conn.execute(
+                "SELECT settings_json FROM copy_profile_settings WHERE profile = ?",
+                (profile_key,),
+            ).fetchone()
+            current: dict[str, Any] = {}
+            if row and row["settings_json"]:
+                try:
+                    payload = json.loads(row["settings_json"])
+                    if isinstance(payload, dict):
+                        current = payload
+                except Exception:
+                    current = {}
+            current.update(kwargs)
+            clean_payload = {k: current.get(k) for k in _COPY_SETTINGS_COLS if k in current}
+            now = int(time.time())
+            conn.execute(
+                """
+                INSERT INTO copy_profile_settings (profile, settings_json, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(profile) DO UPDATE SET
+                    settings_json = excluded.settings_json,
+                    updated_at = excluded.updated_at
+                """,
+                (profile_key, json.dumps(clean_payload, ensure_ascii=False), now),
+            )
+            conn.commit()
+
+
+def set_engine_enabled_profile(profile: str | None, enabled: bool) -> None:
+    update_copy_settings_profile(profile, engine_enabled=1 if enabled else 0)
 
 
 # ── account_daily_equity（日收益基准） ─────────────────────────────────────────
@@ -1161,16 +1336,19 @@ def update_copy_order(
         conn.commit()
 
 
-def get_copy_orders(limit: int = 50, offset: int = 0) -> list[dict]:
+def get_copy_orders(limit: int = 50, offset: int = 0, platforms: list[str] | tuple[str, ...] | None = None) -> list[dict]:
+    sql = "SELECT * FROM copy_orders"
+    params: list[Any] = []
+    if platforms:
+        platform_list = [str(p).strip().lower() for p in platforms if str(p).strip()]
+        if platform_list:
+            placeholders = ", ".join(["?"] * len(platform_list))
+            sql += f" WHERE lower(platform) IN ({placeholders})"
+            params.extend(platform_list)
+    sql += " ORDER BY timestamp DESC LIMIT ? OFFSET ?"
+    params.extend([int(limit), int(offset)])
     with get_conn() as conn:
-        rows = conn.execute(
-            """
-            SELECT * FROM copy_orders
-            ORDER BY timestamp DESC
-            LIMIT ? OFFSET ?
-            """,
-            (int(limit), int(offset)),
-        ).fetchall()
+        rows = conn.execute(sql, params).fetchall()
     return [dict(r) for r in rows]
 
 

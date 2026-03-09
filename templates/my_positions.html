@@ -6,13 +6,13 @@
 
     <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-2">
         <div>
-            <h1 class="text-3xl font-extrabold text-white tracking-tight">跟单管理中心</h1>
+            <h1 class="text-3xl font-extrabold text-white tracking-tight">{{ page_title_text|default("跟单管理中心") }}</h1>
             <p class="text-gray-400 mt-2 text-sm flex items-center">
                 <svg class="w-4 h-4 mr-1.5 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                         d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                 </svg>
-                配置交易 API，选择跟单对象，实时监控并自动下单。
+                {{ page_description_text|default("配置交易 API，选择跟单对象，实时监控并自动下单。") }}
             </p>
         </div>
         <!-- 引擎状态指示（右上角徽章） -->
@@ -265,66 +265,104 @@
                     </div>
                 </div>
             </div>
+            <div class="border-t border-dark-border/40 pt-4 mt-2">
+                <div class="flex items-center space-x-2 mb-3">
+                    <span class="text-xs font-bold text-cyan-400 uppercase tracking-widest">进场执行</span>
+                    <span class="text-xs text-gray-600">支持 Maker 限价优先与回退策略</span>
+                </div>
+                <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+                    <div>
+                        <label class="block text-sm text-gray-300 mb-1.5">下单模式</label>
+                        <select id="entry_order_mode" onchange="setEntryExecutionState()"
+                            class="w-full bg-dark-bg border border-cyan-500/20 rounded-lg px-4 py-2.5 text-white focus:outline-none focus:border-cyan-400 text-sm">
+                            <option value="maker_limit">Maker 限价</option>
+                            <option value="market">市价单</option>
+                        </select>
+                        <p class="text-xs text-gray-500 mt-1">建议优先 Maker，降低滑点与手续费</p>
+                    </div>
+                    <div>
+                        <label class="block text-sm text-gray-300 mb-1.5">挂单层级（tick）</label>
+                        <input id="entry_maker_levels" data-entry-field="1" type="number" min="0" max="5" step="1"
+                            class="w-full bg-dark-bg border border-cyan-500/20 rounded-lg px-4 py-2.5 text-white focus:outline-none focus:border-cyan-400 text-sm"
+                            placeholder="1">
+                        <p class="text-xs text-gray-500 mt-1">1 表示在盘口价基础上偏移 1 个最小跳动</p>
+                    </div>
+                    <div>
+                        <label class="block text-sm text-gray-300 mb-1.5">限价等待秒数</label>
+                        <input id="entry_limit_timeout_sec" data-entry-field="1" type="number" min="1" max="60" step="1"
+                            class="w-full bg-dark-bg border border-cyan-500/20 rounded-lg px-4 py-2.5 text-white focus:outline-none focus:border-cyan-400 text-sm"
+                            placeholder="10">
+                        <p class="text-xs text-gray-500 mt-1">超时后可按配置自动回退到市价</p>
+                    </div>
+                    <div class="flex items-end">
+                        <label class="inline-flex items-center gap-3 rounded-xl border border-cyan-500/20 bg-cyan-500/5 px-4 py-3 text-sm text-white w-full">
+                            <input id="entry_limit_fallback_to_market" data-entry-field="1" type="checkbox" class="h-4 w-4 rounded border-cyan-400/50 bg-dark-bg text-cyan-500 focus:ring-cyan-500">
+                            <span>超时自动回退市价</span>
+                        </label>
+                    </div>
+                </div>
+            </div>
+
 
             <div class="border-t border-dark-border/40 pt-4 mt-2">
                 <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-4">
                     <div>
                         <div class="flex items-center space-x-2 mb-1">
-                            <span class="text-xs font-bold text-emerald-400 uppercase tracking-widest">????</span>
-                            <span class="text-xs text-gray-600">??????????? TP1 / TP2 ?????</span>
+                            <span class="text-xs font-bold text-emerald-400 uppercase tracking-widest">止盈止损</span>
+                            <span class="text-xs text-gray-600">启用后按分批止盈与追踪止盈执行</span>
                         </div>
-                        <p class="text-xs text-gray-500">TP1 ?? 30%?TP2 ?? 30%?TP3 ????? TP2 ??????????</p>
+                        <p class="text-xs text-gray-500">TP1 平仓 30%，TP2 平仓 30%，TP3 平仓 40%，并在 TP2 后启用保本保护。</p>
                     </div>
                     <label class="inline-flex items-center gap-3 rounded-xl border border-emerald-500/20 bg-emerald-500/5 px-4 py-2 text-sm text-white">
                         <input id="take_profit_enabled" type="checkbox" onchange="setTakeProfitEnabledState()" class="h-4 w-4 rounded border-emerald-400/50 bg-dark-bg text-emerald-500 focus:ring-emerald-500">
-                        <span>????????</span>
+                        <span>启用止盈止损</span>
                     </label>
                 </div>
                 <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
                     <div>
-                        <label class="block text-sm text-gray-300 mb-1.5">??? ROI?%?</label>
+                        <label class="block text-sm text-gray-300 mb-1.5">止损 ROI（%）</label>
                         <input id="stop_loss_pct" data-tp-field="1" type="number" min="0" step="0.1"
                             class="w-full bg-dark-bg border border-emerald-500/20 rounded-lg px-4 py-2.5 text-white focus:outline-none focus:border-emerald-400 text-sm"
                             placeholder="6">
                     </div>
                     <div>
-                        <label class="block text-sm text-gray-300 mb-1.5">TP1 ?? ROI?%?</label>
+                        <label class="block text-sm text-gray-300 mb-1.5">TP1 止盈 ROI（%）</label>
                         <input id="tp1_roi_pct" data-tp-field="1" type="number" min="0" step="0.1"
                             class="w-full bg-dark-bg border border-emerald-500/20 rounded-lg px-4 py-2.5 text-white focus:outline-none focus:border-emerald-400 text-sm"
                             placeholder="8">
                     </div>
                     <div>
-                        <label class="block text-sm text-gray-300 mb-1.5">TP1 ?????%?</label>
+                        <label class="block text-sm text-gray-300 mb-1.5">TP1 平仓比例（%）</label>
                         <input id="tp1_close_pct" data-tp-field="1" type="number" min="0" max="100" step="0.1"
                             class="w-full bg-dark-bg border border-emerald-500/20 rounded-lg px-4 py-2.5 text-white focus:outline-none focus:border-emerald-400 text-sm"
                             placeholder="30">
                     </div>
                     <div>
-                        <label class="block text-sm text-gray-300 mb-1.5">?????%?</label>
+                        <label class="block text-sm text-gray-300 mb-1.5">保本缓冲（%）</label>
                         <input id="breakeven_buffer_pct" data-tp-field="1" type="number" min="0" step="0.1"
                             class="w-full bg-dark-bg border border-emerald-500/20 rounded-lg px-4 py-2.5 text-white focus:outline-none focus:border-emerald-400 text-sm"
                             placeholder="0.5">
                     </div>
                     <div>
-                        <label class="block text-sm text-gray-300 mb-1.5">TP2 ?? ROI?%?</label>
+                        <label class="block text-sm text-gray-300 mb-1.5">TP2 止盈 ROI（%）</label>
                         <input id="tp2_roi_pct" data-tp-field="1" type="number" min="0" step="0.1"
                             class="w-full bg-dark-bg border border-emerald-500/20 rounded-lg px-4 py-2.5 text-white focus:outline-none focus:border-emerald-400 text-sm"
                             placeholder="15">
                     </div>
                     <div>
-                        <label class="block text-sm text-gray-300 mb-1.5">TP2 ?????%?</label>
+                        <label class="block text-sm text-gray-300 mb-1.5">TP2 平仓比例（%）</label>
                         <input id="tp2_close_pct" data-tp-field="1" type="number" min="0" max="100" step="0.1"
                             class="w-full bg-dark-bg border border-emerald-500/20 rounded-lg px-4 py-2.5 text-white focus:outline-none focus:border-emerald-400 text-sm"
                             placeholder="30">
                     </div>
                     <div>
-                        <label class="block text-sm text-gray-300 mb-1.5">TP3 ?? ROI?%?</label>
+                        <label class="block text-sm text-gray-300 mb-1.5">TP3 止盈 ROI（%）</label>
                         <input id="tp3_roi_pct" data-tp-field="1" type="number" min="0" step="0.1"
                             class="w-full bg-dark-bg border border-emerald-500/20 rounded-lg px-4 py-2.5 text-white focus:outline-none focus:border-emerald-400 text-sm"
                             placeholder="25">
                     </div>
                     <div>
-                        <label class="block text-sm text-gray-300 mb-1.5">?????%?</label>
+                        <label class="block text-sm text-gray-300 mb-1.5">追踪回撤（%）</label>
                         <input id="trail_callback_pct" data-tp-field="1" type="number" min="0" step="0.1"
                             class="w-full bg-dark-bg border border-emerald-500/20 rounded-lg px-4 py-2.5 text-white focus:outline-none focus:border-emerald-400 text-sm"
                             placeholder="6">
@@ -332,14 +370,14 @@
                 </div>
                 <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mt-4">
                     <div>
-                        <label class="block text-sm text-gray-300 mb-1.5">TP3 ?????%?</label>
+                        <label class="block text-sm text-gray-300 mb-1.5">TP3 平仓比例（%）</label>
                         <input id="tp3_close_pct" data-tp-field="1" type="number" min="0" max="100" step="0.1"
                             class="w-full bg-dark-bg border border-emerald-500/20 rounded-lg px-4 py-2.5 text-white focus:outline-none focus:border-emerald-400 text-sm"
                             placeholder="40">
                     </div>
                 </div>
                 <div class="mt-3 rounded-lg border border-emerald-500/10 bg-emerald-500/5 px-4 py-3 text-xs text-gray-400">
-                    ???????????????????????????????????????????????????????????????????
+                    参数按百分比填写，例如 6 表示 6%。建议先小资金验证后再放大仓位。
                 </div>
             </div>
 
@@ -579,7 +617,7 @@
             <div class="grid grid-cols-1 xl:grid-cols-2 gap-4">
                 <div class="rounded-lg border border-blue-500/20 overflow-hidden">
                     <div class="flex items-center justify-between px-4 py-3 bg-blue-500/5 border-b border-blue-500/10">
-                        <div class="text-sm font-semibold text-blue-300">Bitget 执行持仓</div>
+                        <div class="text-sm font-semibold text-blue-300">{{ bitget_positions_title|default("Bitget 持仓") }}</div>
                         <div id="bitget-positions-count" class="text-xs text-blue-200/70">0 笔</div>
                     </div>
                     <div class="overflow-x-auto">
@@ -599,11 +637,11 @@
                             <tbody id="bitget-positions-body" class="divide-y divide-dark-border/50"></tbody>
                         </table>
                     </div>
-                    <p id="bitget-positions-empty" class="text-xs text-gray-500 text-center py-4 hidden">暂无 Bitget 持仓</p>
+                    <p id="bitget-positions-empty" class="text-xs text-gray-500 text-center py-4 hidden">{{ bitget_empty_text|default("暂无 Bitget 持仓") }}</p>
                 </div>
                 <div class="rounded-lg border border-yellow-500/20 overflow-hidden">
                     <div class="flex items-center justify-between px-4 py-3 bg-yellow-500/5 border-b border-yellow-500/10">
-                        <div class="text-sm font-semibold text-yellow-300">Binance 模拟盘持仓</div>
+                        <div class="text-sm font-semibold text-yellow-300">{{ binance_positions_title|default("Binance 持仓") }}</div>
                         <div id="binance-positions-count" class="text-xs text-yellow-200/70">0 笔</div>
                     </div>
                     <div class="overflow-x-auto">
@@ -623,7 +661,7 @@
                             <tbody id="binance-positions-body" class="divide-y divide-dark-border/50"></tbody>
                         </table>
                     </div>
-                    <p id="binance-positions-empty" class="text-xs text-gray-500 text-center py-4 hidden">暂无 Binance 模拟盘持仓</p>
+                    <p id="binance-positions-empty" class="text-xs text-gray-500 text-center py-4 hidden">{{ binance_empty_text|default("暂无 Binance 持仓") }}</p>
                 </div>
             </div>
         </div>
@@ -681,6 +719,15 @@
 
     const state = { settings: null, traders: [] };
     const MASKED_SECRET = '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022';
+    const API_PREFIX = {{ page_api_prefix|default('/api')|tojson }};
+    const BITGET_EMPTY_TEXT = {{ bitget_empty_text|default('暂无 Bitget 持仓')|tojson }};
+    const BINANCE_EMPTY_TEXT = {{ binance_empty_text|default('暂无 Binance 持仓')|tojson }};
+
+    function apiUrl(path) {
+        const prefix = (API_PREFIX || '/api').replace(/\/$/, '');
+        const suffix = String(path || '').startsWith('/') ? path : '/' + String(path || '');
+        return prefix + suffix;
+    }
 
     function setMsg(text, type) {
         const box = document.getElementById('page-msg');
@@ -770,6 +817,26 @@
             breakeven_buffer_pct: parseNumberOrFallback('breakeven_buffer_pct', pctFallback(current.breakeven_buffer_pct, 0.005)) / 100,
             trail_callback_pct: parseNumberOrFallback('trail_callback_pct', pctFallback(current.trail_callback_pct, 0.06)) / 100,
         };
+    }
+
+    function buildEntryExecutionPayload() {
+        const current = state.settings || {};
+        const mode = document.getElementById('entry_order_mode')?.value || current.entry_order_mode || 'maker_limit';
+        return {
+            entry_order_mode: mode,
+            entry_maker_levels: Math.max(0, Math.round(parseNumberOrFallback('entry_maker_levels', current.entry_maker_levels ?? 1))),
+            entry_limit_timeout_sec: Math.max(1, Math.round(parseNumberOrFallback('entry_limit_timeout_sec', current.entry_limit_timeout_sec ?? 10))),
+            entry_limit_fallback_to_market: !!document.getElementById('entry_limit_fallback_to_market')?.checked,
+        };
+    }
+
+    function setEntryExecutionState() {
+        const mode = document.getElementById('entry_order_mode')?.value || 'maker_limit';
+        const enabled = mode === 'maker_limit';
+        document.querySelectorAll('[data-entry-field="1"]').forEach((el) => {
+            el.disabled = !enabled;
+            el.classList.toggle('opacity-50', !enabled);
+        });
     }
 
     function setTakeProfitEnabledState() {
@@ -934,7 +1001,7 @@
                 btn.disabled = true;
                 btn.textContent = '...';
 
-                const res = await apiPost('/api/toggle_copy', { uid, source: 'bitget', enabled: false });
+                const res = await apiPost(apiUrl('/toggle_copy'), { uid, source: 'bitget', enabled: false });
                 if (res.ok) {
                     setMsg(`已停止跟单 ${name}`, 'success');
                     await loadSettings();
@@ -948,7 +1015,7 @@
     }
 
     async function loadSettings() {
-        const res = await fetch('/api/copy/settings');
+        const res = await fetch(apiUrl('/copy/settings'));
         const data = await res.json();
         state.settings = data;
         state.traders = data.traders || [];
@@ -972,6 +1039,12 @@
         document.getElementById('binance_max_margin_pct_label').textContent = bnPctVal + '%';
         document.getElementById('binance_price_tolerance').value = ((data.binance_price_tolerance || 0.0002) * 100).toFixed(4);
 
+        document.getElementById('entry_order_mode').value = data.entry_order_mode || 'maker_limit';
+        document.getElementById('entry_maker_levels').value = data.entry_maker_levels ?? 1;
+        document.getElementById('entry_limit_timeout_sec').value = data.entry_limit_timeout_sec ?? 10;
+        document.getElementById('entry_limit_fallback_to_market').checked = !!data.entry_limit_fallback_to_market;
+        setEntryExecutionState();
+
         document.getElementById('take_profit_enabled').checked = !!data.take_profit_enabled;
         document.getElementById('stop_loss_pct').value = ((data.stop_loss_pct || 0.06) * 100).toFixed(2);
         document.getElementById('tp1_roi_pct').value = ((data.tp1_roi_pct || 0.08) * 100).toFixed(2);
@@ -992,7 +1065,7 @@
         if (typeof rawBn === 'object' && !Array.isArray(rawBn)) {
             bnTraders = Object.entries(rawBn).map(([pid, info]) => ({
                 pid,
-                name: info.nickname || `???_${pid.substring(0, 8)}`,
+                name: info.nickname || `交易员_${pid.substring(0, 8)}`,
                 copy_enabled: info.copy_enabled === true,
                 copier_pnl: info.copier_pnl || 0,
                 aum: info.aum || 0,
@@ -1042,10 +1115,11 @@
             enabled_traders: enabled,
             binance_traders: serializeBinanceTraders(),
             ...buildTakeProfitPayload(),
+            ...buildEntryExecutionPayload(),
         };
-        const res = await apiPost('/api/copy/settings', payload);
+        const res = await apiPost(apiUrl('/copy/settings'), payload);
         if (res.error) { setMsg(res.error, 'error'); return; }
-        setMsg('?????', 'success');
+        setMsg('保存成功', 'success');
         await loadSettings();
     }
 
@@ -1054,7 +1128,7 @@
         const apiSecret = document.getElementById('api_secret').value.trim();
         const apiPass = document.getElementById('api_passphrase').value.trim();
         const status = document.getElementById('api-status');
-        status.textContent = '???...';
+        status.textContent = '处理中...';
         status.className = 'text-xs text-gray-400';
         const fallbackTotal = (state.settings && state.settings.total_capital) || 0;
         const fallbackFollowRatio = ((state.settings && state.settings.follow_ratio_pct) || 0.003) * 100;
@@ -1070,14 +1144,15 @@
             max_margin_pct: parseNumberOrFallback('max_margin_pct', fallbackMarginPct) / 100,
             price_tolerance: parseNumberOrFallback('price_tolerance', fallbackTolerance) / 100,
             ...buildTakeProfitPayload(),
+            ...buildEntryExecutionPayload(),
         };
-        const res = await apiPost('/api/copy/settings', payload);
+        const res = await apiPost(apiUrl('/copy/settings'), payload);
         if (res.error) {
-            status.textContent = '??: ' + res.error;
+            status.textContent = '错误: ' + res.error;
             status.className = 'text-xs text-red-400';
             return;
         }
-        status.textContent = 'Bitget ?????';
+        status.textContent = 'Bitget 已保存';
         status.className = 'text-xs text-green-400';
         await loadSettings();
     }
@@ -1086,7 +1161,7 @@
         const binanceApiKey = document.getElementById('binance_api_key').value.trim();
         const binanceApiSecret = document.getElementById('binance_api_secret').value.trim();
         const status = document.getElementById('binance-api-status');
-        status.textContent = '???...';
+        status.textContent = '处理中...';
         status.className = 'text-xs text-gray-400';
         const fallbackBnTotal = (state.settings && state.settings.binance_total_capital) || 0;
         const fallbackBnFollowRatio = ((state.settings && state.settings.binance_follow_ratio_pct) || 0.003) * 100;
@@ -1101,14 +1176,15 @@
             binance_max_margin_pct: parseNumberOrFallback('binance_max_margin_pct', fallbackBnMarginPct) / 100,
             binance_price_tolerance: parseNumberOrFallback('binance_price_tolerance', fallbackBnTolerance) / 100,
             ...buildTakeProfitPayload(),
+            ...buildEntryExecutionPayload(),
         };
-        const res = await apiPost('/api/copy/settings', payload);
+        const res = await apiPost(apiUrl('/copy/settings'), payload);
         if (res.error) {
-            status.textContent = '??: ' + res.error;
+            status.textContent = '错误: ' + res.error;
             status.className = 'text-xs text-red-400';
             return;
         }
-        status.textContent = 'Binance ?????';
+        status.textContent = 'Binance 已保存';
         status.className = 'text-xs text-green-400';
         await loadSettings();
         loadBinanceBalance();
@@ -1119,19 +1195,19 @@
         const apiSecret = document.getElementById('api_secret').value.trim();
         const apiPass = document.getElementById('api_passphrase').value.trim();
         const status = document.getElementById('api-status');
-        status.textContent = '???...';
+        status.textContent = '处理中...';
         status.className = 'text-xs text-gray-400';
-        const res = await apiPost('/api/copy/test_api', {
+        const res = await apiPost(apiUrl('/copy/test_api'), {
             api_key: apiKey,
             api_secret: apiSecret === MASKED_SECRET ? '' : apiSecret,
             api_passphrase: apiPass === MASKED_SECRET ? '' : apiPass,
         });
         if (res.error) {
-            status.textContent = '??: ' + res.error;
+            status.textContent = '错误: ' + res.error;
             status.className = 'text-xs text-red-400';
             return;
         }
-        status.textContent = res.msg || '????';
+        status.textContent = res.msg || '测试通过';
         status.className = 'text-xs text-green-400';
     }
 
@@ -1139,25 +1215,25 @@
         const binanceApiKey = document.getElementById('binance_api_key').value.trim();
         const binanceApiSecret = document.getElementById('binance_api_secret').value.trim();
         const status = document.getElementById('binance-api-status');
-        status.textContent = '???...';
+        status.textContent = '处理中...';
         status.className = 'text-xs text-yellow-400';
-        const res = await apiPost('/api/copy/test_api', {
+        const res = await apiPost(apiUrl('/copy/test_api'), {
             source: 'binance',
             binance_api_key: binanceApiKey,
             binance_api_secret: binanceApiSecret === MASKED_SECRET ? '' : binanceApiSecret,
         });
         if (res.error) {
-            status.textContent = '??: ' + res.error;
+            status.textContent = '错误: ' + res.error;
             status.className = 'text-xs text-red-400';
             return;
         }
-        status.textContent = res.msg || '????';
+        status.textContent = res.msg || '测试通过';
         status.className = 'text-xs text-green-400';
     }
 
     async function loadBinanceBalance() {
         try {
-            const res = await fetch('/api/binance/balance', { cache: 'no-store' });
+            const res = await fetch(apiUrl('/binance/balance'), { cache: 'no-store' });
             const data = await res.json();
             if (data.error) {
                 document.getElementById('bn-wallet-subline').textContent = '币安 API 未配置或查询失败';
@@ -1275,25 +1351,26 @@
                     enabled_traders: enabled,
                     binance_traders: serializeBinanceTraders(),
                     ...buildTakeProfitPayload(),
+            ...buildEntryExecutionPayload(),
                 };
-                const saveRes = await apiPost('/api/copy/settings', savePayload);
-                if (saveRes.error) { setMsg('???????' + saveRes.error, 'error'); return; }
+                const saveRes = await apiPost(apiUrl('/copy/settings'), savePayload);
+                if (saveRes.error) { setMsg('启动前保存失败：' + saveRes.error, 'error'); return; }
             }
 
-            const res = await apiPost(start ? '/api/copy/start' : '/api/copy/stop', {});
+            const res = await apiPost(start ? apiUrl('/copy/start') : apiUrl('/copy/stop'), {});
             if (res.error) { setMsg(res.error, 'error'); return; }
-            setMsg(res.msg || '????', 'success');
+            setMsg(res.msg || '操作成功', 'success');
             updateEngineBadge(start);
             if (start) {
                 const enabledCount = getEnabledBitgetUids().length + getEnabledBinancePids().length;
                 document.getElementById('engine-start-time').textContent =
-                    '??? ' + new Date().toLocaleTimeString('zh-CN') +
-                    '??? ' + enabledCount + ' ?????? 2.5 ?????????';
+                    '启动时间 ' + new Date().toLocaleTimeString('zh-CN') +
+                    '，已启用 ' + enabledCount + ' 个交易员，轮询间隔 2.5 秒。';
                 setTimeout(refreshPositions, 3000);
             }
         } catch (e) {
-            console.error('??????:', e);
-            setMsg('???????' + (e && e.message ? e.message : '????'), 'error');
+            console.error('切换引擎失败:', e);
+            setMsg('操作失败：' + (e && e.message ? e.message : '未知错误'), 'error');
         }
     }
 
@@ -1320,6 +1397,16 @@
         return `${(p.platform || 'unknown').toLowerCase()}_${(p.symbol || '').toUpperCase()}_${(p.direction || '').toLowerCase()}`;
     }
 
+    function formatCompactPrice(value) {
+        const num = Number(value);
+        if (!Number.isFinite(num)) return value || '-';
+        const absNum = Math.abs(num);
+        if (absNum >= 1000) return num.toFixed(2);
+        if (absNum >= 1) return num.toFixed(4).replace(/\.0+$/, '').replace(/(\.\d*?)0+$/, '$1');
+        if (absNum >= 0.01) return num.toFixed(6).replace(/\.0+$/, '').replace(/(\.\d*?)0+$/, '$1');
+        return num.toFixed(8).replace(/\.0+$/, '').replace(/(\.\d*?)0+$/, '$1');
+    }
+
     function _renderPositionCells(tr, p) {
         const pnlNum = parseFloat(p.pnl);
         const pnl = Number.isFinite(pnlNum) ? pnlNum : 0;
@@ -1332,7 +1419,7 @@
         const marginNum = parseFloat(p.margin);
         const marginText = Number.isFinite(marginNum) ? marginNum.toFixed(2) : (p.margin || '-');
         const openPriceNum = parseFloat(p.open_price);
-        const openPriceText = Number.isFinite(openPriceNum) ? openPriceNum.toString() : (p.open_price || '-');
+        const openPriceText = Number.isFinite(openPriceNum) ? formatCompactPrice(openPriceNum) : (p.open_price || '-');
         const direction = p.direction === 'long' ? 'long' : (p.direction === 'short' ? 'short' : '-');
         const directionBadge = direction === 'long'
             ? '<span class="px-2 py-0.5 rounded text-xs font-bold bg-green-500/10 text-green-400">多▲</span>'
@@ -1418,13 +1505,13 @@
 
         let data = {};
         try {
-            const res = await fetch('/api/copy/positions', { cache: 'no-store' });
+            const res = await fetch(apiUrl('/copy/positions'), { cache: 'no-store' });
             data = await res.json();
         } catch (err) {
             renderAccountOverview(null, '账户总览读取失败，请稍后重试');
             if (!_positionsLoadedOnce) {
-                _renderPositionGroup('bitget-positions-body', 'bitget-positions-empty', 'bitget-positions-count', [], '读取持仓失败，请稍后重试', '暂无 Bitget 持仓');
-                _renderPositionGroup('binance-positions-body', 'binance-positions-empty', 'binance-positions-count', [], '读取持仓失败，请稍后重试', '暂无 Binance 模拟盘持仓');
+                _renderPositionGroup('bitget-positions-body', 'bitget-positions-empty', 'bitget-positions-count', [], '读取持仓失败，请稍后重试', BITGET_EMPTY_TEXT);
+                _renderPositionGroup('binance-positions-body', 'binance-positions-empty', 'binance-positions-count', [], '读取持仓失败，请稍后重试', BINANCE_EMPTY_TEXT);
             }
             return;
         }
@@ -1434,22 +1521,8 @@
             data.bitget_error ? '账户总览暂不可用' : ''
         );
 
-        _renderPositionGroup(
-            'bitget-positions-body',
-            'bitget-positions-empty',
-            'bitget-positions-count',
-            data.bitget_items || [],
-            data.bitget_error || '',
-            '暂无 Bitget 持仓'
-        );
-        _renderPositionGroup(
-            'binance-positions-body',
-            'binance-positions-empty',
-            'binance-positions-count',
-            data.binance_items || [],
-            data.binance_error || '',
-            '暂无 Binance 模拟盘持仓'
-        );
+        _renderPositionGroup('bitget-positions-body', 'bitget-positions-empty', 'bitget-positions-count', data.bitget_items || [], data.bitget_error || '', BITGET_EMPTY_TEXT);
+        _renderPositionGroup('binance-positions-body', 'binance-positions-empty', 'binance-positions-count', data.binance_items || [], data.binance_error || '', BINANCE_EMPTY_TEXT);
 
         _positionsLoadedOnce = true;
     }
@@ -1458,7 +1531,7 @@
         const body = document.getElementById('orders-body');
         const empty = document.getElementById('orders-empty');
         body.innerHTML = '<tr><td colspan="13" class="px-4 py-4 text-center text-gray-600 text-xs">加载中…</td></tr>';
-        const res = await fetch('/api/copy/orders?page=1&page_size=30');
+        const res = await fetch(apiUrl('/copy/orders?page=1&page_size=30'));
         const data = await res.json();
         body.innerHTML = '';
         const items = data.items || [];
@@ -1505,9 +1578,9 @@
     // 轮询引擎状态（每 5s）
     async function pollEngineStatus() {
         try {
-            const res = await fetch('/api/status');
+            const res = await fetch(apiUrl('/status'));
             const data = await res.json();
-            updateEngineBadge(data.copy_engine_running);
+            updateEngineBadge(data.current_copy_engine_running ?? data.copy_engine_running);
         } catch (e) { }
     }
 
@@ -1522,3 +1595,4 @@
     setInterval(loadBinanceBalance, 30000);
 </script>
 {% endblock %}
+

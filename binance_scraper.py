@@ -24,6 +24,10 @@ logger = logging.getLogger(__name__)
 _BN_BASE = "https://www.binance.com"
 _BN_FAPI_BASE = config.BINANCE_BASE_URL
 
+
+def _resolve_fapi_base(base_url: str | None = None) -> str:
+    return str(base_url or config.BINANCE_BASE_URL or _BN_FAPI_BASE).strip().rstrip("/")
+
 _BN_TIME_OFFSET_MS = 0
 _BN_TIME_OFFSET_AT = 0.0
 _BN_TIME_OFFSET_TTL_SEC = 60
@@ -294,12 +298,12 @@ def _safe_float(val) -> float:
 
 # ── 币安 FAPI 签名接口（需要 API Key + Secret） ─────────────────────────────
 
-def _bn_refresh_server_time_offset(force: bool = False) -> None:
+def _bn_refresh_server_time_offset(force: bool = False, base_url: str | None = None) -> None:
     global _BN_TIME_OFFSET_MS, _BN_TIME_OFFSET_AT
     now = time.time()
     if (not force) and _BN_TIME_OFFSET_AT and (now - _BN_TIME_OFFSET_AT) < _BN_TIME_OFFSET_TTL_SEC:
         return
-    resp = requests.get(f"{_BN_FAPI_BASE}/fapi/v1/time", timeout=5)
+    resp = requests.get(f"{_resolve_fapi_base(base_url)}/fapi/v1/time", timeout=5)
     resp.raise_for_status()
     payload = resp.json()
     server_ms = int(payload["serverTime"])
@@ -308,15 +312,15 @@ def _bn_refresh_server_time_offset(force: bool = False) -> None:
     _BN_TIME_OFFSET_AT = time.time()
 
 
-def _bn_signed_timestamp_ms() -> int:
+def _bn_signed_timestamp_ms(base_url: str | None = None) -> int:
     try:
-        _bn_refresh_server_time_offset(force=False)
+        _bn_refresh_server_time_offset(force=False, base_url=base_url)
     except Exception as exc:
         logger.debug("sync binance time failed in scraper: %s", exc)
     return int(time.time() * 1000) + int(_BN_TIME_OFFSET_MS) - 500
 
 
-def get_binance_futures_balance(api_key: str, api_secret: str) -> dict:
+def get_binance_futures_balance(api_key: str, api_secret: str, base_url: str | None = None) -> dict:
     """
     调用币安合约 FAPI 签名接口获取 USDT 余额。
     返回: {"balance": float, "available": float, "unrealized_pnl": float}
@@ -325,9 +329,9 @@ def get_binance_futures_balance(api_key: str, api_secret: str) -> dict:
     import hashlib
     import urllib.parse
 
-    base_url = _BN_FAPI_BASE
+    base_url = _resolve_fapi_base(base_url)
     endpoint = "/fapi/v2/balance"
-    timestamp = _bn_signed_timestamp_ms()
+    timestamp = _bn_signed_timestamp_ms(base_url=base_url)
 
     params = {
         "timestamp": timestamp,
@@ -359,8 +363,8 @@ def get_binance_futures_balance(api_key: str, api_secret: str) -> dict:
             except Exception:
                 body = {}
             if body.get("code") == -1021:
-                _bn_refresh_server_time_offset(force=True)
-                params["timestamp"] = _bn_signed_timestamp_ms()
+                _bn_refresh_server_time_offset(force=True, base_url=base_url)
+                params["timestamp"] = _bn_signed_timestamp_ms(base_url=base_url)
                 query_string = urllib.parse.urlencode(params)
                 signature = hmac.new(
                     api_secret.encode("utf-8"),
@@ -406,7 +410,7 @@ def get_binance_futures_balance(api_key: str, api_secret: str) -> dict:
         raise RuntimeError(f"币安 API 未知错误: {str(e)[:200]}") from e
 
 
-def get_binance_futures_income_today(api_key: str, api_secret: str) -> float:
+def get_binance_futures_income_today(api_key: str, api_secret: str, base_url: str | None = None) -> float:
     """
     查询币安合约账户今日已实现收益（REALIZED_PNL + COMMISSION + FUNDING_FEE）。
     """
@@ -415,14 +419,14 @@ def get_binance_futures_income_today(api_key: str, api_secret: str) -> float:
     import urllib.parse
     import datetime
 
-    base_url = _BN_FAPI_BASE
+    base_url = _resolve_fapi_base(base_url)
     endpoint = "/fapi/v1/income"
 
     # 今日零点（UTC+8）
     now = datetime.datetime.now()
     today_start = datetime.datetime(now.year, now.month, now.day)
     start_ms = int(today_start.timestamp() * 1000)
-    timestamp = _bn_signed_timestamp_ms()
+    timestamp = _bn_signed_timestamp_ms(base_url=base_url)
 
     params = {
         "timestamp": timestamp,
@@ -454,8 +458,8 @@ def get_binance_futures_income_today(api_key: str, api_secret: str) -> float:
             except Exception:
                 body = {}
             if body.get("code") == -1021:
-                _bn_refresh_server_time_offset(force=True)
-                params["timestamp"] = _bn_signed_timestamp_ms()
+                _bn_refresh_server_time_offset(force=True, base_url=base_url)
+                params["timestamp"] = _bn_signed_timestamp_ms(base_url=base_url)
                 query_string = urllib.parse.urlencode(params)
                 signature = hmac.new(
                     api_secret.encode("utf-8"),

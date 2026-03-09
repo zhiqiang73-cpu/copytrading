@@ -10,7 +10,9 @@ import hmac
 import json
 import logging
 import time
+import threading
 import urllib.parse
+from contextlib import contextmanager
 from decimal import Decimal, ROUND_CEILING, ROUND_DOWN
 from typing import Any
 
@@ -20,6 +22,34 @@ import config
 
 logger = logging.getLogger(__name__)
 _SYMBOL_RULES: dict[str, dict] = {}
+_RUNTIME = threading.local()
+_RUNTIME_SENTINEL = object()
+
+
+def _resolve_simulated() -> bool:
+    runtime_value = getattr(_RUNTIME, "simulated", _RUNTIME_SENTINEL)
+    if runtime_value is _RUNTIME_SENTINEL:
+        return bool(config.SIMULATED)
+    return bool(runtime_value)
+
+
+@contextmanager
+def use_runtime(simulated: bool | None = None):
+    previous = getattr(_RUNTIME, "simulated", _RUNTIME_SENTINEL)
+    if simulated is not None:
+        _RUNTIME.simulated = bool(simulated)
+    try:
+        yield
+    finally:
+        if previous is _RUNTIME_SENTINEL:
+            if hasattr(_RUNTIME, "simulated"):
+                delattr(_RUNTIME, "simulated")
+        else:
+            _RUNTIME.simulated = previous
+
+
+def _mode_headers() -> dict[str, str]:
+    return {"paptrading": "1"} if _resolve_simulated() else {}
 
 
 def _clean_symbol(symbol: str) -> str:
@@ -122,7 +152,7 @@ def _raise_response_error(resp: requests.Response, default_msg: str) -> None:
 def get_symbol_rules(symbol: str, product_type: str = "USDT-FUTURES") -> dict:
     """读取 Bitget 合约配置，用于最小下单量和状态预检查。"""
     symbol = _clean_symbol(symbol)
-    cache_key = f"{_product_type_param(product_type)}:{symbol}:{int(config.SIMULATED)}"
+    cache_key = f"{_product_type_param(product_type)}:{symbol}:{int(_resolve_simulated())}"
     if cache_key in _SYMBOL_RULES:
         return _SYMBOL_RULES[cache_key]
 
@@ -130,7 +160,7 @@ def get_symbol_rules(symbol: str, product_type: str = "USDT-FUTURES") -> dict:
         config.BASE_URL + "/api/v2/mix/market/contracts",
         params={"productType": _product_type(product_type), "symbol": symbol},
         timeout=10,
-        headers={"paptrading": "1"} if config.SIMULATED else {},
+        headers=_mode_headers(),
     )
     if not resp.ok:
         _raise_response_error(resp, f"contracts request failed: {symbol}")
@@ -213,7 +243,7 @@ def _make_signed_headers(
         "locale": "zh-CN",
     }
     # 模拟盘模式：加 paptrading 请求头
-    if config.SIMULATED:
+    if _resolve_simulated():
         headers["paptrading"] = "1"
     return headers, actual_url
 
@@ -349,15 +379,26 @@ def get_ticker_price(
     product_type: str = "USDT-FUTURES",
 ) -> float:
     """
-    查询合约当前行情价（不需要 API Key）。
-    用于将 USDT 保证金换算成合约张数。
+    ????????????? API Key??
+    ??? USDT ???????????
     """
+    data = get_ticker_snapshot(symbol, product_type)
+    for key in ("last", "lastPr", "lastPrice", "close", "markPrice"):
+        if data.get(key) is not None:
+            return float(data[key])
+    raise ValueError("ticker API ?????")
+
+
+def get_ticker_snapshot(
+    symbol: str,
+    product_type: str = "USDT-FUTURES",
+) -> dict:
     symbol = _clean_symbol(symbol)
     resp = requests.get(
         config.BASE_URL + "/api/v2/mix/market/ticker",
         params={"symbol": symbol, "productType": _product_type(product_type)},
         timeout=10,
-        headers={"paptrading": "1"} if config.SIMULATED else {},
+        headers=_mode_headers(),
     )
     if not resp.ok:
         _raise_response_error(resp, f"ticker request failed: {symbol}")
@@ -368,11 +409,235 @@ def get_ticker_price(
     if isinstance(data, list) and data:
         data = data[0]
     if not isinstance(data, dict):
-        raise ValueError("ticker API 返回格式异常")
-    for key in ("last", "lastPr", "lastPrice", "close", "markPrice"):
-        if data.get(key) is not None:
-            return float(data[key])
-    raise ValueError("ticker API 无价格字段")
+        raise ValueError("ticker API ??????")
+    return data
+
+
+def get_price_step(symbol: str, product_type: str = "USDT-FUTURES") -> float:
+    rules = get_symbol_rules(symbol, product_type)
+    price_place = max(int(rules.get("pricePlace") or 0), 0)
+    price_end_step = Decimal(str(rules.get("priceEndStep") or "1"))
+    step = price_end_step / (Decimal("10") ** price_place)
+    return float(step) if step > 0 else 0.0
+
+
+def _normalize_price(price: float, price_step: float, round_up: bool = False) -> str:
+    if price <= 0:
+        raise ValueError(f"?????????: {price}")
+    step = Decimal(str(price_step)) if price_step > 0 else Decimal("0")
+    value = Decimal(str(price))
+    if step > 0:
+        rounding = ROUND_CEILING if round_up else ROUND_DOWN
+        units = (value / step).to_integral_value(rounding=rounding)
+        value = units * step
+    return _format_decimal_str(value)
+
+
+def place_limit_order_by_size(
+    api_key: str,
+    api_secret: str,
+    api_passphrase: str,
+    symbol: str,
+    direction: str,
+    leverage: int,
+    margin_mode: str,
+    size: float | str,
+    limit_price: float,
+    product_type: str = "USDT-FUTURES",
+    client_oid: str = "",
+    pos_mode: str = "2",
+    sync_leverage: bool = True,
+    post_only: bool = True,
+) -> dict:
+    symbol = _clean_symbol(symbol)
+    size_str = _normalize_size(size)
+    base_side = "buy" if direction.lower() == "long" else "sell"
+    norm_pos_mode = _normalize_pos_mode(pos_mode)
+    side = f"{base_side}_single" if norm_pos_mode == "1" else base_side
+    price_str = _normalize_price(limit_price, get_price_step(symbol, product_type), round_up=direction.lower() == "short")
+
+    def _do_set_leverage(mm: str) -> None:
+        if sync_leverage:
+            set_symbol_leverage(
+                api_key, api_secret, api_passphrase,
+                symbol=symbol, direction=direction, leverage=leverage,
+                margin_mode=mm, pos_mode=norm_pos_mode or "2",
+                product_type=product_type,
+            )
+
+    try:
+        _do_set_leverage(margin_mode)
+    except Exception as exc:
+        if _resolve_simulated() and _is_margin_mode_error(exc):
+            fallback = "crossed" if _normalize_margin_mode(margin_mode) != "crossed" else "isolated"
+            logger.warning("??? 400172(????)??? marginMode=%s: %s", fallback, symbol)
+            _do_set_leverage(fallback)
+            margin_mode = fallback
+        else:
+            raise
+
+    payload = {
+        "symbol": symbol,
+        "productType": _product_type(product_type),
+        "marginMode": _normalize_margin_mode(margin_mode),
+        "marginCoin": "USDT",
+        "size": size_str,
+        "side": side,
+        "orderType": "limit",
+        "price": price_str,
+        "force": "post_only" if post_only else "gtc",
+        "leverage": str(max(1, int(leverage))),
+    }
+    if norm_pos_mode == "2":
+        payload["tradeSide"] = "open"
+    if client_oid:
+        payload["clientOid"] = client_oid
+
+    try:
+        res = _request(
+            api_key,
+            api_secret,
+            api_passphrase,
+            "POST",
+            "/api/v2/mix/order/place-order",
+            data=payload,
+        )
+    except Exception as exc:
+        if _resolve_simulated() and _is_margin_mode_error(exc):
+            fallback = "crossed" if _normalize_margin_mode(margin_mode) == "isolated" else "isolated"
+            payload_retry = {**payload, "marginMode": fallback}
+            if sync_leverage:
+                set_symbol_leverage(
+                    api_key, api_secret, api_passphrase,
+                    symbol=symbol, direction=direction, leverage=leverage,
+                    margin_mode=fallback, pos_mode=norm_pos_mode or "2",
+                    product_type=product_type,
+                )
+            res = _request(
+                api_key,
+                api_secret,
+                api_passphrase,
+                "POST",
+                "/api/v2/mix/order/place-order",
+                data=payload_retry,
+            )
+        elif _is_bitget_error(exc, "40774"):
+            retry_payload = dict(payload)
+            if str(retry_payload.get("side", "")).endswith("_single"):
+                retry_payload["side"] = base_side
+                retry_payload["tradeSide"] = "open"
+            else:
+                retry_payload["side"] = f"{base_side}_single"
+                retry_payload.pop("tradeSide", None)
+            res = _request(
+                api_key,
+                api_secret,
+                api_passphrase,
+                "POST",
+                "/api/v2/mix/order/place-order",
+                data=retry_payload,
+                max_retries=1,
+            )
+        else:
+            raise
+    if isinstance(res, dict):
+        res["_calculated_size"] = size_str
+        res["_limit_price"] = price_str
+    return res
+
+
+def place_limit_order(
+    api_key: str,
+    api_secret: str,
+    api_passphrase: str,
+    symbol: str,
+    direction: str,
+    leverage: int,
+    margin_mode: str,
+    usdt_margin: float,
+    limit_price: float,
+    product_type: str = "USDT-FUTURES",
+    client_oid: str = "",
+    pos_mode: str = "2",
+) -> dict:
+    symbol = _clean_symbol(symbol)
+    size_str = _calc_size(usdt_margin, leverage, limit_price)
+    res = place_limit_order_by_size(
+        api_key=api_key,
+        api_secret=api_secret,
+        api_passphrase=api_passphrase,
+        symbol=symbol,
+        direction=direction,
+        leverage=leverage,
+        margin_mode=margin_mode,
+        size=size_str,
+        limit_price=limit_price,
+        product_type=product_type,
+        client_oid=client_oid,
+        pos_mode=pos_mode,
+        sync_leverage=True,
+        post_only=True,
+    )
+    if isinstance(res, dict):
+        res["_calculated_size"] = size_str
+    return res
+
+
+def get_order_detail(
+    api_key: str,
+    api_secret: str,
+    api_passphrase: str,
+    symbol: str,
+    order_id: str = "",
+    client_oid: str = "",
+    product_type: str = "USDT-FUTURES",
+) -> dict:
+    symbol = _clean_symbol(symbol)
+    params = {"symbol": symbol, "productType": _product_type(product_type)}
+    if order_id:
+        params["orderId"] = str(order_id)
+    elif client_oid:
+        params["clientOid"] = client_oid
+    else:
+        raise ValueError("get_order_detail ?? order_id ? client_oid")
+    data = _request(
+        api_key,
+        api_secret,
+        api_passphrase,
+        "GET",
+        "/api/v2/mix/order/detail",
+        params=params,
+    )
+    return data if isinstance(data, dict) else {}
+
+
+def cancel_order(
+    api_key: str,
+    api_secret: str,
+    api_passphrase: str,
+    symbol: str,
+    order_id: str = "",
+    client_oid: str = "",
+    product_type: str = "USDT-FUTURES",
+) -> dict:
+    symbol = _clean_symbol(symbol)
+    payload = {"symbol": symbol, "productType": _product_type(product_type)}
+    if order_id:
+        payload["orderId"] = str(order_id)
+    elif client_oid:
+        payload["clientOid"] = client_oid
+    else:
+        raise ValueError("cancel_order ?? order_id ? client_oid")
+    data = _request(
+        api_key,
+        api_secret,
+        api_passphrase,
+        "POST",
+        "/api/v2/mix/order/cancel-order",
+        data=payload,
+        max_retries=1,
+    )
+    return data if isinstance(data, dict) else {}
 
 
 def _calc_size(usdt_margin: float, leverage: int, price: float) -> str:
@@ -463,7 +728,7 @@ def place_market_order_by_size(
     try:
         _do_set_leverage(margin_mode)
     except Exception as exc:
-        if config.SIMULATED and _is_margin_mode_error(exc):
+        if _resolve_simulated() and _is_margin_mode_error(exc):
             fallback = "crossed" if _normalize_margin_mode(margin_mode) != "crossed" else "isolated"
             logger.warning("模拟盘 400172(杠杆设置)，改用 marginMode=%s: %s", fallback, symbol)
             _do_set_leverage(fallback)
@@ -506,7 +771,7 @@ def place_market_order_by_size(
         )
     except Exception as exc:
         # 模拟盘 400172 保证金模式不合法：改用另一种 marginMode 重试
-        if config.SIMULATED and _is_margin_mode_error(exc):
+        if _resolve_simulated() and _is_margin_mode_error(exc):
             fallback = "crossed"
             if _normalize_margin_mode(margin_mode) == "crossed":
                 fallback = "isolated"
