@@ -1,4 +1,4 @@
-﻿import os
+import os
 import sys
 import time
 import unittest
@@ -182,5 +182,80 @@ class BinancePmPreferenceTests(unittest.TestCase):
         self.assertEqual([("POST", "/papi/v1/um/order", "https://papi.binance.com")], calls)
 
 
+
+class BinanceBalanceNormalizationTests(unittest.TestCase):
+    def setUp(self):
+        binance_executor._API_MODE_BY_KEY.clear()
+
+    def tearDown(self):
+        binance_executor._API_MODE_BY_KEY.clear()
+
+    def test_account_balance_prefers_total_margin_balance_for_realtime_equity(self):
+        def fake_request(api_key, api_secret, method, endpoint, params=None, base_url=None, max_retries=3):
+            if endpoint == "/fapi/v2/account":
+                return {
+                    "asset": "USDT",
+                    "totalWalletBalance": "226.42",
+                    "totalMarginBalance": "224.8944",
+                    "availableBalance": "120.00",
+                }
+            if endpoint == "/fapi/v2/balance":
+                return []
+            raise AssertionError(endpoint)
+
+        with mock.patch.object(binance_executor, "_request", side_effect=fake_request), \
+             mock.patch.object(binance_executor, "_resolve_pm_base_candidates", return_value=[]):
+            result = binance_executor.get_account_balance("ak", "sk")
+
+        self.assertAlmostEqual(224.8944, result["balance"], places=6)
+        self.assertAlmostEqual(120.0, result["availableBalance"], places=6)
+
+    def test_account_balance_prefers_pm_account_candidate_with_virtual_max_withdraw(self):
+        def fake_request(api_key, api_secret, method, endpoint, params=None, base_url=None, max_retries=3):
+            if endpoint.startswith("/fapi/"):
+                raise ValueError("fapi unavailable")
+            if endpoint == "/papi/v1/account":
+                return {
+                    "accountEquity": "228.25",
+                    "accountInitialMargin": "96.00",
+                    "totalOpenOrderInitialMargin": "0",
+                    "virtualMaxWithdrawAmount": "132.25",
+                }
+            if endpoint == "/papi/v1/balance":
+                return [{
+                    "asset": "USDT",
+                    "totalWalletBalance": "228.25",
+                    "crossMarginFree": "120.00",
+                }]
+            raise ValueError(endpoint)
+
+        with mock.patch.object(binance_executor, "_request", side_effect=fake_request),              mock.patch.object(binance_executor, "_resolve_pm_base_candidates", return_value=["https://papi.binance.com"]):
+            result = binance_executor.get_account_balance("ak", "sk")
+
+        self.assertEqual("/papi/v1/account", result["_endpoint"])
+        self.assertAlmostEqual(228.25, result["balance"], places=6)
+        self.assertAlmostEqual(132.25, result["availableBalance"], places=6)
+
+    def test_account_balance_uses_cross_margin_free_from_papi_balance_rows(self):
+        def fake_request(api_key, api_secret, method, endpoint, params=None, base_url=None, max_retries=3):
+            if endpoint.startswith("/fapi/"):
+                raise ValueError("fapi unavailable")
+            if endpoint == "/papi/v1/account":
+                raise ValueError("pm account unavailable")
+            if endpoint == "/papi/v1/balance":
+                return [{
+                    "asset": "USDT",
+                    "totalWalletBalance": "228.25",
+                    "crossMarginFree": "132.25",
+                    "umUnrealizedPNL": "4.50",
+                }]
+            raise ValueError(endpoint)
+
+        with mock.patch.object(binance_executor, "_request", side_effect=fake_request),              mock.patch.object(binance_executor, "_resolve_pm_base_candidates", return_value=["https://papi.binance.com"]):
+            result = binance_executor.get_account_balance("ak", "sk")
+
+        self.assertEqual("/papi/v1/balance", result["_endpoint"])
+        self.assertAlmostEqual(228.25, result["balance"], places=6)
+        self.assertAlmostEqual(132.25, result["availableBalance"], places=6)
 if __name__ == "__main__":
     unittest.main()

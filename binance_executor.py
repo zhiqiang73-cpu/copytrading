@@ -116,6 +116,25 @@ def _clean_symbol(symbol: str) -> str:
     return symbol
 
 
+def _resolve_pm_symbol_endpoints(
+    symbol: str,
+    um_endpoint: str,
+    cm_endpoint: str,
+) -> tuple[str, ...]:
+    """Route PM requests to the matching market family to avoid UM/CM symbol mismatches."""
+    clean = _clean_symbol(symbol).upper()
+    if not clean:
+        return tuple(x for x in (um_endpoint, cm_endpoint) if x)
+
+    if clean.endswith(("USDT", "USDC", "BUSD", "FDUSD")):
+        return (um_endpoint,) if um_endpoint else ()
+
+    if "_" in clean or clean.endswith("USD"):
+        return (cm_endpoint,) if cm_endpoint else ()
+
+    return tuple(x for x in (um_endpoint, cm_endpoint) if x)
+
+
 def _is_non_retryable_error_message(msg: str) -> bool:
     lower = msg.lower()
     return (
@@ -343,7 +362,7 @@ def set_symbol_leverage(api_key: str, api_secret: str, symbol: str, leverage: in
     return _request_with_pm_fallback(
         api_key, api_secret, "POST", "/fapi/v1/leverage",
         params={"symbol": _clean_symbol(symbol), "leverage": leverage},
-        pm_endpoints=("/papi/v1/um/leverage", "/papi/v1/cm/leverage")
+        pm_endpoints=_resolve_pm_symbol_endpoints(symbol, "/papi/v1/um/leverage", "/papi/v1/cm/leverage")
     )
 
 
@@ -352,7 +371,7 @@ def set_margin_type(api_key: str, api_secret: str, symbol: str, margin_type: str
     return _request_with_pm_fallback(
         api_key, api_secret, "POST", "/fapi/v1/marginType",
         params={"symbol": _clean_symbol(symbol), "marginType": margin_type},
-        pm_endpoints=("/papi/v1/um/marginType", "/papi/v1/cm/marginType")
+        pm_endpoints=_resolve_pm_symbol_endpoints(symbol, "/papi/v1/um/marginType", "/papi/v1/cm/marginType")
     )
 
 
@@ -376,6 +395,70 @@ def get_account_balance(api_key: str, api_secret: str) -> dict:
                 return _to_float(d.get(k))
         return 0.0
 
+    def _pick_optional(d: dict[str, Any], keys: tuple[str, ...]) -> float | None:
+        for k in keys:
+            if k not in d or d.get(k) is None:
+                continue
+            try:
+                return float(d.get(k))
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    def _derive_available_balance(d: dict[str, Any]) -> float:
+        explicit = _pick_optional(
+            d,
+            (
+                "availableBalance",
+                "totalAvailableBalance",
+                "virtualMaxWithdrawAmount",
+                "maxWithdrawAmount",
+                "withdrawAvailable",
+                "available",
+                "crossMarginFree",
+                "umAvailableBalance",
+                "cmAvailableBalance",
+                "crossWalletBalance",
+            ),
+        )
+        if explicit is not None:
+            return max(explicit, 0.0)
+
+        equity = _pick_optional(
+            d,
+            (
+                "accountEquity",
+                "totalMarginBalance",
+                "marginBalance",
+                "equity",
+                "totalWalletBalance",
+                "walletBalance",
+                "balance",
+                "crossMarginAsset",
+            ),
+        )
+        if equity is None:
+            return 0.0
+
+        initial_margin = _pick_optional(
+            d,
+            (
+                "accountInitialMargin",
+                "totalInitialMargin",
+                "totalPositionInitialMargin",
+                "positionInitialMargin",
+            ),
+        ) or 0.0
+        open_order_margin = _pick_optional(
+            d,
+            (
+                "totalOpenOrderInitialMargin",
+                "openOrderInitialMargin",
+                "totalMarginOpenLoss",
+            ),
+        ) or 0.0
+        return max(equity - initial_margin - open_order_margin, 0.0)
+
     def _from_rows(rows: list[dict[str, Any]], endpoint: str) -> dict[str, Any] | None:
         if not rows:
             return None
@@ -389,12 +472,40 @@ def get_account_balance(api_key: str, api_secret: str) -> dict:
             row = max(
                 rows,
                 key=lambda x: max(
-                    _pick(x, ("balance", "walletBalance", "crossWalletBalance", "equity", "accountEquity")),
-                    _pick(x, ("availableBalance", "maxWithdrawAmount", "withdrawAvailable", "available", "crossWalletBalance")),
+                    _pick(
+                        x,
+                        (
+                            "equity",
+                            "accountEquity",
+                            "marginBalance",
+                            "crossMarginAsset",
+                            "balance",
+                            "walletBalance",
+                            "crossWalletBalance",
+                            "totalWalletBalance",
+                            "umWalletBalance",
+                            "cmWalletBalance",
+                        ),
+                    ),
+                    _derive_available_balance(x),
                 ),
             )
-        balance = _pick(row, ("balance", "walletBalance", "crossWalletBalance", "equity", "accountEquity"))
-        available = _pick(row, ("availableBalance", "maxWithdrawAmount", "withdrawAvailable", "available", "crossWalletBalance"))
+        balance = _pick(
+            row,
+            (
+                "equity",
+                "accountEquity",
+                "marginBalance",
+                "crossMarginAsset",
+                "balance",
+                "walletBalance",
+                "crossWalletBalance",
+                "totalWalletBalance",
+                "umWalletBalance",
+                "cmWalletBalance",
+            ),
+        )
+        available = _derive_available_balance(row)
         out = dict(row)
         out["balance"] = balance
         out["availableBalance"] = available
@@ -405,27 +516,18 @@ def get_account_balance(api_key: str, api_secret: str) -> dict:
         balance = _pick(
             acct,
             (
-                "totalWalletBalance",
                 "totalMarginBalance",
+                "totalWalletBalance",
                 "totalCrossWalletBalance",
                 "accountEquity",
                 "uniMMRBalance",
+                "marginBalance",
                 "balance",
                 "walletBalance",
                 "equity",
             ),
         )
-        available = _pick(
-            acct,
-            (
-                "availableBalance",
-                "totalAvailableBalance",
-                "maxWithdrawAmount",
-                "withdrawAvailable",
-                "available",
-                "crossWalletBalance",
-            ),
-        )
+        available = _derive_available_balance(acct)
         out = dict(acct)
         out["asset"] = out.get("asset") or "USDT"
         out["balance"] = balance
@@ -464,8 +566,28 @@ def get_account_balance(api_key: str, api_secret: str) -> dict:
                 if parsed:
                     candidates.append(parsed)
             elif isinstance(data, dict):
+                assets = data.get("assets")
+                if isinstance(assets, list):
+                    parsed = _from_rows([r for r in assets if isinstance(r, dict)], endpoint)
+                    if parsed:
+                        merged = dict(data)
+                        merged.update(parsed)
+                        candidates.append(merged)
+                        continue
                 candidates.append(_from_account(data, endpoint))
         return candidates, first_error
+
+    def _candidate_sort_key(candidate: dict[str, Any]) -> tuple[int, int, float, float]:
+        endpoint = str(candidate.get("_endpoint") or "")
+        available = float(candidate.get("availableBalance") or 0.0)
+        balance = float(candidate.get("balance") or 0.0)
+        if endpoint.endswith("/account"):
+            endpoint_priority = 2
+        elif "account" in endpoint:
+            endpoint_priority = 1
+        else:
+            endpoint_priority = 0
+        return (1 if available > 0 else 0, endpoint_priority, balance, available)
 
     probe_groups: list[tuple[str, list[tuple[str, str | None]]]] = []
     if preferred_mode == "pm":
@@ -479,7 +601,7 @@ def get_account_balance(api_key: str, api_secret: str) -> dict:
     for group_name, probes in probe_groups:
         candidates, group_error = _collect_candidates(probes)
         if candidates:
-            best = max(candidates, key=lambda x: (float(x.get("balance") or 0), float(x.get("availableBalance") or 0)))
+            best = max(candidates, key=_candidate_sort_key)
             if group_name == "pm":
                 _set_preferred_api_mode(api_key, "pm")
             elif group_name == "fapi":
@@ -728,7 +850,7 @@ def place_market_order(
 
     logger.info("币安按量下单: %s %s POS_SIDE=%s 数量=%s 预期保证金=%.2f", symbol, side, position_side, qty_str, usdt_margin)
 
-    res = _request_with_pm_fallback(api_key, api_secret, "POST", "/fapi/v1/order", params=payload, pm_endpoints=("/papi/v1/um/order", "/papi/v1/cm/order"))
+    res = _request_with_pm_fallback(api_key, api_secret, "POST", "/fapi/v1/order", params=payload, pm_endpoints=_resolve_pm_symbol_endpoints(symbol, "/papi/v1/um/order", "/papi/v1/cm/order"))
     if isinstance(res, dict):
         res["_calculated_size"] = qty_str
     return res
@@ -789,7 +911,7 @@ def place_limit_order(
     if client_oid:
         payload["newClientOrderId"] = client_oid
 
-    res = _request_with_pm_fallback(api_key, api_secret, "POST", "/fapi/v1/order", params=payload, pm_endpoints=("/papi/v1/um/order", "/papi/v1/cm/order"))
+    res = _request_with_pm_fallback(api_key, api_secret, "POST", "/fapi/v1/order", params=payload, pm_endpoints=_resolve_pm_symbol_endpoints(symbol, "/papi/v1/um/order", "/papi/v1/cm/order"))
     if isinstance(res, dict):
         res["_calculated_size"] = qty_str
         res["_limit_price"] = price_str
@@ -810,7 +932,7 @@ def get_order(
         params["origClientOrderId"] = client_oid
     else:
         raise ValueError("get_order 需要 order_id 或 client_oid")
-    data = _request_with_pm_fallback(api_key, api_secret, "GET", "/fapi/v1/order", params=params, pm_endpoints=("/papi/v1/um/order", "/papi/v1/cm/order"), max_retries=1)
+    data = _request_with_pm_fallback(api_key, api_secret, "GET", "/fapi/v1/order", params=params, pm_endpoints=_resolve_pm_symbol_endpoints(symbol, "/papi/v1/um/order", "/papi/v1/cm/order"), max_retries=1)
     return data if isinstance(data, dict) else {}
 
 
@@ -828,7 +950,7 @@ def cancel_order(
         params["origClientOrderId"] = client_oid
     else:
         raise ValueError("cancel_order 需要 order_id 或 client_oid")
-    data = _request_with_pm_fallback(api_key, api_secret, "DELETE", "/fapi/v1/order", params=params, pm_endpoints=("/papi/v1/um/order", "/papi/v1/cm/order"), max_retries=1)
+    data = _request_with_pm_fallback(api_key, api_secret, "DELETE", "/fapi/v1/order", params=params, pm_endpoints=_resolve_pm_symbol_endpoints(symbol, "/papi/v1/um/order", "/papi/v1/cm/order"), max_retries=1)
     return data if isinstance(data, dict) else {}
 
 
@@ -856,4 +978,4 @@ def close_partial_position(
     }
     
     logger.info("币安局部平仓: %s %s POS_SIDE=%s 数量=%s", symbol, side, position_side, qty_str)
-    return _request_with_pm_fallback(api_key, api_secret, "POST", "/fapi/v1/order", params=payload, pm_endpoints=("/papi/v1/um/order", "/papi/v1/cm/order"))
+    return _request_with_pm_fallback(api_key, api_secret, "POST", "/fapi/v1/order", params=payload, pm_endpoints=_resolve_pm_symbol_endpoints(symbol, "/papi/v1/um/order", "/papi/v1/cm/order"))

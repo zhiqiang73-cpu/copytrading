@@ -293,6 +293,123 @@ def _extract_wallet_metrics(balance_raw):
     return wallet_balance, available_balance
 
 
+def _extract_binance_live_wallet_metrics(balance_raw, positions=None):
+    data = balance_raw
+    if isinstance(data, list) and data:
+        data = data[0]
+    if not isinstance(data, dict):
+        data = {}
+
+    base_wallet_balance = _pick_number(
+        data,
+        (
+            "totalWalletBalance",
+            "walletBalance",
+            "balance",
+            "crossWalletBalance",
+            "umWalletBalance",
+            "cmWalletBalance",
+        ),
+    )
+    live_wallet_balance = _pick_number(
+        data,
+        (
+            "totalMarginBalance",
+            "accountEquity",
+            "equity",
+            "marginBalance",
+            "totalCrossWalletBalance",
+            "crossMarginAsset",
+        ),
+    )
+    available_balance = _pick_number(
+        data,
+        (
+            "totalAvailableBalance",
+            "virtualMaxWithdrawAmount",
+            "crossMarginFree",
+            "umAvailableBalance",
+            "cmAvailableBalance",
+            "availableBalance",
+            "maxWithdrawAmount",
+            "withdrawAvailable",
+            "available",
+            "crossWalletBalance",
+        ),
+    )
+    unrealized_pnl = _pick_number(
+        data,
+        (
+            "totalUnrealizedProfit",
+            "unrealizedProfit",
+            "unRealizedProfit",
+            "crossUnPnl",
+            "umUnrealizedPNL",
+            "cmUnrealizedPNL",
+            "upl",
+        ),
+    )
+
+    positions_unrealized = None
+    if isinstance(positions, list):
+        total_unrealized = 0.0
+        has_unrealized = False
+        for item in positions:
+            if not isinstance(item, dict):
+                continue
+            pnl_value = _pick_number(
+                item,
+                (
+                    "unRealizedProfit",
+                    "unrealizedProfit",
+                    "unrealizedPL",
+                    "unrealizedPnl",
+                    "upl",
+                    "profit",
+                ),
+            )
+            if pnl_value is None:
+                continue
+            total_unrealized += pnl_value
+            has_unrealized = True
+        if has_unrealized:
+            positions_unrealized = total_unrealized
+
+    if positions_unrealized is not None:
+        unrealized_pnl = positions_unrealized
+
+    if live_wallet_balance is None and base_wallet_balance is not None and unrealized_pnl is not None:
+        live_wallet_balance = base_wallet_balance + unrealized_pnl
+    if live_wallet_balance is None:
+        live_wallet_balance = base_wallet_balance
+    if unrealized_pnl is None and live_wallet_balance is not None and base_wallet_balance is not None:
+        unrealized_pnl = live_wallet_balance - base_wallet_balance
+    if live_wallet_balance is None:
+        live_wallet_balance = available_balance
+    if available_balance is None and live_wallet_balance is not None:
+        account_initial_margin = _pick_number(
+            data,
+            (
+                "accountInitialMargin",
+                "totalInitialMargin",
+                "totalPositionInitialMargin",
+                "positionInitialMargin",
+            ),
+        ) or 0.0
+        open_order_margin = _pick_number(
+            data,
+            (
+                "totalOpenOrderInitialMargin",
+                "openOrderInitialMargin",
+                "totalMarginOpenLoss",
+            ),
+        ) or 0.0
+        available_balance = max(live_wallet_balance - account_initial_margin - open_order_margin, 0.0)
+    if unrealized_pnl is None:
+        unrealized_pnl = 0.0
+
+    return live_wallet_balance, available_balance, unrealized_pnl, base_wallet_balance
+
 def _build_account_overview(api_key: str, api_secret: str, api_passphrase: str):
     balance_raw = order_executor.get_account_balance(api_key, api_secret, api_passphrase)
     wallet_balance, available_balance = _extract_wallet_metrics(balance_raw)
@@ -800,8 +917,11 @@ def api_copy_test_api():
             return jsonify({"error": "Ұ API Key / Secret Ϊ"}), 400
         try:
             balance_info = order_executor.test_binance_connection(api_key, api_secret)
-            available = float(balance_info.get("availableBalance", 0))
-            return jsonify({"ok": True, "msg": f"Ұӳɹ {available:.2f} USDT | endpoint={config.BINANCE_BASE_URL}"})
+            wallet_balance, available, _, _ = _extract_binance_live_wallet_metrics(balance_info)
+            available = float(available or 0)
+            wallet_balance = float(wallet_balance or 0)
+            endpoint_used = balance_info.get("_endpoint") or config.BINANCE_BASE_URL
+            return jsonify({"ok": True, "msg": f"Binance API 可用，可用余额 {available:.2f} USDT，总权益 {wallet_balance:.2f} USDT | endpoint={endpoint_used}"})
         except Exception as e:
             logger.error("Ұ API ʧ: %s", e)
             err = str(e)
@@ -842,32 +962,44 @@ def api_copy_test_api():
 
 @app.route("/api/binance/balance")
 def api_binance_balance():
-    """获取币安账户余和当日盈?"""
+    """Get Binance futures balance and day pnl."""
+    import binance_executor
     import binance_scraper
+
     settings = _normalize_copy_settings(db.get_copy_settings())
     api_key = settings.get("binance_api_key") or ""
     api_secret = settings.get("binance_api_secret") or ""
     if not api_key or not api_secret:
-        return jsonify({"error": "Ұ API δ"}), 400
+        return jsonify({"error": "Binance API not configured"}), 400
     try:
-        balance_info = binance_scraper.get_binance_futures_balance(api_key, api_secret)
-        day_pnl = binance_scraper.get_binance_futures_income_today(api_key, api_secret)
-        wallet_balance = balance_info.get("balance", 0)
-        available = balance_info.get("available", 0)
-        unrealized_pnl = balance_info.get("unrealized_pnl", 0)
+        balance_info = binance_executor.get_account_balance(api_key, api_secret)
+        try:
+            positions = binance_executor.get_my_positions(api_key, api_secret)
+        except Exception as pos_exc:
+            logger.info("读取 Binance 持仓浮盈失败，回退到账户权益字段: %s", pos_exc)
+            positions = []
+
+        wallet_balance, available, unrealized_pnl, base_wallet_balance = _extract_binance_live_wallet_metrics(balance_info, positions)
+        wallet_balance = float(wallet_balance or 0)
+        available = float(available or 0)
+        unrealized_pnl = float(unrealized_pnl or 0)
+        base_wallet_balance = float(base_wallet_balance) if base_wallet_balance is not None else None
+        day_pnl = float(binance_scraper.get_binance_futures_income_today(api_key, api_secret) or 0)
         day_pnl_pct = (day_pnl / wallet_balance * 100.0) if wallet_balance > 0 else 0.0
         return jsonify({
             "ok": True,
             "wallet_balance": wallet_balance,
+            "base_wallet_balance": base_wallet_balance,
             "available_balance": available,
             "unrealized_pnl": unrealized_pnl,
             "day_pnl": day_pnl,
             "day_pnl_pct": day_pnl_pct,
+            "endpoint": balance_info.get("_endpoint") or config.BINANCE_BASE_URL,
             "updated_at": int(time.time() * 1000),
         })
     except Exception as exc:
-        logger.warning("币安余查失败: %s", exc)
-        return jsonify({"error": f"ѯʧܣ{exc}"}), 400
+        logger.warning("查询 Binance 余额失败: %s", exc)
+        return jsonify({"error": f"Query failed: {exc}"}), 400
 
 
 @app.route("/api/copy/start", methods=["POST"])
@@ -1664,10 +1796,11 @@ def api_live_copy_test_api():
         try:
             with _profile_runtime_context('live'):
                 balance_info = binance_executor.get_account_balance(api_key, api_secret)
-            available = float(balance_info.get('availableBalance', 0))
-            total_balance = float(balance_info.get('balance', 0))
+            wallet_balance, available, _, _ = _extract_binance_live_wallet_metrics(balance_info)
+            available = float(available or 0)
+            wallet_balance = float(wallet_balance or 0)
             endpoint_used = balance_info.get('_endpoint') or runtime['binance_base_url']
-            return jsonify({'ok': True, 'msg': f'Binance API 可用，可用余额 {available:.2f} USDT，总权益 {total_balance:.2f} USDT | endpoint={endpoint_used}'} )
+            return jsonify({'ok': True, 'msg': f'Binance API 可用，可用余额 {available:.2f} USDT，总权益 {wallet_balance:.2f} USDT | endpoint={endpoint_used}'} )
         except Exception as exc:
             return jsonify({'error': f'Binance API 测试失败: {exc}'}), 400
 
@@ -1698,6 +1831,7 @@ def api_live_copy_test_api():
 @app.route('/api/live/binance/balance')
 def api_live_binance_balance():
     import binance_executor
+    import binance_scraper
 
     settings = _normalize_copy_settings_for_profile(db.get_copy_settings_profile('live'), 'live')
     api_key = settings.get('binance_api_key') or ''
@@ -1709,8 +1843,16 @@ def api_live_binance_balance():
     try:
         with _profile_runtime_context('live'):
             balance_info = binance_executor.get_account_balance(api_key, api_secret)
-        wallet_balance = float(balance_info.get('balance', 0) or 0)
-        available = float(balance_info.get('availableBalance', 0) or 0)
+            try:
+                positions = binance_executor.get_my_positions(api_key, api_secret)
+            except Exception as pos_exc:
+                logger.info('查询 Binance 持仓浮盈亏失败，回退到账户权益字段: %s', pos_exc)
+                positions = []
+        wallet_balance, available, unrealized_pnl, base_wallet_balance = _extract_binance_live_wallet_metrics(balance_info, positions)
+        wallet_balance = float(wallet_balance or 0)
+        available = float(available or 0)
+        unrealized_pnl = float(unrealized_pnl or 0)
+        base_wallet_balance = float(base_wallet_balance) if base_wallet_balance is not None else None
 
         day_pnl = 0.0
         try:
@@ -1722,8 +1864,9 @@ def api_live_binance_balance():
         return jsonify({
             'ok': True,
             'wallet_balance': wallet_balance,
+            'base_wallet_balance': base_wallet_balance,
             'available_balance': available,
-            'unrealized_pnl': 0.0,
+            'unrealized_pnl': unrealized_pnl,
             'day_pnl': day_pnl,
             'day_pnl_pct': day_pnl_pct,
             'endpoint': balance_info.get('_endpoint') or runtime['binance_base_url'],

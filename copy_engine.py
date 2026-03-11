@@ -140,6 +140,17 @@ def _is_binance_balance_error(exc: Exception) -> bool:
     )
 
 
+def _is_request_timeout_error(exc: Exception) -> bool:
+    lower = str(exc).lower()
+    return ("read timed out" in lower) or ("read timeout" in lower) or ("timed out" in lower)
+
+
+def _is_binance_order_missing_error(exc: Exception) -> bool:
+    msg = str(exc)
+    lower = msg.lower()
+    return ("code=-2013" in msg) or ("order does not exist" in lower)
+
+
 def _is_bitget_position_missing_error(exc: Exception) -> bool:
     msg = str(exc)
     lower = msg.lower()
@@ -1564,6 +1575,62 @@ class CopyEngine:
             )
             logger.info("[%s????] %s %s ?=%.4f ?=%s", platform_label, symbol, direction.upper(), exec_price, exec_qty)
 
+        def _recover_binance_timeout_open(exc: Exception) -> bool:
+            if exec_platform != "binance" or not client_oid or not _is_request_timeout_error(exc):
+                return False
+
+            import binance_executor
+
+            fallback_exec_price = _safe_float(locals().get("curr_p", price), price)
+            recovered_orders: list[dict[str, Any]] = []
+            probe_ak, probe_sk, _ = api_creds
+            probe_client_oids = [oid for oid in (f"{client_oid}_L", f"{client_oid}_M", client_oid) if oid]
+
+            with binance_executor.use_runtime(base_url=runtime["binance_base_url"]):
+                for probe_oid in probe_client_oids:
+                    try:
+                        detail = binance_executor.get_order(probe_ak, probe_sk, symbol, client_oid=probe_oid)
+                    except Exception as probe_exc:
+                        if _is_binance_order_missing_error(probe_exc):
+                            continue
+                        logger.warning("[%s timeout reconcile] %s %s probe=%s: %s", platform_label, symbol, direction.upper(), probe_oid, probe_exc)
+                        continue
+
+                    snapshot = _parse_binance_order_snapshot(detail, fallback_price=fallback_exec_price)
+                    filled_qty = max(_safe_float(snapshot.get("filled_qty"), 0.0), 0.0)
+                    status = str(snapshot.get("status") or "").upper()
+                    if filled_qty <= 0 and status != "FILLED":
+                        continue
+                    recovered_orders.append(snapshot)
+
+            if not recovered_orders:
+                return False
+
+            total_qty = sum(max(_safe_float(item.get("filled_qty"), 0.0), 0.0) for item in recovered_orders)
+            if total_qty <= 0:
+                return False
+
+            weighted_cost = 0.0
+            order_ids: list[str] = []
+            recovered_client_oids: list[str] = []
+            for item in recovered_orders:
+                filled_qty = max(_safe_float(item.get("filled_qty"), 0.0), 0.0)
+                avg_price = _safe_float(item.get("avg_price"), fallback_exec_price) or fallback_exec_price
+                weighted_cost += filled_qty * avg_price
+                order_id_value = str(item.get("order_id") or "").strip()
+                client_oid_value = str(item.get("client_oid") or "").strip()
+                if order_id_value:
+                    order_ids.append(order_id_value)
+                if client_oid_value:
+                    recovered_client_oids.append(client_oid_value)
+
+            avg_exec_price = weighted_cost / total_qty if total_qty > 0 else fallback_exec_price
+            recovered_margin = _estimate_margin_from_fill(total_qty, avg_exec_price, lev)
+            recover_note = f"[RecoveredAfterTimeout] clientOid={','.join(recovered_client_oids)}".strip()
+            _insert_filled(avg_exec_price, total_qty, recover_note, oid=','.join(order_ids), used_margin=recovered_margin or margin)
+            logger.warning("[%s timeout reconcile] recovered %s %s qty=%s price=%.4f", platform_label, symbol, direction.upper(), total_qty, avg_exec_price)
+            return True
+
         if exec_platform == "bitget" and symbol in self._unsupported_symbols:
             _insert_skip("Bitget 交易对不可用(已缓存)")
             return
@@ -1759,6 +1826,8 @@ class CopyEngine:
                 return
             if exec_platform == "binance" and _is_binance_balance_error(exc):
                 _insert_skip(f"Binance 保证金不足: {exc}", curr_p, dev)
+                return
+            if exec_platform == "binance" and _recover_binance_timeout_open(exc):
                 return
             db.insert_copy_order({
                 "timestamp": _now_ms(), "trader_uid": pid, "tracking_no": f"FAIL_{order_id}",

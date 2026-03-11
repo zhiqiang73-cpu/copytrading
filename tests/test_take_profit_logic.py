@@ -324,5 +324,24 @@ class MakerEntryDecisionTests(unittest.TestCase):
         self.assertAlmostEqual(99.95, price, places=6)
 
 
+
+class BinanceWalletMetricTests(unittest.TestCase):
+    def test_extract_binance_live_wallet_metrics_falls_back_to_positions_unrealized(self):
+        import web
+
+        wallet_balance, available_balance, unrealized_pnl, base_wallet_balance = web._extract_binance_live_wallet_metrics(
+            {
+                "balance": "226.42",
+                "availableBalance": "120.00",
+            },
+            [
+                {"symbol": "ETHUSDT", "unRealizedProfit": "-1.5256"},
+            ],
+        )
+
+        self.assertAlmostEqual(224.8944, wallet_balance, places=4)
+        self.assertAlmostEqual(120.0, available_balance, places=6)
+        self.assertAlmostEqual(-1.5256, unrealized_pnl, places=4)
+        self.assertAlmostEqual(226.42, base_wallet_balance, places=6)
 if __name__ == "__main__":
     unittest.main()

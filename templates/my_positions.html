@@ -1273,8 +1273,10 @@
                 return;
             }
             const balance = Number(data.wallet_balance);
+            const baseBalance = Number(data.base_wallet_balance);
             const pnl = Number(data.day_pnl);
             const pnlPct = Number(data.day_pnl_pct);
+            const unrealizedPnl = Number(data.unrealized_pnl);
 
             document.getElementById('bn-wallet-balance').textContent =
                 Number.isFinite(balance) ? `${fmtMoney(balance)} USDT` : '--';
@@ -1294,10 +1296,15 @@
             const updatedMs = Number(data.updated_at || Date.now());
             document.getElementById('bn-wallet-updated').textContent =
                 new Date(updatedMs).toLocaleTimeString('zh-CN', { hour12: false });
-            document.getElementById('bn-wallet-subline').textContent =
-                '今日已实现盈亏（含手续费和资金费）';
 
-            // 卡片边框颜色
+            const sublineEl = document.getElementById('bn-wallet-subline');
+            if (Number.isFinite(baseBalance) && Number.isFinite(unrealizedPnl) && Math.abs(unrealizedPnl) >= 0.0001) {
+                const unrealizedText = `${unrealizedPnl >= 0 ? '+' : '-'}${fmtMoney(Math.abs(unrealizedPnl))} USDT`;
+                sublineEl.textContent = `实时权益 = 钱包余额 ${fmtMoney(baseBalance)} + 未实现盈亏 ${unrealizedText}`;
+            } else {
+                sublineEl.textContent = '实时权益已包含未实现盈亏；今日盈亏为已实现收益（含手续费和资金费）';
+            }
+
             const card = document.getElementById('bn-wallet-overview-card');
             card.classList.remove('border-yellow-500/25', 'border-green-500/30', 'border-red-500/30');
             if (pnl > 0) card.classList.add('border-green-500/30');
@@ -1307,7 +1314,6 @@
             console.error('加载币安余额失败:', e);
         }
     }
-
     let _tickTimer = null;
 
     function updateEngineBadge(running) {
@@ -1698,7 +1704,7 @@
     setInterval(pollEngineStatus, 5000);
     setInterval(refreshPositions, 5000);
     setInterval(refreshOrders, 15000);
-    setInterval(loadBinanceBalance, 30000);
+    setInterval(loadBinanceBalance, 5000);
     {% if page_profile == 'live' %}
     setInterval(loadLiveDiagnostics, 15000);
     {% endif %}
