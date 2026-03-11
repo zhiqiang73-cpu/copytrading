@@ -8,6 +8,7 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import time
 import threading
 import urllib.parse
@@ -22,10 +23,13 @@ import config
 logger = logging.getLogger(__name__)
 
 _DEFAULT_BASE_URL = config.BINANCE_BASE_URL
+_DEFAULT_PM_BASE_URL = (os.getenv("BINANCE_PM_BASE_URL", "https://papi.binance.com") or "https://papi.binance.com").strip().rstrip("/")
 _RUNTIME = threading.local()
 _RUNTIME_SENTINEL = object()
+_API_MODE_LOCK = threading.Lock()
+_API_MODE_BY_KEY: dict[str, str] = {}
 
-# ???????????????????????? (???????
+# ?????????????????????? (???????
 _SYMBOL_FILTERS: dict[str, dict] = {}
 
 
@@ -49,6 +53,55 @@ def use_runtime(base_url: str | None = None):
                 delattr(_RUNTIME, "base_url")
         else:
             _RUNTIME.base_url = previous
+
+
+def _resolve_pm_base_candidates() -> list[str]:
+    runtime_base = _resolve_base_url()
+    raw_candidates = [
+        os.getenv("BINANCE_PM_BASE_URL", "").strip().rstrip("/"),
+        runtime_base.replace("://fapi.", "://papi."),
+        _DEFAULT_PM_BASE_URL,
+    ]
+    candidates: list[str] = []
+    for item in raw_candidates:
+        if not item:
+            continue
+        if item not in candidates:
+            candidates.append(item)
+    return candidates
+
+
+def _api_mode_cache_key(api_key: str, base_url: str | None = None) -> str:
+    clean_key = str(api_key or "").strip()
+    clean_base = str(base_url or _resolve_base_url()).strip().rstrip("/")
+    return f"{clean_base}|{clean_key}"
+
+
+def _get_preferred_api_mode(api_key: str, base_url: str | None = None) -> str | None:
+    cache_key = _api_mode_cache_key(api_key, base_url)
+    with _API_MODE_LOCK:
+        return _API_MODE_BY_KEY.get(cache_key)
+
+
+def _set_preferred_api_mode(api_key: str, mode: str | None, base_url: str | None = None) -> None:
+    if not api_key:
+        return
+    cache_key = _api_mode_cache_key(api_key, base_url)
+    with _API_MODE_LOCK:
+        if mode in {"fapi", "pm"}:
+            _API_MODE_BY_KEY[cache_key] = str(mode)
+        else:
+            _API_MODE_BY_KEY.pop(cache_key, None)
+
+
+def _is_auth_or_permission_error(exc: Exception) -> bool:
+    msg = str(exc)
+    return (
+        "code=-2015" in msg
+        or "HTTP 401" in msg
+        or "Invalid API-key" in msg
+        or "permissions for action" in msg
+    )
 
 
 _TIME_OFFSET_MS = 0
@@ -96,7 +149,7 @@ def _sign(secret: str, query_string: str) -> str:
 
 
 def _refresh_server_time_offset(force: bool = False) -> None:
-    """???????????? -1021????????"""
+    """?????????? -1021????????"""
     global _TIME_OFFSET_MS, _TIME_OFFSET_AT
     now = time.time()
     if (not force) and _TIME_OFFSET_AT and (now - _TIME_OFFSET_AT) < _TIME_OFFSET_TTL_SEC:
@@ -114,7 +167,7 @@ def _refresh_server_time_offset(force: bool = False) -> None:
 def _signed_timestamp_ms() -> int:
     """
     ???????????
-    ???? 500ms ??????????????????????
+    ?? 500ms ??????????????????????
     """
     try:
         _refresh_server_time_offset(force=False)
@@ -129,6 +182,7 @@ def _request(
     method: str,
     endpoint: str,
     params: dict[str, Any] | None = None,
+    base_url: str | None = None,
     max_retries: int = 3,
 ) -> Any:
     
@@ -157,11 +211,11 @@ def _request(
             req_func = requests.delete
         else:
             req_func = requests.post
-            # POST / DELETE ???? query string ????????? url ? params=None
+            # POST / DELETE ?? query string ??????? url ? params=None
 
         try:
             resp = req_func(
-                f"{_resolve_base_url()}{endpoint}",
+                f"{(base_url or _resolve_base_url()).rstrip('/')}{endpoint}",
                 headers=headers,
                 params=query_string, # requests accept string as raw query
                 timeout=15,
@@ -209,42 +263,281 @@ def _request(
             time.sleep(wait)
 
 
+def _request_with_pm_fallback(
+    api_key: str,
+    api_secret: str,
+    method: str,
+    endpoint: str,
+    params: dict[str, Any] | None = None,
+    *,
+    pm_endpoints: tuple[str, ...] = (),
+    max_retries: int = 3,
+) -> Any:
+    preferred_mode = _get_preferred_api_mode(api_key)
+    if pm_endpoints and preferred_mode == "pm":
+        fallback_error: Exception | None = None
+        for pm_base in _resolve_pm_base_candidates():
+            for pm_endpoint in pm_endpoints:
+                try:
+                    result = _request(
+                        api_key,
+                        api_secret,
+                        method,
+                        pm_endpoint,
+                        params=params,
+                        base_url=pm_base,
+                        max_retries=max_retries,
+                    )
+                    _set_preferred_api_mode(api_key, "pm")
+                    return result
+                except Exception as pm_exc:
+                    fallback_error = pm_exc
+        raise fallback_error or ValueError("portfolio margin endpoint unavailable")
+
+    try:
+        result = _request(
+            api_key,
+            api_secret,
+            method,
+            endpoint,
+            params=params,
+            max_retries=max_retries,
+        )
+        _set_preferred_api_mode(api_key, "fapi")
+        return result
+    except Exception as exc:
+        if not pm_endpoints or not _is_auth_or_permission_error(exc):
+            raise
+
+        fallback_error: Exception | None = None
+        for pm_base in _resolve_pm_base_candidates():
+            for pm_endpoint in pm_endpoints:
+                try:
+                    result = _request(
+                        api_key,
+                        api_secret,
+                        method,
+                        pm_endpoint,
+                        params=params,
+                        base_url=pm_base,
+                        max_retries=1,
+                    )
+                    _set_preferred_api_mode(api_key, "pm")
+                    return result
+                except Exception as pm_exc:
+                    fallback_error = pm_exc
+        raise fallback_error or exc
+
+
 def set_position_mode(api_key: str, api_secret: str, dual_side: bool = True) -> dict:
     """设置双向持仓（Hedge Mode）"""
-    return _request(
+    return _request_with_pm_fallback(
         api_key, api_secret, "POST", "/fapi/v1/positionSide/dual",
-        params={"dualSidePosition": "true" if dual_side else "false"}
+        params={"dualSidePosition": "true" if dual_side else "false"},
+        pm_endpoints=("/papi/v1/um/positionSide/dual", "/papi/v1/cm/positionSide/dual")
     )
 
 
 def set_symbol_leverage(api_key: str, api_secret: str, symbol: str, leverage: int) -> dict:
     """设置杠杆"""
-    return _request(
+    return _request_with_pm_fallback(
         api_key, api_secret, "POST", "/fapi/v1/leverage",
-        params={"symbol": _clean_symbol(symbol), "leverage": leverage}
+        params={"symbol": _clean_symbol(symbol), "leverage": leverage},
+        pm_endpoints=("/papi/v1/um/leverage", "/papi/v1/cm/leverage")
     )
 
 
 def set_margin_type(api_key: str, api_secret: str, symbol: str, margin_type: str = "ISOLATED") -> dict:
     """设置全仓/逐仓 (ISOLATED/CROSSED)"""
-    return _request(
+    return _request_with_pm_fallback(
         api_key, api_secret, "POST", "/fapi/v1/marginType",
-        params={"symbol": _clean_symbol(symbol), "marginType": margin_type}
+        params={"symbol": _clean_symbol(symbol), "marginType": margin_type},
+        pm_endpoints=("/papi/v1/um/marginType", "/papi/v1/cm/marginType")
     )
 
 
 def get_account_balance(api_key: str, api_secret: str) -> dict:
-    """获取账户 USDT 余额信息 (复用 binance_scraper 中的逻辑，但放在执行器更内聚)"""
-    data = _request(api_key, api_secret, "GET", "/fapi/v2/balance")
-    usdt_info = next((item for item in data if item["asset"] == "USDT"), None)
-    if not usdt_info:
-        return {"balance": 0.0, "availableBalance": 0.0}
-    return usdt_info
+    """???????????????????????"""
+
+    def _to_float(v: Any) -> float:
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _pick(d: dict[str, Any], keys: tuple[str, ...]) -> float:
+        for k in keys:
+            if k in d and d.get(k) is not None:
+                val = _to_float(d.get(k))
+                if val != 0:
+                    return val
+        for k in keys:
+            if k in d and d.get(k) is not None:
+                return _to_float(d.get(k))
+        return 0.0
+
+    def _from_rows(rows: list[dict[str, Any]], endpoint: str) -> dict[str, Any] | None:
+        if not rows:
+            return None
+        preferred = ("USDT", "USDC", "BUSD", "FDUSD", "USD")
+        row = None
+        for asset in preferred:
+            row = next((x for x in rows if str(x.get("asset", "")).upper() == asset), None)
+            if row:
+                break
+        if row is None:
+            row = max(
+                rows,
+                key=lambda x: max(
+                    _pick(x, ("balance", "walletBalance", "crossWalletBalance", "equity", "accountEquity")),
+                    _pick(x, ("availableBalance", "maxWithdrawAmount", "withdrawAvailable", "available", "crossWalletBalance")),
+                ),
+            )
+        balance = _pick(row, ("balance", "walletBalance", "crossWalletBalance", "equity", "accountEquity"))
+        available = _pick(row, ("availableBalance", "maxWithdrawAmount", "withdrawAvailable", "available", "crossWalletBalance"))
+        out = dict(row)
+        out["balance"] = balance
+        out["availableBalance"] = available
+        out["_endpoint"] = endpoint
+        return out
+
+    def _from_account(acct: dict[str, Any], endpoint: str) -> dict[str, Any]:
+        balance = _pick(
+            acct,
+            (
+                "totalWalletBalance",
+                "totalMarginBalance",
+                "totalCrossWalletBalance",
+                "accountEquity",
+                "uniMMRBalance",
+                "balance",
+                "walletBalance",
+                "equity",
+            ),
+        )
+        available = _pick(
+            acct,
+            (
+                "availableBalance",
+                "totalAvailableBalance",
+                "maxWithdrawAmount",
+                "withdrawAvailable",
+                "available",
+                "crossWalletBalance",
+            ),
+        )
+        out = dict(acct)
+        out["asset"] = out.get("asset") or "USDT"
+        out["balance"] = balance
+        out["availableBalance"] = available
+        out["_endpoint"] = endpoint
+        return out
+
+    preferred_mode = _get_preferred_api_mode(api_key)
+    fapi_probes: list[tuple[str, str | None]] = [
+        ("/fapi/v2/account", None),
+        ("/fapi/v2/balance", None),
+    ]
+    pm_probes: list[tuple[str, str | None]] = []
+    for pm_base in _resolve_pm_base_candidates():
+        pm_probes.extend([
+            ("/papi/v1/account", pm_base),
+            ("/papi/v1/um/account", pm_base),
+            ("/papi/v1/cm/account", pm_base),
+            ("/papi/v1/balance", pm_base),
+        ])
+
+    def _collect_candidates(probes: list[tuple[str, str | None]]) -> tuple[list[dict[str, Any]], Exception | None]:
+        candidates: list[dict[str, Any]] = []
+        first_error: Exception | None = None
+        for endpoint, base in probes:
+            try:
+                data = _request(api_key, api_secret, "GET", endpoint, base_url=base, max_retries=1)
+            except Exception as exc:
+                if first_error is None:
+                    first_error = exc
+                continue
+
+            if isinstance(data, list):
+                rows = [r for r in data if isinstance(r, dict)]
+                parsed = _from_rows(rows, endpoint)
+                if parsed:
+                    candidates.append(parsed)
+            elif isinstance(data, dict):
+                candidates.append(_from_account(data, endpoint))
+        return candidates, first_error
+
+    probe_groups: list[tuple[str, list[tuple[str, str | None]]]] = []
+    if preferred_mode == "pm":
+        probe_groups = [("pm", pm_probes), ("fapi", fapi_probes)]
+    elif preferred_mode == "fapi":
+        probe_groups = [("fapi", fapi_probes), ("pm", pm_probes)]
+    else:
+        probe_groups = [("mixed", fapi_probes + pm_probes)]
+
+    first_error: Exception | None = None
+    for group_name, probes in probe_groups:
+        candidates, group_error = _collect_candidates(probes)
+        if candidates:
+            best = max(candidates, key=lambda x: (float(x.get("balance") or 0), float(x.get("availableBalance") or 0)))
+            if group_name == "pm":
+                _set_preferred_api_mode(api_key, "pm")
+            elif group_name == "fapi":
+                _set_preferred_api_mode(api_key, "fapi")
+            else:
+                endpoint = str(best.get("_endpoint") or "")
+                _set_preferred_api_mode(api_key, "pm" if endpoint.startswith("/papi/") else "fapi")
+            return best
+        if first_error is None and group_error is not None:
+            first_error = group_error
+
+    if first_error is not None:
+        raise first_error
+
+    return {"asset": "USDT", "balance": 0.0, "availableBalance": 0.0, "_endpoint": "unknown"}
 
 
 def get_my_positions(api_key: str, api_secret: str) -> list[dict]:
-    """获取币安模拟盘当前非零持仓。"""
-    data = _request(api_key, api_secret, "GET", "/fapi/v2/positionRisk")
+    """??????????????"""
+    data: Any
+    preferred_mode = _get_preferred_api_mode(api_key)
+    if preferred_mode == "pm":
+        data = None
+        fallback_error: Exception | None = None
+        for pm_base in _resolve_pm_base_candidates():
+            for endpoint in ("/papi/v1/um/positionRisk", "/papi/v1/cm/positionRisk"):
+                try:
+                    data = _request(api_key, api_secret, "GET", endpoint, base_url=pm_base, max_retries=1)
+                    _set_preferred_api_mode(api_key, "pm")
+                    break
+                except Exception as pm_exc:
+                    fallback_error = pm_exc
+            if isinstance(data, list):
+                break
+        if data is None:
+            raise fallback_error or ValueError("portfolio margin position query failed")
+    else:
+        try:
+            data = _request(api_key, api_secret, "GET", "/fapi/v2/positionRisk")
+            _set_preferred_api_mode(api_key, "fapi")
+        except Exception as exc:
+            if not _is_auth_or_permission_error(exc):
+                raise
+            data = None
+            fallback_error: Exception | None = None
+            for pm_base in _resolve_pm_base_candidates():
+                for endpoint in ("/papi/v1/um/positionRisk", "/papi/v1/cm/positionRisk"):
+                    try:
+                        data = _request(api_key, api_secret, "GET", endpoint, base_url=pm_base, max_retries=1)
+                        _set_preferred_api_mode(api_key, "pm")
+                        break
+                    except Exception as pm_exc:
+                        fallback_error = pm_exc
+                if isinstance(data, list):
+                    break
+            if data is None:
+                raise fallback_error or exc
+
     if not isinstance(data, list):
         return []
 
@@ -261,7 +554,7 @@ def get_my_positions(api_key: str, api_secret: str) -> list[dict]:
 
 
 def get_ticker_price(symbol: str) -> float:
-    """?????? (????)"""
+    """???? (????)"""
     symbol = _clean_symbol(symbol)
     resp = requests.get(f"{_resolve_base_url()}/fapi/v1/ticker/price", params={"symbol": symbol}, timeout=10)
     if not resp.ok:
@@ -321,7 +614,7 @@ def get_symbol_filters(symbol: str) -> dict:
         }
 
     if cache_key not in _SYMBOL_FILTERS:
-        raise ValueError(f"USDT-M exchangeInfo ?????? symbol: {symbol}")
+        raise ValueError(f"USDT-M 交易规则中找不到该合约: {symbol}")
 
     return _SYMBOL_FILTERS[cache_key]
 
@@ -338,7 +631,7 @@ def _format_qty(qty: float, step_size: float) -> str:
 
 def _format_price(price: float, tick_size: float, round_up: bool = False) -> str:
     if price <= 0:
-        raise ValueError(f"?????????: {price}")
+        raise ValueError(f"价格必须大于 0: {price}")
     if tick_size <= 0:
         return format(Decimal(str(price)).normalize(), "f")
     step = Decimal(str(tick_size))
@@ -389,7 +682,7 @@ def place_market_order(
     current_price: float = 0.0,
     client_oid: str = "",
 ) -> dict:
-    """?????? (???????)"""
+    """???? (???????)"""
     symbol = _clean_symbol(symbol)
     direction = direction.lower() # "long" or "short"
     margin_mode = "ISOLATED" if margin_mode.lower() in ["isolated", "fixed"] else "CROSSED"
@@ -402,7 +695,7 @@ def place_market_order(
     try:
         set_symbol_leverage(api_key, api_secret, symbol, leverage)
     except Exception as e:
-        logger.warning(f"????????(??????): {e}")
+        logger.warning(f"设置杠杆失败(继续下单): {e}")
 
     try:
         set_margin_type(api_key, api_secret, symbol, margin_mode)
@@ -414,11 +707,11 @@ def place_market_order(
 
     filters = get_symbol_filters(symbol)
     if raw_qty < filters["minQty"]:
-        raise ValueError(f"???? {raw_qty} ??????????? {filters['minQty']} (???: {usdt_margin})")
+        raise ValueError(f"数量 {raw_qty} 小于最小下单量 {filters['minQty']} (保证金: {usdt_margin})")
 
     qty_str = _format_qty(raw_qty, filters["stepSize"])
     if float(qty_str) == 0:
-        raise ValueError(f"?????????? 0: {raw_qty}")
+        raise ValueError(f"按步长截断后数量为 0: {raw_qty}")
 
     position_side = "LONG" if direction == "long" else "SHORT"
     side = "BUY" if direction == "long" else "SELL"
@@ -433,9 +726,9 @@ def place_market_order(
     if client_oid:
         payload["newClientOrderId"] = client_oid
 
-    logger.info("??????: %s %s POS_SIDE=%s ??=%s ?????=%.2f", symbol, side, position_side, qty_str, usdt_margin)
+    logger.info("币安按量下单: %s %s POS_SIDE=%s 数量=%s 预期保证金=%.2f", symbol, side, position_side, qty_str, usdt_margin)
 
-    res = _request(api_key, api_secret, "POST", "/fapi/v1/order", params=payload)
+    res = _request_with_pm_fallback(api_key, api_secret, "POST", "/fapi/v1/order", params=payload, pm_endpoints=("/papi/v1/um/order", "/papi/v1/cm/order"))
     if isinstance(res, dict):
         res["_calculated_size"] = qty_str
     return res
@@ -465,7 +758,7 @@ def place_limit_order(
     try:
         set_symbol_leverage(api_key, api_secret, symbol, leverage)
     except Exception as e:
-        logger.warning(f"????????(??????): {e}")
+        logger.warning(f"设置杠杆失败(继续下单): {e}")
 
     try:
         set_margin_type(api_key, api_secret, symbol, margin_mode)
@@ -475,11 +768,11 @@ def place_limit_order(
     filters = get_symbol_filters(symbol)
     raw_qty = (usdt_margin * leverage) / limit_price
     if raw_qty < filters["minQty"]:
-        raise ValueError(f"???? {raw_qty} ??????????? {filters['minQty']} (???: {usdt_margin})")
+        raise ValueError(f"数量 {raw_qty} 小于最小下单量 {filters['minQty']} (保证金: {usdt_margin})")
 
     qty_str = _format_qty(raw_qty, filters["stepSize"])
     if float(qty_str) == 0:
-        raise ValueError(f"?????????? 0: {raw_qty}")
+        raise ValueError(f"按步长截断后数量为 0: {raw_qty}")
 
     price_str = _format_price(limit_price, float(filters.get("tickSize") or 0.0), round_up=direction == "short")
     position_side = "LONG" if direction == "long" else "SHORT"
@@ -496,7 +789,7 @@ def place_limit_order(
     if client_oid:
         payload["newClientOrderId"] = client_oid
 
-    res = _request(api_key, api_secret, "POST", "/fapi/v1/order", params=payload)
+    res = _request_with_pm_fallback(api_key, api_secret, "POST", "/fapi/v1/order", params=payload, pm_endpoints=("/papi/v1/um/order", "/papi/v1/cm/order"))
     if isinstance(res, dict):
         res["_calculated_size"] = qty_str
         res["_limit_price"] = price_str
@@ -516,8 +809,8 @@ def get_order(
     elif client_oid:
         params["origClientOrderId"] = client_oid
     else:
-        raise ValueError("get_order ?? order_id ? client_oid")
-    data = _request(api_key, api_secret, "GET", "/fapi/v1/order", params=params, max_retries=1)
+        raise ValueError("get_order 需要 order_id 或 client_oid")
+    data = _request_with_pm_fallback(api_key, api_secret, "GET", "/fapi/v1/order", params=params, pm_endpoints=("/papi/v1/um/order", "/papi/v1/cm/order"), max_retries=1)
     return data if isinstance(data, dict) else {}
 
 
@@ -534,8 +827,8 @@ def cancel_order(
     elif client_oid:
         params["origClientOrderId"] = client_oid
     else:
-        raise ValueError("cancel_order ?? order_id ? client_oid")
-    data = _request(api_key, api_secret, "DELETE", "/fapi/v1/order", params=params, max_retries=1)
+        raise ValueError("cancel_order 需要 order_id 或 client_oid")
+    data = _request_with_pm_fallback(api_key, api_secret, "DELETE", "/fapi/v1/order", params=params, pm_endpoints=("/papi/v1/um/order", "/papi/v1/cm/order"), max_retries=1)
     return data if isinstance(data, dict) else {}
 
 
@@ -563,4 +856,4 @@ def close_partial_position(
     }
     
     logger.info("币安局部平仓: %s %s POS_SIDE=%s 数量=%s", symbol, side, position_side, qty_str)
-    return _request(api_key, api_secret, "POST", "/fapi/v1/order", params=payload)
+    return _request_with_pm_fallback(api_key, api_secret, "POST", "/fapi/v1/order", params=payload, pm_endpoints=("/papi/v1/um/order", "/papi/v1/cm/order"))

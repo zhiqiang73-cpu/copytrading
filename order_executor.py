@@ -139,6 +139,69 @@ def _ceil_decimal_to_step(value: Decimal, step: Decimal) -> Decimal:
     return units * step
 
 
+def _floor_decimal_to_step(value: Decimal, step: Decimal) -> Decimal:
+    if step <= 0:
+        return value
+    units = (value / step).to_integral_value(rounding=ROUND_DOWN)
+    return units * step
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _extract_order_filled_qty(order: dict | None) -> float:
+    payload = dict(order or {})
+    filled_qty = _safe_float(payload.get("baseVolume"), 0.0)
+    if filled_qty <= 0:
+        filled_qty = _safe_float(payload.get("filledQty"), 0.0)
+    status = str(payload.get("state") or payload.get("status") or "").lower()
+    if filled_qty <= 0 and status == "filled":
+        filled_qty = _safe_float(payload.get("size"), 0.0)
+    return max(filled_qty, 0.0)
+
+
+def _reconcile_place_order_error(
+    api_key: str,
+    api_secret: str,
+    api_passphrase: str,
+    symbol: str,
+    client_oid: str,
+    product_type: str = "USDT-FUTURES",
+    require_fill: bool = False,
+) -> dict | None:
+    if not client_oid:
+        return None
+    try:
+        detail = get_order_detail(
+            api_key,
+            api_secret,
+            api_passphrase,
+            symbol=symbol,
+            client_oid=client_oid,
+            product_type=product_type,
+        )
+    except Exception as exc:
+        logger.info("place-order error reconcile miss: symbol=%s clientOid=%s err=%s", symbol, client_oid, exc)
+        return None
+    if not isinstance(detail, dict) or not detail:
+        return None
+
+    status = str(detail.get("state") or detail.get("status") or "").lower()
+    filled_qty = _extract_order_filled_qty(detail)
+    if require_fill and filled_qty <= 0 and status != "filled":
+        return None
+
+    result = dict(detail)
+    if filled_qty > 0:
+        result["_calculated_size"] = _normalize_size(filled_qty)
+    result["_reconciled_after_error"] = True
+    return result
+
+
 def _raise_response_error(resp: requests.Response, default_msg: str) -> None:
     try:
         payload = resp.json()
@@ -386,7 +449,7 @@ def get_ticker_price(
     for key in ("last", "lastPr", "lastPrice", "close", "markPrice"):
         if data.get(key) is not None:
             return float(data[key])
-    raise ValueError("ticker API ?????")
+    raise ValueError("ticker API 返回中缺少价格字段")
 
 
 def get_ticker_snapshot(
@@ -409,7 +472,7 @@ def get_ticker_snapshot(
     if isinstance(data, list) and data:
         data = data[0]
     if not isinstance(data, dict):
-        raise ValueError("ticker API ??????")
+        raise ValueError("ticker API 返回格式异常")
     return data
 
 
@@ -423,7 +486,7 @@ def get_price_step(symbol: str, product_type: str = "USDT-FUTURES") -> float:
 
 def _normalize_price(price: float, price_step: float, round_up: bool = False) -> str:
     if price <= 0:
-        raise ValueError(f"?????????: {price}")
+        raise ValueError(f"价格必须大于 0: {price}")
     step = Decimal(str(price_step)) if price_step > 0 else Decimal("0")
     value = Decimal(str(price))
     if step > 0:
@@ -470,7 +533,7 @@ def place_limit_order_by_size(
     except Exception as exc:
         if _resolve_simulated() and _is_margin_mode_error(exc):
             fallback = "crossed" if _normalize_margin_mode(margin_mode) != "crossed" else "isolated"
-            logger.warning("??? 400172(????)??? marginMode=%s: %s", fallback, symbol)
+            logger.warning("模拟盘 400172(保证金模式不合法)，回退 marginMode=%s: %s", fallback, symbol)
             _do_set_leverage(fallback)
             margin_mode = fallback
         else:
@@ -538,10 +601,22 @@ def place_limit_order_by_size(
                 data=retry_payload,
                 max_retries=1,
             )
+        elif client_oid:
+            res = _reconcile_place_order_error(
+                api_key,
+                api_secret,
+                api_passphrase,
+                symbol=symbol,
+                client_oid=client_oid,
+                product_type=product_type,
+                require_fill=False,
+            )
+            if res is None:
+                raise
         else:
             raise
     if isinstance(res, dict):
-        res["_calculated_size"] = size_str
+        res.setdefault("_calculated_size", size_str)
         res["_limit_price"] = price_str
     return res
 
@@ -561,7 +636,7 @@ def place_limit_order(
     pos_mode: str = "2",
 ) -> dict:
     symbol = _clean_symbol(symbol)
-    size_str = _calc_size(usdt_margin, leverage, limit_price)
+    size_str = _calc_size(usdt_margin, leverage, limit_price, symbol=symbol, product_type=product_type)
     res = place_limit_order_by_size(
         api_key=api_key,
         api_secret=api_secret,
@@ -579,7 +654,7 @@ def place_limit_order(
         post_only=True,
     )
     if isinstance(res, dict):
-        res["_calculated_size"] = size_str
+        res.setdefault("_calculated_size", size_str)
     return res
 
 
@@ -599,7 +674,7 @@ def get_order_detail(
     elif client_oid:
         params["clientOid"] = client_oid
     else:
-        raise ValueError("get_order_detail ?? order_id ? client_oid")
+        raise ValueError("get_order_detail 需要 order_id 或 client_oid")
     data = _request(
         api_key,
         api_secret,
@@ -627,7 +702,7 @@ def cancel_order(
     elif client_oid:
         payload["clientOid"] = client_oid
     else:
-        raise ValueError("cancel_order ?? order_id ? client_oid")
+        raise ValueError("cancel_order 需要 order_id 或 client_oid")
     data = _request(
         api_key,
         api_secret,
@@ -640,19 +715,37 @@ def cancel_order(
     return data if isinstance(data, dict) else {}
 
 
-def _calc_size(usdt_margin: float, leverage: int, price: float) -> str:
-    """
-    将 USDT 保证金换算为合约张数（以 USDT 计价的合约，1张=1USDT面值）。
-    size = (保证金 × 杠杆) / 当前价格，保留4位小数，最小0.0001。
-    """
+def _calc_size(
+    usdt_margin: float,
+    leverage: int,
+    price: float,
+    symbol: str = "",
+    product_type: str = "USDT-FUTURES",
+) -> str:
+    """Convert target margin into a Bitget-valid contract size."""
     if price <= 0:
-        raise ValueError(f"行情价非正值: {price}")
-    raw_size = (usdt_margin * leverage) / price
-    # 截断到4位小数，避免四舍五入超出可下单精度
-    size = int(raw_size * 10000) / 10000.0
+        raise ValueError(f"invalid price: {price}")
+
+    raw_size = Decimal(str((usdt_margin * leverage) / price))
+    size = raw_size
+    if symbol:
+        rules = get_symbol_rules(symbol, product_type)
+        size_multiplier = Decimal(str(rules.get("sizeMultiplier") or "0"))
+        if size_multiplier > 0:
+            size = _floor_decimal_to_step(size, size_multiplier)
+        required_qty = Decimal(
+            str(get_min_order_requirements(symbol, leverage, price, product_type).get("requiredQtyStr") or "0")
+        )
+        if required_qty > 0 and size < required_qty:
+            size = required_qty
+    else:
+        size = Decimal(str(int(float(raw_size) * 10000) / 10000.0))
+
     if size <= 0:
-        raise ValueError(f"换算后张数为0或负数（保证金={usdt_margin}, 杠杆={leverage}x, 价格={price}）")
-    return f"{size:.4f}".rstrip("0").rstrip(".")
+        raise ValueError(
+            f"calculated size <= 0: margin={usdt_margin} leverage={leverage} price={price}"
+        )
+    return _format_decimal_str(size)
 
 
 def set_symbol_leverage(
@@ -814,10 +907,22 @@ def place_market_order_by_size(
                 data=retry_payload,
                 max_retries=1,
             )
+        elif client_oid:
+            res = _reconcile_place_order_error(
+                api_key,
+                api_secret,
+                api_passphrase,
+                symbol=symbol,
+                client_oid=client_oid,
+                product_type=product_type,
+                require_fill=True,
+            )
+            if res is None:
+                raise
         else:
             raise
     if isinstance(res, dict):
-        res["_calculated_size"] = size_str
+        res.setdefault("_calculated_size", size_str)
     return res
 
 
@@ -842,7 +947,7 @@ def place_market_order(
     # 获取当前价格以换算合约张数
     symbol = _clean_symbol(symbol)
     price = current_price if current_price > 0 else get_ticker_price(symbol, product_type)
-    size_str = _calc_size(usdt_margin, leverage, price)
+    size_str = _calc_size(usdt_margin, leverage, price, symbol=symbol, product_type=product_type)
     res = place_market_order_by_size(
         api_key=api_key,
         api_secret=api_secret,
@@ -858,7 +963,7 @@ def place_market_order(
         sync_leverage=True,
     )
     if isinstance(res, dict):
-        res["_calculated_size"] = size_str
+        res.setdefault("_calculated_size", size_str)
     return res
 
 

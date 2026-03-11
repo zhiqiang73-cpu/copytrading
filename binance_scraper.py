@@ -1,4 +1,4 @@
-"""
+﻿"""
 binance_scraper.py — 实时监控币安跟单交易员的操作记录
 无需登录，通过公开的 order-history 接口轮询识别开仓/平仓信号
 

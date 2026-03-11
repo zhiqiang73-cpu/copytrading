@@ -140,6 +140,25 @@ def _is_binance_balance_error(exc: Exception) -> bool:
     )
 
 
+def _is_bitget_position_missing_error(exc: Exception) -> bool:
+    msg = str(exc)
+    lower = msg.lower()
+    return (
+        ("code=22002" in msg)
+        or ("no position" in lower)
+        or ("no position to close" in lower)
+    )
+
+
+def _is_binance_position_missing_error(exc: Exception) -> bool:
+    msg = str(exc)
+    lower = msg.lower()
+    return (
+        ("code=-2022" in msg)
+        or ("reduceonly order is rejected" in lower)
+    )
+
+
 def _is_local_min_size_error(exc: Exception) -> bool:
     msg = str(exc)
     return ("换算后张数为0或负数" in msg) or ("开仓数量因精度截断为 0" in msg)
@@ -630,7 +649,8 @@ class CopyEngine:
         # Bitget 余额
         if bg_enabled:
             try:
-                bal = order_executor.get_account_balance(bg_api_key, bg_secret, bg_pass)
+                with order_executor.use_runtime(simulated=runtime["bitget_simulated"]):
+                    bal = order_executor.get_account_balance(bg_api_key, bg_secret, bg_pass)
                 self._pos_mode = str(bal.get("_posMode", "2"))
                 bg_available_usdt = _extract_balance_usdt(bal)
                 bg_wallet_balance = _extract_wallet_equity_usdt(bal) or bg_available_usdt
@@ -642,7 +662,8 @@ class CopyEngine:
         if bn_enabled:
             import binance_executor
             try:
-                bn_bal = binance_executor.get_account_balance(bn_api_key, bn_secret)
+                with binance_executor.use_runtime(base_url=runtime["binance_base_url"]):
+                    bn_bal = binance_executor.get_account_balance(bn_api_key, bn_secret)
                 bn_available_usdt = _safe_float(bn_bal.get("availableBalance", 0.0))
                 bn_wallet_balance = _extract_wallet_equity_usdt(bn_bal) or _safe_float(bn_bal.get("balance", 0.0))
             except Exception as exc:
@@ -697,7 +718,7 @@ class CopyEngine:
                     logger.info("币安交易员 %s 首次初始化信号时间戳 (回溯 2 小时)", pid[:12])
 
                 since_ms = self._bn_seen[pid]
-                new_orders = binance_scraper.fetch_latest_orders(pid, since_ms=since_ms, limit=20)
+                new_orders = binance_scraper.fetch_latest_orders(pid, since_ms=since_ms, limit=100)
                 seen_in_batch: set[str] = set()
                 for order in reversed(new_orders):  # 从旧到新处理
                     order_key = (
@@ -710,6 +731,7 @@ class CopyEngine:
                     bg_creds = {"ak": bg_api_key, "sk": bg_secret, "pp": bg_pass} if bg_enabled else None
                     bn_creds = {"ak": bn_api_key, "sk": bn_secret} if bn_enabled else None
                     self._process_binance_order(
+                        settings,
                         bg_creds, bn_creds, pid, order,
                         bg_fallback_margin=bg_fallback_margin, bg_tol=bg_tol, bg_follow_ratio=bg_follow_ratio, bg_available_usdt=bg_available_usdt,
                         bg_allow_open=bg_allow_open, bg_guard_note=bg_guard_note,
@@ -749,7 +771,7 @@ class CopyEngine:
                 logger.warning("刷新币安交易员 %s 元数据失败: %s", pid[:12], e)
         
         if changed:
-            db.update_copy_settings_profile(self._profile, binance_traders=json.dumps(current_data))
+            db.update_shared_copy_settings(binance_traders=json.dumps(current_data, ensure_ascii=False))
             logger.info("币安交易员元数据已更新到数据库")
 
     def _resolve_follow_ratio(self, settings: dict) -> float:
@@ -889,6 +911,92 @@ class CopyEngine:
         }
         payload.update(updates)
         return db.upsert_copy_position_state(platform, trader_uid, symbol, direction, **payload)
+
+    def _find_active_copy_position(
+        self,
+        platform: str,
+        trader_uid: str,
+        symbol: str,
+        direction: str,
+    ) -> dict | None:
+        platform_key = str(platform or "").strip().lower()
+        trader_key = str(trader_uid or "").strip()
+        symbol_key = _clean_symbol_str(symbol or "").upper()
+        direction_key = str(direction or "").strip().lower()
+        if direction_key not in ("long", "short"):
+            return None
+
+        for position in db.get_active_copy_position_summaries(platform_key):
+            if str(position.get("trader_uid") or "").strip() != trader_key:
+                continue
+            if _clean_symbol_str(str(position.get("symbol") or "")).upper() != symbol_key:
+                continue
+            if str(position.get("direction") or "").strip().lower() != direction_key:
+                continue
+            if _safe_float(position.get("remaining_qty"), 0.0) <= 0:
+                continue
+            return position
+        return None
+
+    def _get_exchange_position_qty(
+        self,
+        platform: str,
+        api_creds: tuple,
+        symbol: str,
+        direction: str,
+    ) -> float:
+        exec_platform = self._exec_platform(platform)
+        symbol_key = _clean_symbol_str(symbol or "").upper()
+        direction_key = str(direction or "").strip().lower()
+        if direction_key not in ("long", "short"):
+            return 0.0
+
+        if exec_platform == "binance":
+            import binance_executor
+
+            ak, sk, _ = api_creds
+            with binance_executor.use_runtime(base_url=self._runtime()["binance_base_url"]):
+                raw_positions = binance_executor.get_my_positions(ak, sk)
+
+            total_qty = 0.0
+            for item in raw_positions or []:
+                if _clean_symbol_str(str(item.get("symbol") or "")).upper() != symbol_key:
+                    continue
+                position_side = str(item.get("positionSide") or "").upper()
+                position_amt = _safe_float(item.get("positionAmt"), 0.0)
+                item_direction = ""
+                qty = 0.0
+                if position_side == "BOTH":
+                    if position_amt > 0:
+                        item_direction = "long"
+                        qty = position_amt
+                    elif position_amt < 0:
+                        item_direction = "short"
+                        qty = abs(position_amt)
+                elif position_side in ("LONG", "SHORT"):
+                    item_direction = position_side.lower()
+                    qty = abs(position_amt)
+                if item_direction == direction_key and qty > 0:
+                    total_qty += qty
+            return total_qty
+
+        ak, sk, pp = api_creds
+        with order_executor.use_runtime(simulated=self._runtime()["bitget_simulated"]):
+            raw_positions = order_executor.get_my_positions(ak, sk, pp)
+
+        total_qty = 0.0
+        for item in raw_positions or []:
+            if _clean_symbol_str(str(item.get("symbol") or "")).upper() != symbol_key:
+                continue
+            if str(item.get("holdSide") or "").strip().lower() != direction_key:
+                continue
+            qty = 0.0
+            for key in ("total", "size", "holdVolume", "available", "pos"):
+                qty = abs(_safe_float(item.get(key), 0.0))
+                if qty > 0:
+                    break
+            total_qty += qty
+        return total_qty
 
     def _get_market_price(self, platform: str, symbol: str, cache: dict[tuple[str, str], float]) -> float:
         key = (platform, symbol)
@@ -1116,7 +1224,7 @@ class CopyEngine:
                 tick = _safe_float(filters.get("tickSize"), 0.0)
                 limit_price = _pick_maker_limit_price(direction, bid, ask, current_price, tick, maker_levels)
                 if limit_price <= 0:
-                    return {"status": "skipped", "reason": "???? Binance ????", "note": "[MakerPriority] invalid_limit_price"}
+                    return {"status": "skipped", "reason": "Binance Maker 价格无效", "note": "[MakerPriority] invalid_limit_price"}
 
                 limit_client_oid = f"{client_oid}_L" if client_oid else f"bn_limit_{int(time.time() * 1000)}"
                 limit_res = binance_executor.place_limit_order(
@@ -1178,7 +1286,7 @@ class CopyEngine:
             tick = _safe_float(order_executor.get_price_step(symbol), 0.0)
             limit_price = _pick_maker_limit_price(direction, bid, ask, current_price, tick, maker_levels)
             if limit_price <= 0:
-                return {"status": "skipped", "reason": "???? Bitget ????", "note": "[MakerPriority] invalid_limit_price"}
+                return {"status": "skipped", "reason": "Bitget Maker 价格无效", "note": "[MakerPriority] invalid_limit_price"}
 
             limit_client_oid = f"{client_oid}_L" if client_oid else f"bg_limit_{int(time.time() * 1000)}"
             limit_res = order_executor.place_limit_order(
@@ -1236,6 +1344,7 @@ class CopyEngine:
 
     def _process_binance_order(
         self,
+        settings: dict,
         bg_creds: dict | None,
         bn_creds: dict | None,
         pid: str,
@@ -1273,6 +1382,7 @@ class CopyEngine:
                 src_margin = self._estimate_binance_margin(order)
                 short_hash = hashlib.md5(f"bn_{pid}_{order_id}".encode()).hexdigest()[:16]
                 client_oid = f"bn_{short_hash}"
+                opposite_direction = "short" if direction == "long" else "long"
 
                 def _insert_guard_skip(platform: str, skip_symbol: str, reason: str) -> None:
                     if db.has_tracking_no(pid, order_id, platform=platform):
@@ -1307,7 +1417,10 @@ class CopyEngine:
                     bg_symbol_mapped = _binance_symbol_to_bitget(symbol)
                     bg_state = db.get_copy_position_state(bg_platform, pid, bg_symbol_mapped, direction)
                     bg_ak, bg_sk, bg_pp = bg_creds["ak"], bg_creds["sk"], bg_creds["pp"]
-                    if bg_state.get("freeze_reentry"):
+                    bg_opposite = self._find_active_copy_position(bg_platform, pid, bg_symbol_mapped, opposite_direction)
+                    if bg_opposite:
+                        _insert_guard_skip(bg_platform, bg_symbol_mapped, f"opposite position exists ({opposite_direction}), hedge disabled")
+                    elif bg_state.get("freeze_reentry"):
                         _insert_frozen_skip(bg_platform, bg_symbol_mapped, "position is already locked, waiting for trader close", bg_state)
                     elif bg_allow_open:
                         bg_target_margin, bg_ratio_note = self._apply_follow_ratio(src_margin, bg_follow_ratio, bg_fallback_margin)
@@ -1326,7 +1439,10 @@ class CopyEngine:
                 if bn_creds:
                     bn_state = db.get_copy_position_state(bn_platform, pid, symbol, direction)
                     bn_ak, bn_sk = bn_creds["ak"], bn_creds["sk"]
-                    if bn_state.get("freeze_reentry"):
+                    bn_opposite = self._find_active_copy_position(bn_platform, pid, symbol, opposite_direction)
+                    if bn_opposite:
+                        _insert_guard_skip(bn_platform, symbol, f"opposite position exists ({opposite_direction}), hedge disabled")
+                    elif bn_state.get("freeze_reentry"):
                         _insert_frozen_skip(bn_platform, symbol, "position is already locked, waiting for trader close", bn_state)
                     elif bn_allow_open:
                         bn_target_margin, bn_ratio_note = self._apply_follow_ratio(src_margin, bn_follow_ratio, bn_fallback_margin)
@@ -1350,23 +1466,25 @@ class CopyEngine:
             if bg_creds:
                 bg_symbol_mapped = _binance_symbol_to_bitget(symbol)
                 bg_ak, bg_sk, bg_pp = bg_creds["ak"], bg_creds["sk"], bg_creds["pp"]
-                self._execute_close_for_platform(
+                bg_closed = self._execute_close_for_platform(
                     platform=bg_platform,
                     api_creds=(bg_ak, bg_sk, bg_pp),
                     pid=pid, order_id=order_id, symbol=bg_symbol_mapped,
                     direction=direction, price=price, order_pnl=order.get("pnl"), tol=bg_tol
                 )
-                db.clear_copy_position_state(bg_platform, pid, bg_symbol_mapped, direction)
+                if bg_closed:
+                    db.clear_copy_position_state(bg_platform, pid, bg_symbol_mapped, direction)
 
             if bn_creds:
                 bn_ak, bn_sk = bn_creds["ak"], bn_creds["sk"]
-                self._execute_close_for_platform(
+                bn_closed = self._execute_close_for_platform(
                     platform=bn_platform,
                     api_creds=(bn_ak, bn_sk, ""),
                     pid=pid, order_id=order_id, symbol=symbol,
                     direction=direction, price=price, order_pnl=order.get("pnl"), tol=bn_tol
                 )
-                db.clear_copy_position_state(bn_platform, pid, symbol, direction)
+                if bn_closed:
+                    db.clear_copy_position_state(bn_platform, pid, symbol, direction)
 
     def _execute_open_for_platform(
         self,
@@ -1411,7 +1529,7 @@ class CopyEngine:
         entry_settings = self._get_entry_execution_settings(settings)
 
         def _insert_skip(reason: str, exec_p: float = 0.0, dev: float = 0.0, extra_note: str = ""):
-            notes = f"[??] {reason} {ratio_note} {margin_note} {precheck_note} {extra_note}".strip()
+            notes = f"[跳过] {reason} {ratio_note} {margin_note} {precheck_note} {extra_note}".strip()
             db.insert_copy_order({
                 "timestamp": _now_ms(), "trader_uid": pid, "tracking_no": order_id,
                 "my_order_id": "", "symbol": symbol, "direction": direction,
@@ -1447,7 +1565,7 @@ class CopyEngine:
             logger.info("[%s????] %s %s ?=%.4f ?=%s", platform_label, symbol, direction.upper(), exec_price, exec_qty)
 
         if exec_platform == "bitget" and symbol in self._unsupported_symbols:
-            _insert_skip("Bitget ???????(??)")
+            _insert_skip("Bitget 交易对不可用(已缓存)")
             return
 
         if margin <= 0:
@@ -1485,9 +1603,9 @@ class CopyEngine:
                     required_margin = _safe_float(req.get("requiredMargin"), 0.0)
                     if required_margin > 0 and margin + 1e-12 < required_margin:
                         if cap_limit > 0 and required_margin > cap_limit + 1e-12:
-                            _insert_skip(f"Binance ?????? need={required_margin:.4f} cap={cap_limit:.4f}")
+                            _insert_skip(f"Binance 最小开仓金额不足 need={required_margin:.4f} cap={cap_limit:.4f}")
                             return
-                        precheck_note = f"[??????] target={margin:.4f} min={required_margin:.4f}"
+                        precheck_note = f"[最小下单修正] target={margin:.4f} min={required_margin:.4f}"
                         logger.info("[Binance??????] %s %s %.4f -> %.4f", symbol, direction.upper(), margin, required_margin)
                         margin = required_margin
                 else:
@@ -1495,18 +1613,18 @@ class CopyEngine:
                     symbol_status = str(req.get("symbolStatus") or "").lower()
                     if symbol_status and symbol_status != "normal":
                         self._unsupported_symbols.add(symbol)
-                        _insert_skip(f"Bitget ?????? status={symbol_status}")
+                        _insert_skip(f"Bitget 交易对不可开仓 status={symbol_status}")
                         return
                     limit_open_time = str(req.get("limitOpenTime") or "-1")
                     if limit_open_time not in ("", "-1"):
-                        _insert_skip(f"Bitget ?????? limitOpenTime={limit_open_time}")
+                        _insert_skip(f"Bitget 限制开仓 limitOpenTime={limit_open_time}")
                         return
                     required_margin = _safe_float(req.get("requiredMargin"), 0.0)
                     if required_margin > 0 and margin + 1e-12 < required_margin:
                         if cap_limit > 0 and required_margin > cap_limit + 1e-12:
-                            _insert_skip(f"Bitget ?????? need={required_margin:.4f} cap={cap_limit:.4f}")
+                            _insert_skip(f"Bitget 最小开仓金额不足 need={required_margin:.4f} cap={cap_limit:.4f}")
                             return
-                        precheck_note = f"[??????] target={margin:.4f} min={required_margin:.4f}"
+                        precheck_note = f"[最小下单修正] target={margin:.4f} min={required_margin:.4f}"
                         logger.info("[Bitget??????] %s %s %.4f -> %.4f", symbol, direction.upper(), margin, required_margin)
                         margin = required_margin
 
@@ -1555,7 +1673,7 @@ class CopyEngine:
                     return
 
                 if maker_status == "skipped":
-                    _insert_skip(str(managed.get("reason") or "Maker ?????"), exec_p=curr_p, dev=dev, extra_note=maker_note)
+                    _insert_skip(str(managed.get("reason") or "Maker 下单跳过"), exec_p=curr_p, dev=dev, extra_note=maker_note)
                     return
 
                 if maker_status in {"partial", "unfilled"} and entry_settings["fallback_to_market"] and remaining_margin > 1e-8:
@@ -1584,7 +1702,7 @@ class CopyEngine:
                         total_qty = maker_qty + market_qty
                         total_margin = maker_margin + _estimate_margin_from_fill(market_qty, fallback_price, lev)
                         if total_qty <= 0:
-                            _insert_skip("Maker ???????????", exec_p=fallback_price, dev=fallback_dev, extra_note=maker_note)
+                            _insert_skip("Maker 回退后成交数量为 0", exec_p=fallback_price, dev=fallback_dev, extra_note=maker_note)
                             return
                         weighted_cost = (maker_qty * maker_price) + (market_qty * fallback_price)
                         avg_exec_price = weighted_cost / total_qty if total_qty > 0 else fallback_price
@@ -1613,7 +1731,7 @@ class CopyEngine:
                         return
 
                     _insert_skip(
-                        f"Maker ????????????? {fallback_dev * 100:.2f}%",
+                        f"Maker 回退市价价差过大 {fallback_dev * 100:.2f}%",
                         exec_p=fallback_price,
                         dev=fallback_dev,
                         extra_note=maker_note,
@@ -1624,23 +1742,23 @@ class CopyEngine:
                     _insert_filled(maker_price, maker_qty, maker_note, oid=maker_oid, used_margin=maker_margin or margin)
                     return
 
-                _insert_skip("Maker ???????", exec_p=curr_p, dev=dev, extra_note=maker_note)
+                _insert_skip("Maker 未成交", exec_p=curr_p, dev=dev, extra_note=maker_note)
         except Exception as exc:
             if exec_platform == "bitget" and _is_symbol_not_exist_error(exc):
                 self._unsupported_symbols.add(symbol)
-                _insert_skip(f"Bitget ??????: {exc}")
+                _insert_skip(f"Bitget 开仓跳过: {exc}")
                 return
             if exec_platform == "bitget" and (_is_bitget_min_trade_error(exc) or _is_local_min_size_error(exc)):
-                _insert_skip(f"Bitget ??????: {exc}", curr_p, dev)
+                _insert_skip(f"Bitget 开仓跳过: {exc}", curr_p, dev)
                 return
             if exec_platform == "bitget" and _is_bitget_balance_error(exc):
-                _insert_skip(f"Bitget ????: {exc}", curr_p, dev)
+                _insert_skip(f"Bitget 保证金不足: {exc}", curr_p, dev)
                 return
             if exec_platform == "binance" and (_is_binance_min_notional_error(exc) or _is_binance_symbol_error(exc) or _is_local_min_size_error(exc)):
-                _insert_skip(f"Binance ??????: {exc}", curr_p, dev)
+                _insert_skip(f"Binance 开仓跳过: {exc}", curr_p, dev)
                 return
             if exec_platform == "binance" and _is_binance_balance_error(exc):
-                _insert_skip(f"Binance ????: {exc}", curr_p, dev)
+                _insert_skip(f"Binance 保证金不足: {exc}", curr_p, dev)
                 return
             db.insert_copy_order({
                 "timestamp": _now_ms(), "trader_uid": pid, "tracking_no": f"FAIL_{order_id}",
@@ -1658,38 +1776,43 @@ class CopyEngine:
     def _execute_close_for_platform(
         self, platform: str, api_creds: tuple, pid: str, order_id: str, symbol: str,
         direction: str, price: float, order_pnl: float | None, tol: float
-    ):
-        """???????????????"""
+    ) -> bool:
         exec_platform = self._exec_platform(platform)
         platform_label = self._platform_label(platform)
         runtime = self._runtime()
         if exec_platform == "bitget" and symbol in self._unsupported_symbols:
-            return
+            return False
 
         if db.has_tracking_no(pid, order_id, platform=platform):
-            return
+            return True
 
         from database import get_conn
         with get_conn() as conn:
-            opened_sum = conn.execute('''
+            opened_sum = conn.execute(
+                """
                 SELECT COALESCE(SUM(exec_qty), 0) FROM copy_orders 
                 WHERE trader_uid = ? AND symbol = ? AND direction = ? 
                   AND action = 'open' AND status = 'filled' AND platform = ?
-            ''', (pid, symbol, direction, platform)).fetchone()[0]
-            closed_sum = conn.execute('''
+                """,
+                (pid, symbol, direction, platform),
+            ).fetchone()[0]
+            closed_sum = conn.execute(
+                """
                 SELECT COALESCE(SUM(exec_qty), 0) FROM copy_orders 
                 WHERE trader_uid = ? AND symbol = ? AND direction = ? 
                   AND action = 'close' AND status = 'filled' AND platform = ?
-            ''', (pid, symbol, direction, platform)).fetchone()[0]
+                """,
+                (pid, symbol, direction, platform),
+            ).fetchone()[0]
 
         remaining_qty = float(opened_sum) - float(closed_sum)
         if remaining_qty <= 0:
-            logger.debug("[%s??????] ????????%s????????(pid=%s)?????", platform_label, symbol, pid[:8])
-            return
+            logger.debug("[%s close] no remaining local position for %s (pid=%s)", platform_label, symbol, pid[:8])
+            return True
 
         close_qty = remaining_qty
         if close_qty <= 0:
-            return
+            return True
 
         ak, sk, pp = api_creds
         runtime_ctx = order_executor.use_runtime(simulated=runtime["bitget_simulated"])
@@ -1708,25 +1831,28 @@ class CopyEngine:
                     ok, curr_p, dev = _price_ok(symbol, price, tol)
 
                 if not ok:
-                    logger.warning("[%s??????] %s %s ?????%.4f ???=%.4f ???=%.2f%% > %.2f%%", 
-                                   platform_label, symbol, direction.upper(), price, curr_p, dev * 100, tol * 100)
-                    return
+                    logger.warning(
+                        "[%s close] %s %s price mismatch src=%.4f now=%.4f dev=%.2f%% > %.2f%%",
+                        platform_label, symbol, direction.upper(), price, curr_p, dev * 100, tol * 100,
+                    )
+                    return False
 
                 if exec_platform == "binance":
                     filters = binance_executor.get_symbol_filters(symbol)
                     qty_str = binance_executor._format_qty(close_qty, filters["stepSize"])
-                    if float(qty_str) > 0:
-                        binance_executor.close_partial_position(
-                            ak, sk, symbol, direction, qty_str
-                        )
-                    else:
-                        logger.warning("[%s??????] ??????????? %s", platform_label, close_qty)
-                        return
+                    if float(qty_str) <= 0:
+                        logger.warning("[%s close] qty rounded to zero: %s", platform_label, close_qty)
+                        return False
+                    binance_executor.close_partial_position(ak, sk, symbol, direction, qty_str)
                 else:
-                    qty_str = str(int(close_qty * 10000) / 10000.0)
+                    qty_value = _trunc4(close_qty)
+                    qty_str = f"{qty_value:.4f}".rstrip("0").rstrip(".")
+                    if not qty_str or float(qty_str) <= 0:
+                        logger.warning("[%s close] qty rounded to zero: %s", platform_label, close_qty)
+                        return False
                     order_executor.close_partial_position(
                         ak, sk, pp, symbol, direction, qty_str,
-                        pos_mode=self._pos_mode, margin_mode="isolated"
+                        pos_mode=self._pos_mode, margin_mode="isolated",
                     )
 
             db.insert_copy_order({
@@ -1736,10 +1862,40 @@ class CopyEngine:
                 "deviation_pct": 0, "action": "close",
                 "status": "filled", "pnl": order_pnl, "notes": f"[{platform_label} Signal] Close",
                 "exec_qty": float(qty_str),
-                "platform": platform
+                "platform": platform,
             })
-            logger.info("[%s??????] %s %s ???=%s", platform_label, symbol, direction.upper(), qty_str)
+            logger.info("[%s close] %s %s qty=%s", platform_label, symbol, direction.upper(), qty_str)
+            return True
         except Exception as exc:
+            is_missing = (exec_platform == "bitget" and _is_bitget_position_missing_error(exc)) or (
+                exec_platform == "binance" and _is_binance_position_missing_error(exc)
+            )
+            if is_missing:
+                live_qty = -1.0
+                try:
+                    live_qty = self._get_exchange_position_qty(platform, api_creds, symbol, direction)
+                except Exception as lookup_exc:
+                    logger.info(
+                        "[%s close reconcile] %s %s lookup failed: %s",
+                        platform_label, symbol, direction.upper(), lookup_exc,
+                    )
+                if 0.0 <= live_qty <= 1e-12:
+                    db.insert_copy_order({
+                        "timestamp": _now_ms(), "trader_uid": pid, "tracking_no": order_id,
+                        "my_order_id": "", "symbol": symbol, "direction": direction,
+                        "leverage": 0, "margin_usdt": 0, "source_price": price, "exec_price": price,
+                        "deviation_pct": 0, "action": "close",
+                        "status": "filled", "pnl": order_pnl,
+                        "notes": f"[{platform_label} Reconcile] exchange already flat on close signal",
+                        "exec_qty": float(close_qty),
+                        "platform": platform,
+                    })
+                    logger.info(
+                        "[%s close reconcile] %s %s already flat on exchange, qty=%.8f",
+                        platform_label, symbol, direction.upper(), close_qty,
+                    )
+                    return True
+
             db.insert_copy_order({
                 "timestamp": _now_ms(), "trader_uid": pid, "tracking_no": f"FAIL_{order_id}",
                 "my_order_id": "", "symbol": symbol, "direction": direction,
@@ -1747,9 +1903,10 @@ class CopyEngine:
                 "deviation_pct": 0, "action": "close",
                 "status": "failed", "pnl": 0.0, "notes": str(exc),
                 "exec_qty": 0.0,
-                "platform": platform
+                "platform": platform,
             })
-            logger.error("[%s??????] %s: %s", platform_label, symbol, exc)
+            logger.error("[%s close] %s: %s", platform_label, symbol, exc)
+            return False
 
 
 
@@ -1775,4 +1932,3 @@ def is_engine_running(profile: str | None = None) -> bool:
     profile_key = _normalize_profile(profile)
     engine = _ENGINES.get(profile_key)
     return bool(engine and engine.is_running())
-

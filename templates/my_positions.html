@@ -27,6 +27,22 @@
 
     <div id="page-msg" class="hidden px-4 py-3 rounded-lg text-sm font-medium"></div>
 
+    {% if page_profile == 'live' %}
+    <section class="bg-dark-card border border-cyan-500/20 rounded-2xl overflow-hidden shadow-xl">
+        <div class="p-6 border-b border-cyan-500/10 flex items-center justify-between gap-4">
+            <div>
+                <h2 class="text-xl font-bold text-white tracking-tight">实盘执行链路诊断</h2>
+                <p class="text-xs text-gray-500 mt-1">直接显示实盘卡在哪一步：引擎、抓单源网络、执行网络、最近一次开仓结果。</p>
+            </div>
+            <button onclick="loadLiveDiagnostics()" class="bg-cyan-600/90 hover:bg-cyan-500 text-white px-4 py-2 rounded-lg text-sm transition-colors">刷新诊断</button>
+        </div>
+        <div class="p-5 space-y-4">
+            <div id="live-diag-summary" class="rounded-xl border border-dark-border bg-dark-bg/70 px-4 py-3 text-sm text-gray-300">正在检测实盘执行链路...</div>
+            <div id="live-diag-list" class="grid grid-cols-1 md:grid-cols-2 gap-3"></div>
+        </div>
+    </section>
+    {% endif %}
+
     <!-- ① API 密钥配置 -->
     <section
         class="bg-dark-card border border-dark-border rounded-2xl overflow-hidden shadow-xl transition-all hover:border-blue-500/20">
@@ -235,7 +251,7 @@
                                 class="text-yellow-400 font-medium">20%</span>
                         </label>
                         <input id="binance_max_margin_pct" type="range" min="5" max="50" step="1" value="20"
-                            oninput="document.getElementById('binance_max_margin_pct_label').textContent = this.value + '%';"
+                            oninput="document.getElementById('binance_max_margin_pct_label').textContent = this.value + '%'; computeAllocation();"
                             class="w-full accent-yellow-500">
                         <div class="flex justify-between text-xs text-gray-600 mt-1"><span>5%</span><span>50%</span>
                         </div>
@@ -718,6 +734,7 @@
     });
 
     const state = { settings: null, traders: [] };
+    let bnTraders = [];
     const MASKED_SECRET = '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022';
     const API_PREFIX = {{ page_api_prefix|default('/api')|tojson }};
     const BITGET_EMPTY_TEXT = {{ bitget_empty_text|default('暂无 Bitget 持仓')|tojson }};
@@ -770,7 +787,22 @@
     }
 
     function getEnabledBinancePids() {
-        return (bnTraders || []).filter(t => t.copy_enabled === true).map(t => t.pid);
+        let source = Array.isArray(bnTraders) ? bnTraders : [];
+        if (!source.length) {
+            let raw = (state.settings && state.settings.binance_traders) ? state.settings.binance_traders : {};
+            if (typeof raw === 'string') {
+                try { raw = JSON.parse(raw || '{}'); } catch (e) { raw = {}; }
+            }
+            if (Array.isArray(raw)) {
+                source = raw.map(pid => ({ pid, copy_enabled: true }));
+            } else if (raw && typeof raw === 'object') {
+                source = Object.entries(raw).map(([pid, info]) => ({
+                    pid,
+                    copy_enabled: !!(info && info.copy_enabled),
+                }));
+            }
+        }
+        return source.filter(t => t && t.copy_enabled === true).map(t => t.pid);
     }
 
     function serializeBinanceTraders() {
@@ -1057,6 +1089,7 @@
         document.getElementById('trail_callback_pct').value = ((data.trail_callback_pct || 0.06) * 100).toFixed(2);
         setTakeProfitEnabledState();
 
+        bnTraders = [];
         let rawBn = data.binance_traders || {};
         if (typeof rawBn === 'string') {
             try { rawBn = JSON.parse(rawBn); } catch (e) { rawBn = {}; }
@@ -1387,8 +1420,71 @@
             failed: 'bg-red-500/10 text-red-400 border-red-500/20',
         };
         const cls = map[s] || 'bg-gray-500/10 text-gray-400 border-gray-500/20';
-        const label = { filled: '成交', skipped: '跳过(价差)', failed: '失败' }[s] || s;
+        const label = { filled: '成交', skipped: '跳过', failed: '失败' }[s] || s;
         return `<span class="px-2 py-0.5 rounded text-xs font-medium border ${cls}">${label}</span>`;
+    }
+
+    function diagnosticBadge(status) {
+        const map = {
+            pass: 'bg-green-500/10 text-green-400 border-green-500/20',
+            warning: 'bg-yellow-500/10 text-yellow-400 border-yellow-500/20',
+            blocker: 'bg-red-500/10 text-red-400 border-red-500/20',
+        };
+        const label = { pass: '通过', warning: '警告', blocker: '阻塞' }[status] || '未知';
+        return `<span class="px-2 py-0.5 rounded text-xs font-medium border ${map[status] || 'bg-gray-500/10 text-gray-400 border-gray-500/20'}">${label}</span>`;
+    }
+
+    let _liveDiagLoading = false;
+
+    async function loadLiveDiagnostics() {
+        const summary = document.getElementById('live-diag-summary');
+        const list = document.getElementById('live-diag-list');
+        if (!summary || !list || _liveDiagLoading) return;
+
+        _liveDiagLoading = true;
+        summary.className = 'rounded-xl border border-cyan-500/20 bg-cyan-500/5 px-4 py-3 text-sm text-cyan-200';
+        summary.textContent = '正在刷新实盘执行链路诊断...';
+        list.innerHTML = '<div class="col-span-full rounded-xl border border-dark-border bg-dark-bg/70 px-4 py-4 text-sm text-gray-400">检测中...</div>';
+
+        try {
+            const res = await fetch(apiUrl('/diagnostics'), { cache: 'no-store' });
+            const data = await res.json();
+            if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
+
+            const overallClass = {
+                pass: 'border-green-500/20 bg-green-500/5 text-green-300',
+                warning: 'border-yellow-500/20 bg-yellow-500/5 text-yellow-200',
+                blocker: 'border-red-500/20 bg-red-500/5 text-red-200',
+            }[data.overall] || 'border-dark-border bg-dark-bg/70 text-gray-300';
+            const overallLabel = { pass: '通过', warning: '存在警告', blocker: '存在阻塞' }[data.overall] || '未知';
+            summary.className = `rounded-xl border px-4 py-3 text-sm ${overallClass}`;
+            summary.textContent = `诊断结果：${overallLabel} | ${fmtTs(data.generated_at)} | 已启用 ${data.enabled_trader_count || 0} 个 Binance 跟单对象`;
+
+            const checks = Array.isArray(data.checks) ? data.checks : [];
+            list.innerHTML = checks.length
+                ? checks.map(item => `
+                    <div class="rounded-xl border border-dark-border bg-dark-bg/70 p-4 space-y-2">
+                        <div class="flex items-center justify-between gap-3">
+                            <div class="text-sm font-semibold text-white">${item.label || item.key || '-'}</div>
+                            ${diagnosticBadge(item.status)}
+                        </div>
+                        <div class="text-xs text-gray-400 leading-5 break-all">${item.detail || '-'}</div>
+                    </div>
+                `).join('')
+                : '<div class="col-span-full rounded-xl border border-dark-border bg-dark-bg/70 px-4 py-4 text-sm text-gray-400">暂无诊断项</div>';
+        } catch (err) {
+            const rawMessage = err && err.message ? err.message : '未知错误';
+            const fetchFailed = /failed to fetch|networkerror|load failed/i.test(rawMessage);
+            summary.className = 'rounded-xl border border-red-500/20 bg-red-500/5 px-4 py-3 text-sm text-red-300';
+            summary.textContent = fetchFailed
+                ? '诊断刷新失败：本地 Web 服务未连接（127.0.0.1:8080）'
+                : '诊断刷新失败：' + rawMessage;
+            list.innerHTML = fetchFailed
+                ? '<div class="col-span-full rounded-xl border border-red-500/20 bg-red-500/5 px-4 py-4 text-sm text-red-300">当前页面已无法访问后端接口，通常是 Web 服务没启动或已退出。请重新运行“一键启动跟单系统.bat”，再刷新页面。</div>'
+                : '<div class="col-span-full rounded-xl border border-red-500/20 bg-red-500/5 px-4 py-4 text-sm text-red-300">请稍后重试，或查看服务日志。</div>';
+        } finally {
+            _liveDiagLoading = false;
+        }
     }
 
     let _positionsLoadedOnce = false;
@@ -1587,12 +1683,25 @@
     document.getElementById('price_tolerance').addEventListener('input', computeAllocation);
     document.getElementById('total_capital').addEventListener('input', computeAllocation);
     document.getElementById('follow_ratio_pct').addEventListener('input', computeAllocation);
+    document.getElementById('binance_total_capital').addEventListener('input', computeAllocation);
+    document.getElementById('binance_follow_ratio_pct').addEventListener('input', computeAllocation);
+    document.getElementById('binance_max_margin_pct').addEventListener('input', computeAllocation);
 
-    loadSettings().then(() => { refreshPositions(); refreshOrders(); loadBinanceBalance(); });
+    loadSettings().then(() => {
+        refreshPositions();
+        refreshOrders();
+        loadBinanceBalance();
+        {% if page_profile == 'live' %}
+        loadLiveDiagnostics();
+        {% endif %}
+    });
     setInterval(pollEngineStatus, 5000);
     setInterval(refreshPositions, 5000);
     setInterval(refreshOrders, 15000);
     setInterval(loadBinanceBalance, 30000);
+    {% if page_profile == 'live' %}
+    setInterval(loadLiveDiagnostics, 15000);
+    {% endif %}
 </script>
 {% endblock %}
 

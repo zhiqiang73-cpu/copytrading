@@ -671,6 +671,11 @@ _COPY_SETTINGS_COLS = frozenset({
     "binance_max_margin_pct", "binance_price_tolerance",
 })
 
+_SHARED_COPY_SETTINGS_COLS = frozenset({
+    "enabled_traders",
+    "binance_traders",
+})
+
 
 def update_copy_settings(**kwargs: Any) -> None:
     if not kwargs:
@@ -796,6 +801,7 @@ def get_copy_settings_profile(profile: str | None = "sim") -> dict:
         conn.commit()
 
     data = _default_copy_settings_payload(profile_key)
+    sim_data: dict[str, Any] = {}
     if profile_key == "live":
         sim_data = get_copy_settings()
         for key in _COPY_SETTINGS_COLS:
@@ -811,11 +817,18 @@ def get_copy_settings_profile(profile: str | None = "sim") -> dict:
         except Exception:
             pass
 
-    data["api_key"] = data.get("api_key") or os.getenv("LIVE_BITGET_API_KEY", "")
-    data["api_secret"] = data.get("api_secret") or os.getenv("LIVE_BITGET_SECRET_KEY", "")
-    data["api_passphrase"] = data.get("api_passphrase") or os.getenv("LIVE_BITGET_PASSPHRASE", "")
-    data["binance_api_key"] = data.get("binance_api_key") or os.getenv("LIVE_BINANCE_API_KEY", "")
-    data["binance_api_secret"] = data.get("binance_api_secret") or os.getenv("LIVE_BINANCE_API_SECRET", "")
+    if profile_key == "live":
+        # Trader selection is shared between sim/live pages; always trust the
+        # main copy settings so live cannot keep following a stale hidden list.
+        for key in _SHARED_COPY_SETTINGS_COLS:
+            if key in sim_data:
+                data[key] = sim_data[key]
+
+    data["api_key"] = data.get("api_key") or os.getenv("LIVE_BITGET_API_KEY", "") or config.BITGET_API_KEY
+    data["api_secret"] = data.get("api_secret") or os.getenv("LIVE_BITGET_SECRET_KEY", "") or config.BITGET_SECRET_KEY
+    data["api_passphrase"] = data.get("api_passphrase") or os.getenv("LIVE_BITGET_PASSPHRASE", "") or config.BITGET_PASSPHRASE
+    data["binance_api_key"] = data.get("binance_api_key") or os.getenv("LIVE_BINANCE_API_KEY", "") or config.BINANCE_API_KEY
+    data["binance_api_secret"] = data.get("binance_api_secret") or os.getenv("LIVE_BINANCE_API_SECRET", "") or config.BINANCE_API_SECRET
     return data
 
 
@@ -860,6 +873,16 @@ def update_copy_settings_profile(profile: str | None = "sim", **kwargs: Any) -> 
                 (profile_key, json.dumps(clean_payload, ensure_ascii=False), now),
             )
             conn.commit()
+
+
+def update_shared_copy_settings(**kwargs: Any) -> None:
+    if not kwargs:
+        return
+    invalid = set(kwargs.keys()) - _SHARED_COPY_SETTINGS_COLS
+    if invalid:
+        raise ValueError(f"update_shared_copy_settings: 非法列名 {invalid}")
+    update_copy_settings(**kwargs)
+    update_copy_settings_profile("live", **kwargs)
 
 
 def set_engine_enabled_profile(profile: str | None, enabled: bool) -> None:
@@ -941,11 +964,47 @@ def upsert_account_daily_equity(day: str, equity: float) -> dict:
     }
 
 
+def _platform_day_bounds_ms(day: str) -> tuple[int, int]:
+    try:
+        start_ms = int(time.mktime(time.strptime(day, "%Y-%m-%d"))) * 1000
+    except Exception:
+        start_ms = int(time.time()) * 1000
+    return start_ms, start_ms + 86400 * 1000
+
+
+
+def _should_reset_live_platform_baseline(conn, platform_key: str, day: str, start_equity: float, current_equity: float) -> bool:
+    if not platform_key.startswith("live_"):
+        return False
+    if start_equity < 1000 or current_equity <= 0 or current_equity > 500:
+        return False
+    if (start_equity / max(current_equity, 1e-9)) < 10:
+        return False
+
+    day_start_ms, day_end_ms = _platform_day_bounds_ms(day)
+    row = conn.execute(
+        """
+        SELECT COUNT(1) AS cnt
+        FROM copy_orders
+        WHERE platform = ?
+          AND timestamp >= ?
+          AND timestamp < ?
+          AND action = 'open'
+          AND status = 'filled'
+        """,
+        (platform_key, day_start_ms, day_end_ms),
+    ).fetchone()
+    filled_open_count = int((row["cnt"] if row else 0) or 0)
+    return filled_open_count == 0
+
+
+
 def upsert_platform_daily_equity(platform: str, day: str, equity: float) -> dict:
     """?????????????????"""
     now = int(time.time())
     eq = float(equity)
     platform_key = str(platform or "unknown").strip().lower() or "unknown"
+    baseline_reset = False
 
     with _db_write_lock:
         with get_conn() as conn:
@@ -969,10 +1028,29 @@ def upsert_platform_daily_equity(platform: str, day: str, equity: float) -> dict
             if row:
                 start_equity = float(row["start_equity"] or 0.0)
                 start_ts = int(row["start_ts"] or now)
-                conn.execute(
-                    "UPDATE platform_daily_equity SET last_equity = ?, updated_at = ? WHERE platform = ? AND day = ?",
-                    (eq, now, platform_key, day),
-                )
+                if _should_reset_live_platform_baseline(conn, platform_key, day, start_equity, eq):
+                    logger.warning(
+                        "[auto-reset daily equity] %s start=%.4f current=%.4f",
+                        platform_key,
+                        start_equity,
+                        eq,
+                    )
+                    start_equity = eq
+                    start_ts = now
+                    baseline_reset = True
+                    conn.execute(
+                        """
+                        UPDATE platform_daily_equity
+                        SET start_equity = ?, start_ts = ?, last_equity = ?, updated_at = ?
+                        WHERE platform = ? AND day = ?
+                        """,
+                        (eq, now, eq, now, platform_key, day),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE platform_daily_equity SET last_equity = ?, updated_at = ? WHERE platform = ? AND day = ?",
+                        (eq, now, platform_key, day),
+                    )
             else:
                 start_equity = eq
                 start_ts = now
@@ -996,6 +1074,7 @@ def upsert_platform_daily_equity(platform: str, day: str, equity: float) -> dict
         "start_ts": start_ts,
         "current_equity": eq,
         "day_pnl": eq - start_equity,
+        "baseline_reset": baseline_reset,
     }
 
 

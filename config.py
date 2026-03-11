@@ -1,4 +1,5 @@
-﻿"""
+﻿# -*- coding: utf-8 -*-
+"""
 鍏ㄥ眬閰嶇疆绠＄悊锛氫粠 .env 鍔犺浇鍑瘉鍜岃繍琛屽弬鏁?
 """
 import os
@@ -77,5 +78,6 @@ if DEFAULT_ENTRY_ORDER_MODE not in {"market", "maker_limit"}:
 DEFAULT_ENTRY_MAKER_LEVELS = max(0, int(os.getenv("DEFAULT_ENTRY_MAKER_LEVELS", "1")))
 DEFAULT_ENTRY_LIMIT_TIMEOUT_SEC = max(1, int(os.getenv("DEFAULT_ENTRY_LIMIT_TIMEOUT_SEC", "10")))
 DEFAULT_ENTRY_LIMIT_FALLBACK_TO_MARKET = os.getenv("DEFAULT_ENTRY_LIMIT_FALLBACK_TO_MARKET", "1") == "1"
+
 
 

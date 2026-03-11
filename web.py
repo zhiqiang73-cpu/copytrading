@@ -1,8 +1,10 @@
-﻿"""
-BitgetFollow Web 浠〃鐩?
-鍙屽嚮鍚姩鍚庡湪娴忚鍣ㄤ腑鎿嶄綔锛屾棤闇€鍛戒护琛屻€?
-浠呮敮鎸佸竵瀹変氦鏄撳憳璺熷崟 鈫?Bitget 涓嬪崟銆?
 """
+BitgetFollow Web 仪表盘
+双击启动后在浏览器中操作，无需命令行。
+仅支持币安交易员跟单 -> Bitget 下单。
+"""
+
+
 import logging
 import os
 import socket
@@ -22,7 +24,7 @@ import config
 import copy_engine
 import database as db
 import order_executor
-# 鈹€鈹€ Flask 鍒濆鍖?鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+#  Flask 初?
 
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
@@ -34,7 +36,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("web")
 
-# 蹇冭烦鏈哄埗锛氭娴嬬綉椤垫槸鍚﹀叧闂?
+# 心跳机制：测网页是否关?
 _last_heartbeat = time.time()
 _heartbeat_lock = threading.Lock()
 _config_lock = threading.RLock()
@@ -51,8 +53,8 @@ def api_heartbeat():
     return jsonify({"ok": True})
 
 def _heartbeat_monitor():
-    """鍚庡彴鐩戞帶锛氬鏋?60 绉掓病鏀跺埌蹇冭烦锛岃鏄庣綉椤靛凡鍏抽棴銆?"""
-    logger.info("蹇冭烦鐩戞帶鍚姩锛堥娆℃敹鍒板績璺冲悗锛?0绉掓棤鍝嶅簲灏嗘彁绀虹綉椤靛叧闂級")
+    """后台监控：?60 秒没收到心跳，明网页已关闭?"""
+    logger.info("心跳监控吊（次收到心跳后?0秒无响应将提示网页关闼")
     _ever_received = False
     while True:
         time.sleep(5)
@@ -73,7 +75,7 @@ def _heartbeat_monitor():
                 _ever_received = False
 
 
-# 鈹€鈹€ 宸ュ叿鍑芥暟 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+#  工具函数 
 
 def _api_configured() -> bool:
     """Whether Bitget API credentials are configured."""
@@ -103,7 +105,7 @@ def _protect_local_mutations():
 
     token = request.headers.get("X-App-Token") or request.form.get("_app_token") or request.args.get("_app_token")
     if token != APP_UI_TOKEN:
-        return jsonify({"error": "璇锋眰缂哄皯鎴栧寘鍚棤鏁堢殑搴旂敤浠ょ墝"}), 403
+        return jsonify({"error": "请求缺少或包吗效的应用令牌"}), 403
     return None
 
 
@@ -116,13 +118,16 @@ def _read_env_map() -> dict[str, str]:
     env_path = _env_path()
     if not os.path.exists(env_path):
         return env
-    with open(env_path, "r", encoding="utf-8") as f:
+    with open(env_path, "r", encoding="utf-8-sig") as f:
         for raw_line in f:
             line = raw_line.strip()
             if not line or line.startswith("#") or "=" not in line:
                 continue
             key, value = line.split("=", 1)
-            env[key.strip()] = value.strip()
+            clean_key = key.strip().lstrip("\ufeff")
+            if clean_key.startswith("锘緽"):
+                clean_key = "B" + clean_key[3:]
+            env[clean_key] = value.strip()
     return env
 
 
@@ -134,6 +139,7 @@ def _write_env_map(updates: dict[str, str]) -> None:
         "BINANCE_API_KEY", "BINANCE_API_SECRET", "BINANCE_BASE_URL",
         "LIVE_BITGET_API_KEY", "LIVE_BITGET_SECRET_KEY", "LIVE_BITGET_PASSPHRASE",
         "LIVE_BINANCE_API_KEY", "LIVE_BINANCE_API_SECRET", "LIVE_BINANCE_BASE_URL",
+        "BINANCE_COPYTRADE_BASE", "BINANCE_COPYTRADE_PROXY", "BINANCE_PROXY",
         "BITGET_SIMULATED", "POLL_INTERVAL", "LOG_LEVEL",
         "DEFAULT_DAILY_LOSS_LIMIT_PCT", "DEFAULT_TOTAL_DRAWDOWN_LIMIT_PCT",
     ]
@@ -190,13 +196,13 @@ def _migrate_plaintext_secrets_out_of_db() -> None:
             api_key="", api_secret="", api_passphrase="",
             binance_api_key="", binance_api_secret="",
         )
-        logger.warning("妫€娴嬪埌鏁版嵁搴撲腑鏄庢枃瀵嗛挜锛屽凡杩佺Щ鍒?.env 骞舵竻绌?SQLite 瀛楁")
+        logger.warning("测到数据库中明文密钥，已迁移?.env 并清?SQLite 字")
     except Exception as exc:
-        logger.warning("杩佺Щ鏁版嵁搴撳瘑閽ュけ璐? %s", exc)
+        logger.warning("迁移数据库密钥失? %s", exc)
 
 
 def _reload_config():
-    """閲嶆柊鍔犺浇 .env 鍒?config 杩愯鏃跺彉閲?"""
+    """重新加载 .env ?config 运时变?"""
     from dotenv import load_dotenv
     with _config_lock:
         env_path = _env_path()
@@ -216,7 +222,7 @@ def _reload_config():
 
 
 def _fmt_ts(ms_ts):
-    """姣鏃堕棿鎴?鈫?鍙瀛楃涓层€?"""
+    """时间??字串?"""
     if not ms_ts:
         return "-"
     import datetime
@@ -224,7 +230,7 @@ def _fmt_ts(ms_ts):
 
 
 def _fmt_h(seconds):
-    """绉?鈫?鍙鎸佷粨鏃堕暱銆?"""
+    """??持仓时长?"""
     if not seconds or seconds <= 0:
         return "-"
     hours = seconds / 3600
@@ -312,11 +318,11 @@ def _build_account_overview(api_key: str, api_secret: str, api_passphrase: str):
     }
 
 
-def _normalize_copy_settings(raw: dict) -> dict:
+def _normalize_copy_settings(raw: dict, include_env_secrets: bool = True) -> dict:
     defaults = {
-        "api_key": config.BITGET_API_KEY or "",
-        "api_secret": config.BITGET_SECRET_KEY or "",
-        "api_passphrase": config.BITGET_PASSPHRASE or "",
+        "api_key": (config.BITGET_API_KEY or "") if include_env_secrets else "",
+        "api_secret": (config.BITGET_SECRET_KEY or "") if include_env_secrets else "",
+        "api_passphrase": (config.BITGET_PASSPHRASE or "") if include_env_secrets else "",
         "total_capital": 0.0,
         "follow_ratio_pct": 0.003,
         "max_margin_pct": 0.20,
@@ -342,8 +348,8 @@ def _normalize_copy_settings(raw: dict) -> dict:
         "enabled_traders": [],
         "binance_traders": {},
         "engine_enabled": 0,
-        "binance_api_key": config.BINANCE_API_KEY or "",
-        "binance_api_secret": config.BINANCE_API_SECRET or "",
+        "binance_api_key": (config.BINANCE_API_KEY or "") if include_env_secrets else "",
+        "binance_api_secret": (config.BINANCE_API_SECRET or "") if include_env_secrets else "",
         "binance_total_capital": 0.0,
         "binance_follow_ratio_pct": 0.003,
         "binance_max_margin_pct": 0.20,
@@ -412,11 +418,12 @@ def _normalize_copy_settings(raw: dict) -> dict:
     _coerce_float("binance_follow_ratio_pct", defaults["binance_follow_ratio_pct"])
     _coerce_float("binance_max_margin_pct", defaults["binance_max_margin_pct"])
     _coerce_float("binance_price_tolerance", defaults["binance_price_tolerance"])
-    settings["api_key"] = settings.get("api_key") or config.BITGET_API_KEY
-    settings["api_secret"] = settings.get("api_secret") or config.BITGET_SECRET_KEY
-    settings["api_passphrase"] = settings.get("api_passphrase") or config.BITGET_PASSPHRASE
-    settings["binance_api_key"] = settings.get("binance_api_key") or config.BINANCE_API_KEY
-    settings["binance_api_secret"] = settings.get("binance_api_secret") or config.BINANCE_API_SECRET
+    if include_env_secrets:
+        settings["api_key"] = settings.get("api_key") or config.BITGET_API_KEY
+        settings["api_secret"] = settings.get("api_secret") or config.BITGET_SECRET_KEY
+        settings["api_passphrase"] = settings.get("api_passphrase") or config.BITGET_PASSPHRASE
+        settings["binance_api_key"] = settings.get("binance_api_key") or config.BINANCE_API_KEY
+        settings["binance_api_secret"] = settings.get("binance_api_secret") or config.BINANCE_API_SECRET
     return settings
 
 
@@ -444,16 +451,16 @@ def _looks_like_network_error(message: str) -> bool:
         "timed out",
         "read timed out",
         "connect timeout",
-        "无法连接到远程服务器",
-        "远程主机强迫关闭了一个现有的连接",
-        "目标计算机积极拒绝",
+        "޷ӵԶ̷",
+        "Զǿȹرһе",
+        "Ŀܾ",
         "10060",
         "10061",
         "11001",
     )
     return any(token in text for token in tokens)
 
-# 鈹€鈹€ 椤甸潰璺敱 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+#  页面跔 
 
 @app.route("/")
 def index():
@@ -471,7 +478,7 @@ def settings():
         poll_interval = request.form.get("poll_interval", "5").strip() or str(config.POLL_INTERVAL)
 
         if not api_key or not secret_key or not passphrase:
-            msg = "璇峰～鍐欏畬鏁寸殑 API 閰嶇疆淇℃伅"
+            msg = "请填写完整的 API 配置信息"
             msg_type = "error"
         else:
             _write_env_map({
@@ -487,11 +494,11 @@ def settings():
             })
             db.update_copy_settings(api_key="", api_secret="", api_passphrase="")
             _reload_config()
-            msg = "API 配置已保存"
+            msg = "API ѱ"
             msg_type = "success"
 
     current = {
-        "api_key": config.BITGET_API_KEY or "",
+        "api_key": (config.BITGET_API_KEY or "") if include_env_secrets else "",
         "secret_key": "",
         "passphrase": "",
         "poll_interval": config.POLL_INTERVAL,
@@ -508,12 +515,12 @@ def my_positions():
         "my_positions.html",
         page_profile="sim",
         page_api_prefix="/api",
-        page_title_text="璺熷崟绠＄悊涓績",
+        page_title_text="跟单管理中心",
         page_description_text="配置交易 API，选择跟单对象，实时监控并自动下单。",
-        bitget_positions_title="Bitget 鎵ц鎸佷粨",
-        binance_positions_title="Binance 鎸佷粨",
-        bitget_empty_text="鏆傛棤 Bitget 鎸佷粨",
-        binance_empty_text="鏆傛棤 Binance 鎸佷粨",
+        bitget_positions_title="Bitget 持仓",
+        binance_positions_title="Binance 持仓",
+        bitget_empty_text="暂无 Bitget 持仓",
+        binance_empty_text="暂无 Binance 持仓",
     ))
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     resp.headers["Pragma"] = "no-cache"
@@ -527,12 +534,12 @@ def live_positions():
         'my_positions.html',
         page_profile='live',
         page_api_prefix='/api/live',
-        page_title_text='瀹炵洏璺熷崟绠＄悊',
-        page_description_text='浣跨敤 Bitget 涓?Binance 瀹炵洏 API 鎵ц鐪熷疄璺熷崟',
-        bitget_positions_title='Bitget 瀹炵洏鎸佷粨',
-        binance_positions_title='Binance 瀹炵洏鎸佷粨',
-        bitget_empty_text='鏆傛棤 Bitget 瀹炵洏鎸佷粨',
-        binance_empty_text='鏆傛棤 Binance 瀹炵洏鎸佷粨',
+        page_title_text='实盘跟单管理',
+        page_description_text='使用 Bitget 或 Binance 实盘 API 执行真实跟单。',
+        bitget_positions_title='Bitget 实盘持仓',
+        binance_positions_title='Binance 实盘持仓',
+        bitget_empty_text='暂无 Bitget 实盘持仓',
+        binance_empty_text='暂无 Binance 实盘持仓',
     ))
     resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
     resp.headers['Pragma'] = 'no-cache'
@@ -540,84 +547,65 @@ def live_positions():
     return resp
 
 
-# 鈹€鈹€ API 璺敱 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# API 路由
+# API ??
+#  API 跔 
 
 @app.route("/api/add_binance_trader", methods=["POST"])
 def api_add_binance_trader():
-    """閫氳繃 Binance URL 鎴?Portfolio ID 娣诲姞甯佸畨浜ゆ槗鍛樺埌璺熷崟鍒楄〃"""
+    """通过 Binance URL 或 Portfolio ID 添加币安交易员到跟单列表"""
     import binance_scraper
-    
+
     url_or_pid = (request.json or {}).get("url", "").strip()
     if not url_or_pid:
-        return jsonify({"error": "URL 鎴?Portfolio ID 涓嶈兘涓虹┖"}), 400
-    
+        return jsonify({"error": "URL 或 Portfolio ID 不能为空"}), 400
+
     try:
         portfolio_id = binance_scraper.parse_binance_url(url_or_pid) or url_or_pid
-        
+
         if not portfolio_id.isdigit() or len(portfolio_id) < 10:
             return jsonify({
-                "error": f"鏃犳晥鐨?Portfolio ID: {portfolio_id}\n璇蜂娇鐢ㄥ畬鏁寸殑 URL 鎴栨纭殑 ID锛堟暟瀛楋紝鑷冲皯 10 浣嶏級"
+                "error": f"无效的 Portfolio ID: {portfolio_id}\n请使用完整的 URL 或正确的 ID（数字且至少 10 位）"
             }), 400
-        
-        logger.info("姝ｅ湪娣诲姞甯佸畨浜ゆ槗鍛橈細%s", portfolio_id[:12])
-        
+
         info = binance_scraper.fetch_trader_info(portfolio_id)
         if not info:
-            info = {
-                "portfolio_id": portfolio_id,
-                "nickname": f"甯佸畨浜ゆ槗鍛榑{portfolio_id[:8]}",
-            }
-        
+            return jsonify({"error": "无法获取该交易员信息，请检查链接或 ID"}), 400
+
         settings = db.get_copy_settings()
         bn_traders_raw = settings.get("binance_traders") or "[]"
-        
         try:
             bn_traders_data = json.loads(bn_traders_raw)
-            if isinstance(bn_traders_data, list) and bn_traders_data and isinstance(bn_traders_data[0], str):
-                bn_traders_dict = {pid: {"nickname": f"甯佸畨浜ゆ槗鍛榑{pid[:8]}"} for pid in bn_traders_data}
-            elif isinstance(bn_traders_data, dict):
-                bn_traders_dict = bn_traders_data
-            else:
-                bn_traders_dict = {}
-        except:
-            bn_traders_dict = {}
-        
-        if portfolio_id not in bn_traders_dict:
-            bn_traders_dict[portfolio_id] = {
-                "nickname": info.get("nickname"),
-                "roi": info.get("roi"),
-                "win_rate": info.get("win_rate"),
-                "follower_count": info.get("follower_count"),
-                "copier_pnl": info.get("copier_pnl"),
-                "aum": info.get("aum"),
-                "avatar": info.get("avatar"),
-                "total_trades": info.get("total_trades"),
-                "copy_enabled": True,
-                "added_at": int(time.time())
-            }
-            db.update_copy_settings(binance_traders=json.dumps(bn_traders_dict))
-            logger.info("宸叉坊鍔犲竵瀹変氦鏄撳憳 %s (%s)", portfolio_id[:12], info.get("nickname"))
+        except Exception:
+            bn_traders_data = []
+
+        if isinstance(bn_traders_data, list):
+            bn_traders_dict = {pid: {"nickname": f"币安交易员 {str(pid)[:8]}"} for pid in bn_traders_data}
+        elif isinstance(bn_traders_data, dict):
+            bn_traders_dict = bn_traders_data
         else:
-            logger.warning("甯佸畨浜ゆ槗鍛樺凡瀛樺湪: %s", portfolio_id[:12])
-        
-        return jsonify({
-            "ok": True,
-            "portfolio_id": portfolio_id,
-            "info": info,
-            "msg": f"宸叉垚鍔熸坊鍔犲竵瀹変氦鏄撳憳 {info.get('nickname')}"
-        })
-    
+            bn_traders_dict = {}
+
+        if portfolio_id in bn_traders_dict:
+            return jsonify({"error": "该交易员已存在"}), 400
+
+        bn_traders_dict[portfolio_id] = {
+            "nickname": info.get("nickname", f"币安交易员 {portfolio_id[:8]}")
+        }
+        db.update_shared_copy_settings(binance_traders=json.dumps(bn_traders_dict, ensure_ascii=False))
+        return jsonify({"ok": True, "trader": bn_traders_dict[portfolio_id]})
+
     except Exception as exc:
-        logger.error("娣诲姞甯佸畨浜ゆ槗鍛樺け璐? %s", exc, exc_info=True)
-        return jsonify({"error": f"添加失败：{str(exc)[:200]}"}), 500
+        logger.error("添加币安交易员失败: %s", exc, exc_info=True)
+        return jsonify({"error": f"添加失败: {exc}"}), 400
 
 
 @app.route("/api/remove_binance_trader", methods=["POST"])
 def api_remove_binance_trader():
-    """浠庤窡鍗曞垪琛ㄧЩ闄ゅ竵瀹変氦鏄撳憳"""
+    """从跟单列表移除币安交易员"""
     portfolio_id = (request.json or {}).get("portfolio_id", "").strip()
     if not portfolio_id:
-        return jsonify({"error": "portfolio_id 涓嶈兘涓虹┖"}), 400
+        return jsonify({"error": "portfolio_id 不能为空"}), 400
     
     try:
         settings = db.get_copy_settings()
@@ -631,29 +619,29 @@ def api_remove_binance_trader():
         if isinstance(bn_traders_data, dict):
             if portfolio_id in bn_traders_data:
                 del bn_traders_data[portfolio_id]
-                db.update_copy_settings(binance_traders=json.dumps(bn_traders_data))
-                logger.info("宸茬Щ闄ゅ竵瀹変氦鏄撳憳 %s", portfolio_id[:12])
+                db.update_shared_copy_settings(binance_traders=json.dumps(bn_traders_data, ensure_ascii=False))
+                logger.info("已移除币安交易员 %s", portfolio_id[:12])
         elif isinstance(bn_traders_data, list):
             if portfolio_id in bn_traders_data:
                 bn_traders_data.remove(portfolio_id)
-                db.update_copy_settings(binance_traders=json.dumps(bn_traders_data))
-                logger.info("宸茬Щ闄ゅ竵瀹変氦鏄撳憳 %s", portfolio_id[:12])
+                db.update_shared_copy_settings(binance_traders=json.dumps(bn_traders_data, ensure_ascii=False))
+                logger.info("已移除币安交易员 %s", portfolio_id[:12])
         
-        return jsonify({"ok": True, "msg": "已移除"})
+        return jsonify({"ok": True, "msg": "Ƴ"})
     except Exception as exc:
-        logger.error("绉婚櫎甯佸畨浜ゆ槗鍛樺け璐? %s", exc, exc_info=True)
-        return jsonify({"error": f"移除失败：{exc}"}), 500
+        logger.error("移除币安交易员失? %s", exc, exc_info=True)
+        return jsonify({"error": f"Ƴʧܣ{exc}"}), 500
 
 
 @app.route("/api/toggle_copy", methods=["POST"])
 def api_toggle_copy():
-    """鍒囨崲甯佸畨浜ゆ槗鍛樼殑璺熷崟寮€鍏?"""
+    """切换币安交易员的跟单?"""
     data = request.json or {}
     uid = data.get("uid", "").strip()
     enabled = data.get("enabled", False)
     
     if not uid:
-        return jsonify({"error": "缂哄皯浜ゆ槗鍛業D"}), 400
+        return jsonify({"error": "缺少交易员ID"}), 400
     
     settings = db.get_copy_settings()
     raw = settings.get("binance_traders") or "{}"
@@ -661,11 +649,11 @@ def api_toggle_copy():
     
     if uid in bn_traders:
         bn_traders[uid]["copy_enabled"] = enabled
-        db.update_copy_settings(binance_traders=json.dumps(bn_traders))
-        logger.info("%s 甯佸畨璺熷崟: %s", "鍚敤" if enabled else "绂佺敤", uid[:12])
+        db.update_shared_copy_settings(binance_traders=json.dumps(bn_traders, ensure_ascii=False))
+        logger.info("%s 币安跟单: %s", "吔" if enabled else "禁用", uid[:12])
         return jsonify({"ok": True, "enabled": enabled})
     else:
-        return jsonify({"error": "甯佸畨浜ゆ槗鍛樹笉瀛樺湪"}), 404
+        return jsonify({"error": "币安交易员不存在"}), 404
 
 
 @app.route("/api/status")
@@ -673,16 +661,16 @@ def api_status():
     return jsonify(_copy_status_payload('sim'))
 
 
-# 鈹€鈹€ 鎺掕姒滄壂鎻?API 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+#  排榜扫?API 
 
 @app.route("/api/scan/start", methods=["POST"])
 def api_scan_start():
-    """鍚姩鍚庡彴鎺掕姒滄壂鎻?"""
+    """吊后台排榜扫?"""
     import binance_scanner
     
     status = binance_scanner.get_scan_status()
     if status.get("running"):
-        return jsonify({"error": "扫描已在运行中"}), 400
+        return jsonify({"error": "ɨ"}), 400
     
     payload = request.json or {}
     filters = {
@@ -697,15 +685,15 @@ def api_scan_start():
     max_scroll = int(payload.get("max_scroll", 8))
     
     binance_scanner.start_scan(filters=filters, max_scroll=max_scroll)
-    return jsonify({"ok": True, "msg": "扫描已启动"})
+    return jsonify({"ok": True, "msg": "ɨ"})
 
 
 @app.route("/api/scan/status")
 def api_scan_status():
-    """鏌ヨ鎵弿杩涘害"""
+    """查扏进度"""
     import binance_scanner
     status = binance_scanner.get_scan_status()
-    # 涓嶈繑鍥炲畬鏁寸粨鏋滐紙澶ぇ锛夛紝鍙繑鍥炵姸鎬佷俊鎭?
+    # 不返回完整结果（夤），叿回状态信?
     return jsonify({
         "running": status["running"],
         "phase": status["phase"],
@@ -721,12 +709,12 @@ def api_scan_status():
 
 @app.route("/api/scan/results")
 def api_scan_results():
-    """鑾峰彇鎵弿缁撴灉"""
+    """获取扏结果"""
     import binance_scanner
     status = binance_scanner.get_scan_status()
     results = status.get("results", [])
     
-    # 鏍囪宸叉坊鍔犵殑浜ゆ槗鍛?
+    # 标已添加的交易?
     settings = _normalize_copy_settings(db.get_copy_settings())
     bn_raw = settings.get("binance_traders") or {}
     if isinstance(bn_raw, str):
@@ -746,13 +734,13 @@ def api_scan_results():
 
 @app.route("/api/scan/stop", methods=["POST"])
 def api_scan_stop():
-    """鍋滄鎵弿"""
+    """停扏"""
     import binance_scanner
     binance_scanner.stop_scan()
-    return jsonify({"ok": True, "msg": "扫描已停止"})
+    return jsonify({"ok": True, "msg": "ɨֹͣ"})
 
 
-# 鈹€鈹€ Copy Trading API 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+#  Copy Trading API 
 
 @app.route("/api/copy/settings", methods=["GET", "POST"])
 def api_copy_settings():
@@ -764,107 +752,7 @@ def api_copy_settings():
         api_passphrase = (payload.get("api_passphrase") or "").strip() or config.BITGET_PASSPHRASE or ""
         binance_api_key = (payload.get("binance_api_key") or "").strip() or config.BINANCE_API_KEY or ""
         binance_api_secret = (payload.get("binance_api_secret") or "").strip() or config.BINANCE_API_SECRET or ""
-
-        def _float_or(raw_v, default_v):
-            if raw_v is None or raw_v == "":
-                return float(default_v)
-            try:
-                return float(raw_v)
-            except Exception:
-                return float(default_v)
-
-        def _ratio_or(raw_v, default_v):
-            value = _float_or(raw_v, default_v)
-            if value > 1:
-                value = value / 100.0
-            return min(max(value, 0.0), 1.0)
-
-        def _bool_or(raw_v, default_v):
-            if raw_v is None or raw_v == "":
-                return 1 if default_v else 0
-            if isinstance(raw_v, bool):
-                return 1 if raw_v else 0
-            if isinstance(raw_v, (int, float)):
-                return 1 if raw_v else 0
-            return 1 if str(raw_v).strip().lower() in ("1", "true", "yes", "on") else 0
-
-        def _int_or(raw_v, default_v, minimum=0):
-            if raw_v is None or raw_v == "":
-                value = default_v
-            else:
-                try:
-                    value = int(float(raw_v))
-                except Exception:
-                    value = int(default_v)
-            return max(minimum, int(value))
-
-        def _choice_or(raw_v, default_v, choices):
-            value = str(raw_v if raw_v not in (None, "") else default_v).strip().lower()
-            return value if value in choices else default_v
-
-        total_capital = _float_or(payload.get("total_capital"), existing.get("total_capital", 0.0))
-        follow_ratio_pct = _ratio_or(payload.get("follow_ratio_pct"), existing.get("follow_ratio_pct", 0.003))
-        max_margin_pct = _ratio_or(payload.get("max_margin_pct"), existing.get("max_margin_pct", 0.2))
-        price_tolerance = _ratio_or(payload.get("price_tolerance"), existing.get("price_tolerance", 0.0002))
-        sl_pct = _ratio_or(payload.get("sl_pct"), existing.get("sl_pct", 0.15))
-        tp_pct = _ratio_or(payload.get("tp_pct"), existing.get("tp_pct", 0.30))
-        daily_loss_limit_pct = _ratio_or(payload.get("daily_loss_limit_pct"), existing.get("daily_loss_limit_pct", config.DEFAULT_DAILY_LOSS_LIMIT_PCT))
-        total_drawdown_limit_pct = _ratio_or(payload.get("total_drawdown_limit_pct"), existing.get("total_drawdown_limit_pct", config.DEFAULT_TOTAL_DRAWDOWN_LIMIT_PCT))
-        take_profit_enabled = _bool_or(payload.get("take_profit_enabled"), existing.get("take_profit_enabled", 1 if config.DEFAULT_TAKE_PROFIT_ENABLED else 0))
-        stop_loss_pct = _ratio_or(payload.get("stop_loss_pct"), existing.get("stop_loss_pct", config.DEFAULT_STOP_LOSS_PCT))
-        tp1_roi_pct = _ratio_or(payload.get("tp1_roi_pct"), existing.get("tp1_roi_pct", config.DEFAULT_TP1_ROI_PCT))
-        tp1_close_pct = _ratio_or(payload.get("tp1_close_pct"), existing.get("tp1_close_pct", config.DEFAULT_TP1_CLOSE_PCT))
-        tp2_roi_pct = _ratio_or(payload.get("tp2_roi_pct"), existing.get("tp2_roi_pct", config.DEFAULT_TP2_ROI_PCT))
-        tp2_close_pct = _ratio_or(payload.get("tp2_close_pct"), existing.get("tp2_close_pct", config.DEFAULT_TP2_CLOSE_PCT))
-        tp3_roi_pct = _ratio_or(payload.get("tp3_roi_pct"), existing.get("tp3_roi_pct", config.DEFAULT_TP3_ROI_PCT))
-        tp3_close_pct = _ratio_or(payload.get("tp3_close_pct"), existing.get("tp3_close_pct", config.DEFAULT_TP3_CLOSE_PCT))
-        breakeven_buffer_pct = _ratio_or(payload.get("breakeven_buffer_pct"), existing.get("breakeven_buffer_pct", config.DEFAULT_BREAKEVEN_BUFFER_PCT))
-        trail_callback_pct = _ratio_or(payload.get("trail_callback_pct"), existing.get("trail_callback_pct", config.DEFAULT_TRAIL_CALLBACK_PCT))
-        entry_order_mode = _choice_or(payload.get("entry_order_mode"), existing.get("entry_order_mode", config.DEFAULT_ENTRY_ORDER_MODE), {"market", "maker_limit"})
-        entry_maker_levels = _int_or(payload.get("entry_maker_levels"), existing.get("entry_maker_levels", config.DEFAULT_ENTRY_MAKER_LEVELS), minimum=0)
-        entry_limit_timeout_sec = _int_or(payload.get("entry_limit_timeout_sec"), existing.get("entry_limit_timeout_sec", config.DEFAULT_ENTRY_LIMIT_TIMEOUT_SEC), minimum=1)
-        entry_limit_fallback_to_market = _bool_or(payload.get("entry_limit_fallback_to_market"), existing.get("entry_limit_fallback_to_market", 1 if config.DEFAULT_ENTRY_LIMIT_FALLBACK_TO_MARKET else 0))
-
-        binance_traders = payload.get("binance_traders")
-        if binance_traders is None:
-            binance_traders = existing.get("binance_traders") or {}
-        elif isinstance(binance_traders, str):
-            try:
-                binance_traders = json.loads(binance_traders)
-            except Exception:
-                binance_traders = existing.get("binance_traders") or {}
-
-        normalized_bn: dict[str, dict] = {}
-        if isinstance(binance_traders, list):
-            for pid in binance_traders:
-                spid = str(pid).strip()
-                if not spid:
-                    continue
-                normalized_bn[spid] = {
-                    "nickname": f"Trader_{spid[:8]}",
-                    "copy_enabled": True,
-                }
-        elif isinstance(binance_traders, dict):
-            for pid, info in binance_traders.items():
-                spid = str(pid).strip()
-                if not spid:
-                    continue
-                row = dict(info) if isinstance(info, dict) else {}
-                row["nickname"] = row.get("nickname") or f"Trader_{spid[:8]}"
-                row["copy_enabled"] = bool(row.get("copy_enabled", True))
-                normalized_bn[spid] = row
-
-        if not normalized_bn and isinstance(existing.get("binance_traders"), dict):
-            normalized_bn = existing.get("binance_traders")
-
-        binance_total_capital = _float_or(payload.get("binance_total_capital"), existing.get("binance_total_capital", 0.0))
-        binance_follow_ratio_pct = _ratio_or(payload.get("binance_follow_ratio_pct"), existing.get("binance_follow_ratio_pct", 0.003))
-        binance_max_margin_pct = _ratio_or(payload.get("binance_max_margin_pct"), existing.get("binance_max_margin_pct", 0.2))
-        binance_price_tolerance = _ratio_or(payload.get("binance_price_tolerance"), existing.get("binance_price_tolerance", 0.0002))
-
-        enabled_traders = payload.get("enabled_traders")
-        if enabled_traders is None:
-            enabled_traders = existing.get("enabled_traders", [])
+        normalized = _parse_copy_settings_payload(payload, existing)
 
         _write_env_map({
             "BITGET_API_KEY": api_key,
@@ -876,8 +764,8 @@ def api_copy_settings():
             "BITGET_SIMULATED": "1" if config.SIMULATED else "0",
             "POLL_INTERVAL": str(config.POLL_INTERVAL),
             "LOG_LEVEL": config.LOG_LEVEL,
-            "DEFAULT_DAILY_LOSS_LIMIT_PCT": str(daily_loss_limit_pct),
-            "DEFAULT_TOTAL_DRAWDOWN_LIMIT_PCT": str(total_drawdown_limit_pct),
+            "DEFAULT_DAILY_LOSS_LIMIT_PCT": str(normalized["daily_loss_limit_pct"]),
+            "DEFAULT_TOTAL_DRAWDOWN_LIMIT_PCT": str(normalized["total_drawdown_limit_pct"]),
         })
         _reload_config()
 
@@ -885,38 +773,11 @@ def api_copy_settings():
             api_key="",
             api_secret="",
             api_passphrase="",
-            total_capital=total_capital,
-            follow_ratio_pct=follow_ratio_pct,
-            max_margin_pct=max_margin_pct,
-            price_tolerance=price_tolerance,
-            sl_pct=sl_pct,
-            tp_pct=tp_pct,
-            daily_loss_limit_pct=daily_loss_limit_pct,
-            total_drawdown_limit_pct=total_drawdown_limit_pct,
-            take_profit_enabled=take_profit_enabled,
-            stop_loss_pct=stop_loss_pct,
-            tp1_roi_pct=tp1_roi_pct,
-            tp1_close_pct=tp1_close_pct,
-            tp2_roi_pct=tp2_roi_pct,
-            tp2_close_pct=tp2_close_pct,
-            tp3_roi_pct=tp3_roi_pct,
-            tp3_close_pct=tp3_close_pct,
-            breakeven_buffer_pct=breakeven_buffer_pct,
-            trail_callback_pct=trail_callback_pct,
-            entry_order_mode=entry_order_mode,
-            entry_maker_levels=entry_maker_levels,
-            entry_limit_timeout_sec=entry_limit_timeout_sec,
-            entry_limit_fallback_to_market=entry_limit_fallback_to_market,
-            enabled_traders=json.dumps(enabled_traders),
-            binance_traders=json.dumps(normalized_bn, ensure_ascii=False),
             binance_api_key="",
             binance_api_secret="",
-            binance_total_capital=binance_total_capital,
-            binance_follow_ratio_pct=binance_follow_ratio_pct,
-            binance_max_margin_pct=binance_max_margin_pct,
-            binance_price_tolerance=binance_price_tolerance,
+            **normalized,
         )
-
+        _sync_shared_copy_selection_from_normalized(normalized)
         return jsonify({"ok": True})
 
     settings = _normalize_copy_settings(db.get_copy_settings())
@@ -936,25 +797,25 @@ def api_copy_test_api():
         api_key = (payload.get("binance_api_key") or "").strip() or existing.get("binance_api_key") or ""
         api_secret = (payload.get("binance_api_secret") or "").strip() or existing.get("binance_api_secret") or ""
         if not api_key or not api_secret:
-            return jsonify({"error": "币安 API Key / Secret 不能为空"}), 400
+            return jsonify({"error": "Ұ API Key / Secret Ϊ"}), 400
         try:
             balance_info = order_executor.test_binance_connection(api_key, api_secret)
             available = float(balance_info.get("availableBalance", 0))
-            return jsonify({"ok": True, "msg": f"币安连接成功，可用余额 {available:.2f} USDT | endpoint={config.BINANCE_BASE_URL}"})
+            return jsonify({"ok": True, "msg": f"Ұӳɹ {available:.2f} USDT | endpoint={config.BINANCE_BASE_URL}"})
         except Exception as e:
-            logger.error("币安 API 测试失败: %s", e)
+            logger.error("Ұ API ʧ: %s", e)
             err = str(e)
             if _looks_like_network_error(err):
-                err = f"{err} | 网络不可达，请确认本机代理/VPN/防火墙是否允许访问 Binance（当前 endpoint={config.BINANCE_BASE_URL}）"
+                err = f"{err} | 粻ɴȷϱ/VPN/ǽǷ Binanceǰ endpoint={config.BINANCE_BASE_URL}"
             if "code=-2015" in err or "Invalid API-key" in err:
-                err = f"{err} | 请确认当前 endpoint 与 API Key 所属环境一致（testnet/mainnet）：{config.BINANCE_BASE_URL}"
-            return jsonify({"error": f"币安连接失败：{err}"}), 400
+                err = f"{err} | ȷϵǰ endpoint  API Key һ£testnet/mainnet{config.BINANCE_BASE_URL}"
+            return jsonify({"error": f"Ұʧܣ{err}"}), 400
 
     api_key = (payload.get("api_key") or "").strip() or config.BITGET_API_KEY or ""
     api_secret = (payload.get("api_secret") or "").strip() or config.BITGET_SECRET_KEY or ""
     api_passphrase = (payload.get("api_passphrase") or "").strip() or config.BITGET_PASSPHRASE or ""
     if not api_key or not api_secret or not api_passphrase:
-        return jsonify({"error": "Bitget API Key / Secret / Passphrase 不能为空"}), 400
+        return jsonify({"error": "Bitget API Key / Secret / Passphrase Ϊ"}), 400
     try:
         balance = order_executor.get_account_balance(api_key, api_secret, api_passphrase)
         available = 0.0
@@ -968,26 +829,26 @@ def api_copy_test_api():
                 if balance[0].get(k) is not None:
                     available = float(balance[0][k])
                     break
-        mode = "模拟盘" if config.SIMULATED else "实盘"
-        return jsonify({"ok": True, "msg": f"Bitget 连接成功（{mode}），可用余额 {available:.2f} USDT"})
+        mode = "ģ" if config.SIMULATED else "ʵ"
+        return jsonify({"ok": True, "msg": f"Bitget ӳɹ{mode} {available:.2f} USDT"})
     except Exception as exc:
         err = str(exc)
         if _looks_like_network_error(err):
-            err = f"{err} | 网络不可达，请确认本机代理/VPN/防火墙是否允许访问 api.bitget.com"
+            err = f"{err} | 粻ɴȷϱ/VPN/ǽǷ api.bitget.com"
         if not config.SIMULATED:
-            err = f"{err} | 当前为实盘模式(BITGET_SIMULATED=0)，模拟盘请改为 1"
-        return jsonify({"error": f"Bitget 连接失败：{err}"}), 400
+            err = f"{err} | ǰΪʵģʽ(BITGET_SIMULATED=0)ģΪ 1"
+        return jsonify({"error": f"Bitget ʧܣ{err}"}), 400
 
 
 @app.route("/api/binance/balance")
 def api_binance_balance():
-    """鑾峰彇甯佸畨璐︽埛浣欓鍜屽綋鏃ョ泩浜?"""
+    """获取币安账户余和当日盈?"""
     import binance_scraper
     settings = _normalize_copy_settings(db.get_copy_settings())
     api_key = settings.get("binance_api_key") or ""
     api_secret = settings.get("binance_api_secret") or ""
     if not api_key or not api_secret:
-        return jsonify({"error": "币安 API 未配置"}), 400
+        return jsonify({"error": "Ұ API δ"}), 400
     try:
         balance_info = binance_scraper.get_binance_futures_balance(api_key, api_secret)
         day_pnl = binance_scraper.get_binance_futures_income_today(api_key, api_secret)
@@ -1005,8 +866,8 @@ def api_binance_balance():
             "updated_at": int(time.time() * 1000),
         })
     except Exception as exc:
-        logger.warning("甯佸畨浣欓鏌ヨ澶辫触: %s", exc)
-        return jsonify({"error": f"查询失败：{exc}"}), 400
+        logger.warning("币安余查失败: %s", exc)
+        return jsonify({"error": f"ѯʧܣ{exc}"}), 400
 
 
 @app.route("/api/copy/start", methods=["POST"])
@@ -1015,9 +876,9 @@ def api_copy_start():
     has_bg = bool(settings.get("api_key") and settings.get("api_secret") and settings.get("api_passphrase"))
     has_bn = bool(settings.get("binance_api_key") and settings.get("binance_api_secret"))
     if not has_bg and not has_bn:
-        return jsonify({"error": "璇疯嚦灏戦厤缃苟淇濆瓨 Bitget 鎴?Binance API 瀵嗛挜"}), 400
+        return jsonify({"error": "请至少配罹保存 Bitget ?Binance API 密钥"}), 400
 
-    # 妫€鏌ュ凡鍚敤鐨勫竵瀹変氦鏄撳憳
+    # 查已吔的币安交易员
     bn_traders_raw = settings.get("binance_traders") or "{}"
     try:
         bn_traders = json.loads(bn_traders_raw) if isinstance(bn_traders_raw, str) else bn_traders_raw
@@ -1031,7 +892,7 @@ def api_copy_start():
     if len(bn_enabled) == 0:
         db.set_engine_enabled(True)
         copy_engine.start_engine()
-        return jsonify({"ok": True, "msg": "寮曟搸宸插惎鍔紙褰撳墠鏈娴嬪埌鍚敤鐨勫竵瀹変氦鏄撳憳锛岃娣诲姞鍚庡惎鐢ㄨ窡鍗曪級"})
+        return jsonify({"ok": True, "msg": "引擎已启劼当前测到吔的币安交易员，添加后启用跟单）"})
 
     total_cap = float(settings.get("total_capital") or 0)
     if total_cap <= 0:
@@ -1039,19 +900,19 @@ def api_copy_start():
         copy_engine.start_engine()
         return jsonify({
             "ok": True,
-            "msg": f"引擎已启动，但总资金为 0，跟单可能全部失败。请先填写总资金后重试。Binance 已启用 {len(bn_enabled)} 个交易员"
+            "msg": f"ʽΪ 0ȫʧܡдʽԡBinance  {len(bn_enabled)} Ա"
         })
 
     db.set_engine_enabled(True)
     copy_engine.start_engine()
-    return jsonify({"ok": True, "msg": f"跟单引擎已启动，Binance 已启用 {len(bn_enabled)} 个交易员"})
+    return jsonify({"ok": True, "msg": f"Binance  {len(bn_enabled)} Ա"})
 
 
 @app.route("/api/copy/stop", methods=["POST"])
 def api_copy_stop():
     db.set_engine_enabled(False)
     copy_engine.stop_engine()
-    return jsonify({"ok": True, "msg": "跟单引擎已停止"})
+    return jsonify({"ok": True, "msg": "ֹͣ"})
 
 
 @app.route("/api/copy/orders")
@@ -1061,7 +922,7 @@ def api_copy_orders():
     offset = max(page - 1, 0) * page_size
     rows = db.get_copy_orders(limit=page_size, offset=offset, platforms=_profile_platform_keys('sim'))
     
-    # 寤虹珛 UID -> Nickname 鏄犲皠
+    # 建立 UID -> Nickname 映射
     settings = _normalize_copy_settings(db.get_copy_settings())
     name_map = {}
     bn_raw = settings.get("binance_traders") or {}
@@ -1086,7 +947,7 @@ def api_copy_orders():
 
 @app.route("/api/copy/positions")
 def api_copy_positions():
-    """璇诲彇鐢ㄦ埛鑷繁璐︽埛鐨勫綋鍓嶅悎绾︽寔浠擄紝鎸?Bitget / Binance 鍒嗙粍杩斿洖銆?"""
+    """读取用户臷账户的当前合约持仓，?Bitget / Binance 分组返回?"""
     settings = _normalize_copy_settings(db.get_copy_settings())
     api_key = settings.get("api_key") or ""
     api_secret = settings.get("api_secret") or ""
@@ -1116,10 +977,10 @@ def api_copy_positions():
                 return v
         return None
 
-    # 鏌ユ壘 copy_orders 閲?filled 鐨勫紑浠撹褰曪紝鐢ㄤ簬鏄剧ず"鏉ユ簮浜ゆ槗鍛?
+    # 查找 copy_orders ?filled 的开仓录，用于显示"来源交易?
     open_orders = db.get_copy_orders(limit=1000, platforms=_profile_platform_keys('sim'))
     
-    # 寤虹珛 UID -> Nickname 鏄犲皠锛堝竵瀹変氦鏄撳憳锛?
+    # 建立 UID -> Nickname 映射（币安交易员?
     name_map = {}
     bn_raw = settings.get("binance_traders") or {}
     if isinstance(bn_raw, str):
@@ -1158,12 +1019,12 @@ def api_copy_positions():
         try:
             raw = order_executor.get_my_positions(api_key, api_secret, api_passphrase)
         except Exception as exc:
-            bitget_error = f"璇诲彇 Bitget 鎸佷粨澶辫触锛{exc}"
+            bitget_error = f"读取 Bitget 持仓失败{exc}"
             raw = []
         try:
             account_overview = _build_account_overview(api_key, api_secret, api_passphrase)
         except Exception as exc:
-            logger.warning("璇诲彇璐︽埛鎬昏澶辫触锛?s", exc)
+            logger.warning("读取账户总失败?s", exc)
 
         for item in raw:
             symbol = _clean_symbol(item.get("symbol") or "-")
@@ -1201,7 +1062,7 @@ def api_copy_positions():
                 "sync_mode": "account",
             })
     else:
-        bitget_error = "Bitget API 未配置"
+        bitget_error = "Bitget API δ"
 
     binance_positions = []
     if bn_api_key and bn_api_secret:
@@ -1210,7 +1071,7 @@ def api_copy_positions():
         try:
             bn_raw = binance_executor.get_my_positions(bn_api_key, bn_api_secret)
         except Exception as exc:
-            binance_error = f"璇诲彇 Binance 鎸佷粨澶辫触锛{exc}"
+            binance_error = f"读取 Binance 持仓失败{exc}"
             bn_raw = []
 
         for item in bn_raw:
@@ -1267,7 +1128,7 @@ def api_copy_positions():
     })
 
 
-# 鈹€鈹€ 鍚姩 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+#  吊 
 
 
 
@@ -1341,7 +1202,7 @@ def _profile_secret_env_keys(profile: str | None) -> dict[str, str]:
 
 
 def _normalize_copy_settings_for_profile(raw: dict, profile: str | None = 'sim') -> dict:
-    settings = _normalize_copy_settings(raw)
+    settings = _normalize_copy_settings(raw, include_env_secrets=False)
     profile_key = _normalize_profile_name(profile)
     keys = _profile_secret_env_keys(profile_key)
     settings['api_key'] = settings.get('api_key') or os.getenv(keys['bitget_api_key'], '')
@@ -1410,6 +1271,113 @@ def _copy_status_payload(profile: str | None = None) -> dict:
     }
 
 
+
+def _tcp_probe(host: str, port: int = 443, timeout: float = 2.5) -> tuple[bool, str]:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True, f"{host}:{port} 可连通"
+    except Exception as exc:
+        return False, f"{host}:{port} 不可达: {str(exc)[:120]}"
+
+
+def _live_diagnostics_payload() -> dict:
+    settings = _normalize_copy_settings_for_profile(db.get_copy_settings_profile('live'), 'live')
+    runtime = _profile_runtime('live')
+    bn_raw = settings.get('binance_traders') or {}
+    if isinstance(bn_raw, str):
+        try:
+            bn_raw = json.loads(bn_raw)
+        except Exception:
+            bn_raw = {}
+    if not isinstance(bn_raw, dict):
+        bn_raw = {}
+
+    enabled_pids = [pid for pid, info in bn_raw.items() if isinstance(info, dict) and info.get('copy_enabled') is True]
+    latest_orders = db.get_copy_orders(limit=10, platforms=_profile_platform_keys('live'))
+    latest_open = next((dict(row) for row in latest_orders if dict(row).get('action') == 'open'), None)
+
+    copytrade_ok, copytrade_msg = _tcp_probe('www.binance.com')
+    fapi_ok, fapi_msg = _tcp_probe('fapi.binance.com')
+    papi_ok, papi_msg = _tcp_probe('papi.binance.com')
+
+    checks = [
+        {
+            'key': 'engine',
+            'label': '引擎状态',
+            'status': 'pass' if settings.get('engine_enabled') else 'blocker',
+            'detail': '实盘引擎已开启' if settings.get('engine_enabled') else '实盘引擎未开启',
+        },
+        {
+            'key': 'traders',
+            'label': '跟单对象',
+            'status': 'pass' if enabled_pids else 'blocker',
+            'detail': f'已启用 {len(enabled_pids)} 个 Binance 跟单对象',
+        },
+        {
+            'key': 'binance_api',
+            'label': 'Binance 实盘 API',
+            'status': 'pass' if settings.get('binance_api_key') and settings.get('binance_api_secret') else 'blocker',
+            'detail': 'Binance API Key/Secret 已配置' if settings.get('binance_api_key') and settings.get('binance_api_secret') else 'Binance API Key/Secret 未配置完整',
+        },
+        {
+            'key': 'copytrade_network',
+            'label': '跟单源网络',
+            'status': 'pass' if copytrade_ok else 'blocker',
+            'detail': copytrade_msg,
+        },
+        {
+            'key': 'fapi_network',
+            'label': 'Binance 执行网络',
+            'status': 'pass' if fapi_ok else 'blocker',
+            'detail': fapi_msg,
+        },
+        {
+            'key': 'papi_network',
+            'label': '统一账户网络',
+            'status': 'pass' if papi_ok else 'warning',
+            'detail': papi_msg,
+        },
+        {
+            'key': 'entry_mode',
+            'label': '下单模式',
+            'status': 'pass',
+            'detail': f"当前模式: {settings.get('entry_order_mode') or config.DEFAULT_ENTRY_ORDER_MODE}",
+        },
+    ]
+
+    if latest_open:
+        checks.append({
+            'key': 'latest_open',
+            'label': '最近开仓结果',
+            'status': 'pass' if latest_open.get('status') == 'filled' else 'warning',
+            'detail': f"{latest_open.get('symbol') or '-'} / {latest_open.get('platform') or '-'} / {latest_open.get('status') or '-'}",
+        })
+    else:
+        checks.append({
+            'key': 'latest_open',
+            'label': '最近开仓结果',
+            'status': 'warning',
+            'detail': '暂无实盘开仓记录',
+        })
+
+    blockers = sum(1 for item in checks if item['status'] == 'blocker')
+    warnings = sum(1 for item in checks if item['status'] == 'warning')
+    overall = 'pass'
+    if blockers:
+        overall = 'blocker'
+    elif warnings:
+        overall = 'warning'
+
+    return {
+        'overall': overall,
+        'engine_running': copy_engine.is_engine_running('live'),
+        'generated_at': int(time.time() * 1000),
+        'binance_base_url': str(runtime['binance_base_url']),
+        'enabled_trader_count': len(enabled_pids),
+        'checks': checks,
+    }
+
+
 def _build_account_overview_for_profile(profile: str | None, api_key: str, api_secret: str, api_passphrase: str):
     with _profile_runtime_context(profile):
         balance_raw = order_executor.get_account_balance(api_key, api_secret, api_passphrase)
@@ -1430,8 +1398,14 @@ def _build_account_overview_for_profile(profile: str | None, api_key: str, api_s
         'day_start_ts': start_ts * 1000 if start_ts > 0 else None,
         'day_pnl': day_pnl,
         'day_pnl_pct': day_pnl_pct,
-        'updated_at': int(time.time() * 1000),
-    }
+        'updated_at': int(time.time() * 1000),    }
+
+
+def _sync_shared_copy_selection_from_normalized(normalized: dict) -> None:
+    db.update_shared_copy_settings(
+        enabled_traders=normalized['enabled_traders'],
+        binance_traders=normalized['binance_traders'],
+    )
 
 
 def _parse_copy_settings_payload(payload: dict, existing: dict) -> dict:
@@ -1495,14 +1469,18 @@ def _parse_copy_settings_payload(payload: dict, existing: dict) -> dict:
     entry_limit_timeout_sec = _int_or(payload.get('entry_limit_timeout_sec'), existing.get('entry_limit_timeout_sec', config.DEFAULT_ENTRY_LIMIT_TIMEOUT_SEC), minimum=1)
     entry_limit_fallback_to_market = _bool_or(payload.get('entry_limit_fallback_to_market'), existing.get('entry_limit_fallback_to_market', 1 if config.DEFAULT_ENTRY_LIMIT_FALLBACK_TO_MARKET else 0))
 
+    binance_traders_supplied = 'binance_traders' in payload
+    binance_traders_fallback = not binance_traders_supplied
     binance_traders = payload.get('binance_traders')
     if binance_traders is None:
         binance_traders = existing.get('binance_traders') or {}
+        binance_traders_fallback = True
     elif isinstance(binance_traders, str):
         try:
             binance_traders = json.loads(binance_traders)
         except Exception:
             binance_traders = existing.get('binance_traders') or {}
+            binance_traders_fallback = True
 
     normalized_bn: dict[str, dict] = {}
     if isinstance(binance_traders, list):
@@ -1520,7 +1498,7 @@ def _parse_copy_settings_payload(payload: dict, existing: dict) -> dict:
             row['nickname'] = row.get('nickname') or f'Trader_{spid[:8]}'
             row['copy_enabled'] = bool(row.get('copy_enabled', True))
             normalized_bn[spid] = row
-    if not normalized_bn and isinstance(existing.get('binance_traders'), dict):
+    if binance_traders_fallback and not normalized_bn and isinstance(existing.get('binance_traders'), dict):
         normalized_bn = existing.get('binance_traders')
 
     enabled_traders = payload.get('enabled_traders')
@@ -1564,21 +1542,26 @@ def api_live_status():
     return jsonify(_copy_status_payload('live'))
 
 
+@app.route('/api/live/diagnostics')
+def api_live_diagnostics():
+    return jsonify(_live_diagnostics_payload())
+
+
 @app.route('/api/live/toggle_copy', methods=['POST'])
 def api_live_toggle_copy():
     data = request.json or {}
     uid = data.get('uid', '').strip()
     enabled = data.get('enabled', False)
     if not uid:
-        return jsonify({'error': '缂哄皯浜ゆ槗鍛業D'}), 400
+        return jsonify({'error': '缺少交易员ID'}), 400
     settings = db.get_copy_settings_profile('live')
     raw = settings.get('binance_traders') or '{}'
     bn_traders = json.loads(raw) if isinstance(raw, str) else raw
     if uid in bn_traders:
         bn_traders[uid]['copy_enabled'] = enabled
-        db.update_copy_settings_profile('live', binance_traders=json.dumps(bn_traders, ensure_ascii=False))
+        db.update_shared_copy_settings(binance_traders=json.dumps(bn_traders, ensure_ascii=False))
         return jsonify({'ok': True, 'enabled': enabled})
-    return jsonify({'error': '浜ゆ槗鍛樹笉瀛樺湪'}), 404
+    return jsonify({'error': '交易员不存在'}), 404
 
 
 @app.route('/api/live/add_binance_trader', methods=['POST'])
@@ -1586,12 +1569,12 @@ def api_live_add_binance_trader():
     import binance_scraper
     url_or_pid = (request.json or {}).get('url', '').strip()
     if not url_or_pid:
-        return jsonify({'error': 'URL 鎴?Portfolio ID 涓嶈兘涓虹┖'}), 400
+        return jsonify({'error': 'URL ?Portfolio ID 不能为空'}), 400
     try:
         portfolio_id = binance_scraper.parse_binance_url(url_or_pid) or url_or_pid
         if not portfolio_id.isdigit() or len(portfolio_id) < 10:
-            return jsonify({'error': f'鏃犳晥鐨?Portfolio ID: {portfolio_id}'}), 400
-        info = binance_scraper.fetch_trader_info(portfolio_id) or {'portfolio_id': portfolio_id, 'nickname': f'浜ゆ槗鍛榑{portfolio_id[:8]}'}
+            return jsonify({'error': f'无效?Portfolio ID: {portfolio_id}'}), 400
+        info = binance_scraper.fetch_trader_info(portfolio_id) or {'portfolio_id': portfolio_id, 'nickname': f'交易员_{portfolio_id[:8]}'}
         settings = db.get_copy_settings_profile('live')
         raw = settings.get('binance_traders') or '{}'
         try:
@@ -1613,18 +1596,18 @@ def api_live_add_binance_trader():
                 'copy_enabled': True,
                 'added_at': int(time.time()),
             }
-            db.update_copy_settings_profile('live', binance_traders=json.dumps(traders, ensure_ascii=False))
+            db.update_shared_copy_settings(binance_traders=json.dumps(traders, ensure_ascii=False))
         return jsonify({'ok': True, 'portfolio_id': portfolio_id, 'info': info})
     except Exception as exc:
-        logger.error('瀹炵洏 Binance 浜ゆ槗鍛樺鐞嗗け璐? %s', exc, exc_info=True)
-        return jsonify({'error': f'澶勭悊澶辫触: {str(exc)[:200]}'}), 500
+        logger.error('实盘 Binance 交易员理失? %s', exc, exc_info=True)
+        return jsonify({'error': f'处理失败: {str(exc)[:200]}'}), 500
 
 
 @app.route('/api/live/remove_binance_trader', methods=['POST'])
 def api_live_remove_binance_trader():
     portfolio_id = (request.json or {}).get('portfolio_id', '').strip()
     if not portfolio_id:
-        return jsonify({'error': 'portfolio_id 涓嶈兘涓虹┖'}), 400
+        return jsonify({'error': 'portfolio_id 不能为空'}), 400
     try:
         settings = db.get_copy_settings_profile('live')
         raw = settings.get('binance_traders') or '{}'
@@ -1634,11 +1617,11 @@ def api_live_remove_binance_trader():
             traders = {}
         if isinstance(traders, dict) and portfolio_id in traders:
             del traders[portfolio_id]
-            db.update_copy_settings_profile('live', binance_traders=json.dumps(traders, ensure_ascii=False))
+            db.update_shared_copy_settings(binance_traders=json.dumps(traders, ensure_ascii=False))
         return jsonify({'ok': True})
     except Exception as exc:
-        logger.error('瀹炵洏 Binance 浜ゆ槗鍛樺鐞嗗け璐? %s', exc, exc_info=True)
-        return jsonify({'error': f'澶勭悊澶辫触: {exc}'}), 500
+        logger.error('实盘 Binance 交易员理失? %s', exc, exc_info=True)
+        return jsonify({'error': f'处理失败: {exc}'}), 500
 
 
 @app.route('/api/live/copy/settings', methods=['GET', 'POST'])
@@ -1654,12 +1637,14 @@ def api_live_copy_settings():
         normalized = _parse_copy_settings_payload(payload, existing)
         _write_profile_env('live', api_key=api_key, api_secret=api_secret, api_passphrase=api_passphrase, binance_api_key=binance_api_key, binance_api_secret=binance_api_secret)
         db.update_copy_settings_profile('live', api_key='', api_secret='', api_passphrase='', binance_api_key='', binance_api_secret='', **normalized)
+        _sync_shared_copy_selection_from_normalized(normalized)
         return jsonify({'ok': True})
 
     settings = _normalize_copy_settings_for_profile(db.get_copy_settings_profile('live'), 'live')
     safe_settings = dict(settings)
     for field in ('api_secret', 'api_passphrase', 'binance_api_secret'):
         safe_settings[field] = _mask_secret(str(safe_settings.get(field) or ''))
+    safe_settings['traders'] = db.get_all_traders()
     return jsonify(safe_settings)
 
 
@@ -1667,27 +1652,30 @@ def api_live_copy_settings():
 def api_live_copy_test_api():
     import binance_executor
     payload = request.json or {}
-    source = payload.get('source', 'bitget')
+    source = (payload.get('source') or 'bitget').lower()
     existing = _normalize_copy_settings_for_profile(db.get_copy_settings_profile('live'), 'live')
     runtime = _profile_runtime('live')
+
     if source == 'binance':
         api_key = (payload.get('binance_api_key') or '').strip() or existing.get('binance_api_key') or ''
         api_secret = (payload.get('binance_api_secret') or '').strip() or existing.get('binance_api_secret') or ''
         if not api_key or not api_secret:
-            return jsonify({'error': '璇峰～鍐?Binance API Key / Secret'}), 400
+            return jsonify({'error': '请填写 Binance API Key / Secret'}), 400
         try:
             with _profile_runtime_context('live'):
                 balance_info = binance_executor.get_account_balance(api_key, api_secret)
             available = float(balance_info.get('availableBalance', 0))
-            return jsonify({'ok': True, 'msg': f'Binance API 鍙敤锛屽彲鐢ㄤ綑棰?{available:.2f} USDT | endpoint={runtime["binance_base_url"]}'})
+            total_balance = float(balance_info.get('balance', 0))
+            endpoint_used = balance_info.get('_endpoint') or runtime['binance_base_url']
+            return jsonify({'ok': True, 'msg': f'Binance API 可用，可用余额 {available:.2f} USDT，总权益 {total_balance:.2f} USDT | endpoint={endpoint_used}'} )
         except Exception as exc:
-            return jsonify({'error': f'Binance API 娴嬭瘯澶辫触: {exc}'}), 400
+            return jsonify({'error': f'Binance API 测试失败: {exc}'}), 400
 
     api_key = (payload.get('api_key') or '').strip() or existing.get('api_key') or ''
     api_secret = (payload.get('api_secret') or '').strip() or existing.get('api_secret') or ''
     api_passphrase = (payload.get('api_passphrase') or '').strip() or existing.get('api_passphrase') or ''
     if not api_key or not api_secret or not api_passphrase:
-        return jsonify({'error': '璇峰～鍐?Bitget API Key / Secret / Passphrase'}), 400
+        return jsonify({'error': '请填写 Bitget API Key / Secret / Passphrase'}), 400
     try:
         with _profile_runtime_context('live'):
             balance = order_executor.get_account_balance(api_key, api_secret, api_passphrase)
@@ -1702,30 +1690,48 @@ def api_live_copy_test_api():
                 if balance[0].get(k) is not None:
                     available = float(balance[0][k])
                     break
-        return jsonify({'ok': True, 'msg': f'Bitget API 鍙敤锛屽彲鐢ㄤ綑棰?{available:.2f} USDT'})
+        return jsonify({'ok': True, 'msg': f'Bitget API 可用，可用余额 {available:.2f} USDT'})
     except Exception as exc:
-        return jsonify({'error': f'Bitget API 娴嬭瘯澶辫触: {exc}'}), 400
+        return jsonify({'error': f'Bitget API 测试失败: {exc}'}), 400
 
 
 @app.route('/api/live/binance/balance')
 def api_live_binance_balance():
+    import binance_executor
+
     settings = _normalize_copy_settings_for_profile(db.get_copy_settings_profile('live'), 'live')
     api_key = settings.get('binance_api_key') or ''
     api_secret = settings.get('binance_api_secret') or ''
     if not api_key or not api_secret:
-        return jsonify({'error': '鏈厤缃?Binance API'}), 400
+        return jsonify({'error': '未配置 Binance API'}), 400
+
     runtime = _profile_runtime('live')
     try:
-        balance_info = binance_scraper.get_binance_futures_balance(api_key, api_secret, base_url=str(runtime['binance_base_url']))
-        day_pnl = binance_scraper.get_binance_futures_income_today(api_key, api_secret, base_url=str(runtime['binance_base_url']))
-        wallet_balance = balance_info.get('balance', 0)
-        available = balance_info.get('available', 0)
-        unrealized_pnl = balance_info.get('unrealized_pnl', 0)
+        with _profile_runtime_context('live'):
+            balance_info = binance_executor.get_account_balance(api_key, api_secret)
+        wallet_balance = float(balance_info.get('balance', 0) or 0)
+        available = float(balance_info.get('availableBalance', 0) or 0)
+
+        day_pnl = 0.0
+        try:
+            day_pnl = float(binance_scraper.get_binance_futures_income_today(api_key, api_secret, base_url=str(runtime['binance_base_url'])) or 0)
+        except Exception:
+            day_pnl = 0.0
+
         day_pnl_pct = (day_pnl / wallet_balance * 100.0) if wallet_balance > 0 else 0.0
-        return jsonify({'ok': True, 'wallet_balance': wallet_balance, 'available_balance': available, 'unrealized_pnl': unrealized_pnl, 'day_pnl': day_pnl, 'day_pnl_pct': day_pnl_pct, 'updated_at': int(time.time() * 1000)})
+        return jsonify({
+            'ok': True,
+            'wallet_balance': wallet_balance,
+            'available_balance': available,
+            'unrealized_pnl': 0.0,
+            'day_pnl': day_pnl,
+            'day_pnl_pct': day_pnl_pct,
+            'endpoint': balance_info.get('_endpoint') or runtime['binance_base_url'],
+            'updated_at': int(time.time() * 1000),
+        })
     except Exception as exc:
-        logger.warning('鏌ヨ Binance 浣欓澶辫触: %s', exc)
-        return jsonify({'error': f'鏌ヨ澶辫触: {exc}'}), 400
+        logger.warning('查询 Binance 余额失败: %s', exc)
+        return jsonify({'error': f'查询失败: {exc}'}), 400
 
 
 @app.route('/api/live/copy/start', methods=['POST'])
@@ -1734,7 +1740,7 @@ def api_live_copy_start():
     has_bg = bool(settings.get('api_key') and settings.get('api_secret') and settings.get('api_passphrase'))
     has_bn = bool(settings.get('binance_api_key') and settings.get('binance_api_secret'))
     if not has_bg and not has_bn:
-        return jsonify({'error': '璇峰厛閰嶇疆鑷冲皯涓€涓彲鐢ㄧ殑 Bitget 鎴?Binance 瀹炵洏 API'}), 400
+        return jsonify({'error': '请先配置至少一组可用的 Bitget 或 Binance 实盘 API'}), 400
     bn_raw = settings.get('binance_traders') or {}
     if isinstance(bn_raw, str):
         try:
@@ -1745,15 +1751,15 @@ def api_live_copy_start():
     db.set_engine_enabled_profile('live', True)
     copy_engine.start_engine('live')
     if len(bn_enabled) == 0:
-        return jsonify({'ok': True, 'msg': '实盘跟单引擎已启动，当前未启用 Binance 交易员'})
-    return jsonify({'ok': True, 'msg': f'实盘跟单引擎已启动，已启用 Binance {len(bn_enabled)} 个交易员'})
+        return jsonify({'ok': True, 'msg': '实盘引擎已启动，但当前没有启用任何 Binance 跟单对象'})
+    return jsonify({'ok': True, 'msg': f'实盘引擎已启动，当前启用 {len(bn_enabled)} 个 Binance 跟单对象'})
 
 
 @app.route('/api/live/copy/stop', methods=['POST'])
 def api_live_copy_stop():
     db.set_engine_enabled_profile('live', False)
     copy_engine.stop_engine('live')
-    return jsonify({'ok': True, 'msg': '实盘跟单引擎已停止'})
+    return jsonify({'ok': True, 'msg': '实盘引擎已停止'})
 
 
 @app.route('/api/live/copy/orders')
@@ -1847,12 +1853,12 @@ def api_live_copy_positions():
             with _profile_runtime_context('live'):
                 raw = order_executor.get_my_positions(api_key, api_secret, api_passphrase)
         except Exception as exc:
-            bitget_error = f'璇诲彇 Bitget 瀹炵洏鎸佷粨澶辫触锛{exc}'
+            bitget_error = f'读取 Bitget 实盘持仓失败{exc}'
             raw = []
         try:
             account_overview = _build_account_overview_for_profile('live', api_key, api_secret, api_passphrase)
         except Exception as exc:
-            logger.warning('鏌ヨ Binance 浣欓澶辫触: %s', exc)
+            logger.warning('查 Binance 余失败: %s', exc)
         for item in raw:
             symbol = _clean_symbol(item.get('symbol') or '-')
             hold_side = str(item.get('holdSide') or '-').lower()
@@ -1873,7 +1879,7 @@ def api_live_copy_positions():
                 'sync_mode': 'account',
             })
     else:
-        bitget_error = 'Bitget 实盘 API 未配置'
+        bitget_error = 'Bitget ʵ API δ'
 
     binance_positions = []
     if bn_api_key and bn_api_secret:
@@ -1881,7 +1887,7 @@ def api_live_copy_positions():
             with _profile_runtime_context('live'):
                 bn_raw_positions = binance_executor.get_my_positions(bn_api_key, bn_api_secret)
         except Exception as exc:
-            binance_error = f'璇诲彇 Binance 瀹炵洏鎸佷粨澶辫触锛{exc}'
+            binance_error = f'读取 Binance 实盘持仓失败{exc}'
             bn_raw_positions = []
         for item in bn_raw_positions:
             symbol = _clean_symbol(item.get('symbol') or '-')
@@ -1921,11 +1927,11 @@ def api_live_copy_positions():
                 'sync_mode': 'account',
             })
     else:
-        binance_error = 'Binance 实盘 API 未配置'
+        binance_error = 'Binance ʵ API δ'
 
     return jsonify({'bitget_items': bitget_positions, 'binance_items': binance_positions, 'bitget_error': bitget_error, 'binance_error': binance_error, 'account_overview': account_overview})
 def _migrate_binance_format():
-    """灏嗗竵瀹変氦鏄撳憳浠庢棫鏍煎紡杩佺Щ锛屽苟閲嶆柊鑾峰彇鐪熷疄淇℃伅"""
+    """将币安交易员从旧格式迁移，并重新获取真实信息"""
     try:
         import binance_scraper
 
@@ -1944,7 +1950,7 @@ def _migrate_binance_format():
             for pid in bn_traders_data:
                 info = binance_scraper.fetch_trader_info(str(pid))
                 bn_traders_dict[str(pid)] = {
-                    "nickname": info.get("nickname", f"甯佸畨浜ゆ槗鍛榑{str(pid)[:8]}"),
+                    "nickname": info.get("nickname", f"币安交易员_{str(pid)[:8]}"),
                     "follower_count": info.get("follower_count", 0),
                     "copier_pnl": info.get("copier_pnl", 0),
                     "aum": info.get("aum", 0),
@@ -1952,12 +1958,12 @@ def _migrate_binance_format():
                     "avatar": info.get("avatar", ""),
                 }
             needs_update = True
-            logger.info("Binance 交易员配置已从数组迁移为字典: %d 个", len(bn_traders_dict))
+            logger.info("Binance ԱѴǨΪֵ: %d ", len(bn_traders_dict))
 
         elif isinstance(bn_traders_data, dict) and bn_traders_data:
             for pid, data in bn_traders_data.items():
                 old_nickname = data.get("nickname", "")
-                if old_nickname.startswith("甯佸畨浜ゆ槗鍛榑"):
+                if old_nickname.startswith("币安交易员_"):
                     info = binance_scraper.fetch_trader_info(str(pid))
                     bn_traders_dict[str(pid)] = {
                         "nickname": info.get("nickname", old_nickname),
@@ -1968,55 +1974,55 @@ def _migrate_binance_format():
                         "avatar": info.get("avatar", ""),
                     }
                     needs_update = True
-                    logger.info("閲嶆柊鑾峰彇甯佸畨浜ゆ槗鍛樹俊鎭? %s 鈫?%s", old_nickname, info.get("nickname"))
+                    logger.info("重新获取币安交易员信? %s ?%s", old_nickname, info.get("nickname"))
                 else:
                     bn_traders_dict[str(pid)] = data
 
         if needs_update:
             db.update_copy_settings(binance_traders=json.dumps(bn_traders_dict))
-            logger.info("甯佸畨浜ゆ槗鍛樹俊鎭凡鏇存柊")
+            logger.info("币安交易员信恷更新")
     except Exception as e:
-        logger.warning("甯佸畨浜ゆ槗鍛樻牸寮忚縼绉诲け璐? %s", e)
+        logger.warning("币安交易员格式迁移失? %s", e)
 
 
 def _auto_start_copy_engine():
-    """鑻ヤ笂娆″叧闂椂寮曟搸鏄惎鍔ㄧ姸鎬侊紝鑷姩鎭㈠銆?"""
+    """若上次关闗引擎昐动状态，臊恢?"""
     settings = _normalize_copy_settings(db.get_copy_settings())
     if settings.get("engine_enabled") and settings.get("api_key") and settings.get("api_secret"):
         copy_engine.start_engine()
-        logger.info("跟单引擎已自动恢复")
+        logger.info("Զָ")
 
 
 def _cleanup():
-    """浼橀泤閫€鍑猴細娓呯悊璧勬簮銆佸叧闂嚎绋嬨€佷紭鍖栨暟鎹簱銆?"""
-    logger.info("鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲")
-    logger.info("系统清理启动 - 正在妥善关闭所有资源")
-    logger.info("鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲")
+    """优雅出：清理资源、关闺程优化数捺?"""
+    logger.info("════════════════════════════════════════════")
+    logger.info("ϵͳ - ƹرԴ")
+    logger.info("════════════════════════════════════════════")
     
     try:
-        # 鍋滄璺熷崟寮曟搸
+        # 停跟单引擎
         copy_engine.stop_engine()
         time.sleep(0.5)
         
-        # 鏁版嵁搴撲紭鍖?
-        logger.info("优化数据库 WAL...")
+        # 数据库优?
+        logger.info("Żݿ WAL...")
         try:
             with db.get_conn() as conn:
                 conn.execute("PRAGMA optimize")
                 conn.commit()
         except Exception as e:
-            logger.warning("鏁版嵁搴撲紭鍖栧け璐? %s", e)
+            logger.warning("数据库优化失? %s", e)
         
-        logger.info("系统清理完成，已安全退出")
+        logger.info("ϵͳɣѰȫ˳")
     except Exception as e:
-        logger.error("娓呯悊杩囩▼涓嚭閿? %s", e, exc_info=True)
+        logger.error("清理过程万? %s", e, exc_info=True)
 
-# 娉ㄥ唽閫€鍑烘竻鐞?
+# 注册出清?
 atexit.register(_cleanup)
 
-# 澶勭悊淇″彿
+# 处理信号
 def _signal_handler(signum, frame):
-    logger.info("收到信号 %d，开始退出", signum)
+    logger.info("յź %dʼ˳", signum)
     sys.exit(0)
 
 signal.signal(signal.SIGTERM, _signal_handler)
@@ -2027,7 +2033,7 @@ _LOCK_FILE = None
 
 
 def _try_acquire_lock() -> bool:
-    """灏濊瘯鑾峰彇鍗曞疄渚嬮攣锛屾垚鍔熻繑鍥?True锛屽凡鏈夊疄渚嬭繑鍥?False"""
+    """尝试获取单实例锁，成功返?True，已有实例返?False"""
     global _LOCK_FILE
     lock_path = os.path.join(os.path.dirname(__file__), ".bitgetfollow.lock")
     try:
@@ -2045,7 +2051,7 @@ def _try_acquire_lock() -> bool:
 
 
 def _port_in_use(port: int) -> bool:
-    """妫€娴嬬鍙ｆ槸鍚﹀凡鏈夌洃鍚湇鍔?"""
+    """测口是否已有监吜?"""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.settimeout(0.2)
         try:
@@ -2059,30 +2065,30 @@ def main():
     url = f"http://127.0.0.1:{port}"
 
     if not _try_acquire_lock():
-        logger.info("宸叉湁瀹炰緥鍦ㄨ繍琛岋紝璇风洿鎺ユ墦寮€娴忚鍣? %s", url)
+        logger.info("已有实例在运行，请直接打浏? %s", url)
         return
     if _port_in_use(port):
-        logger.info("绔彛宸插崰鐢紝璇风洿鎺ユ墦寮€娴忚鍣? %s", url)
+        logger.info("竏已占甼请直接打浏? %s", url)
         return
 
     db.init_db()
     _migrate_plaintext_secrets_out_of_db()
 
-    # 杩佺Щ甯佸畨浜ゆ槗鍛樻牸寮?
+    # 迁移币安交易员格?
     _migrate_binance_format()
 
-    logger.info("鍚姩 Web 浠〃鐩橈細%s", url)
+    logger.info("吊 Web 仡盘：%s", url)
 
-    # 鍚姩蹇冭烦鐩戞帶绾跨▼
+    # 吊心跳监控线程
     threading.Thread(target=_heartbeat_monitor, daemon=True).start()
 
-    # 寤惰繜鍚姩璺熷崟寮曟搸
+    # 延迟吊跟单引擎
     threading.Timer(3.0, _auto_start_copy_engine).start()
     try:
         app.run(host="127.0.0.1", port=port, debug=False)
     except OSError as e:
         if "Address already in use" in str(e) or getattr(e, "errno", 0) == 48:
-            logger.info("绔彛 %d 宸茶鍗犵敤锛岃鐩存帴鎵撳紑娴忚鍣? %s", port, url)
+            logger.info("竏 %d 已占用，直接打开浏? %s", port, url)
             os._exit(0)
         else:
             raise
@@ -2090,6 +2096,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 

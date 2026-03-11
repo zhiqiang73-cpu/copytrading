@@ -1,10 +1,13 @@
-# Environment and secrets
+﻿# Environment and secrets
 .env
 api.txt
+API KEY.txt
 
 # Logs
 logs/
 *.log
+_web_start.err
+_web_start.out
 
 # Runtime data
 data/*.db

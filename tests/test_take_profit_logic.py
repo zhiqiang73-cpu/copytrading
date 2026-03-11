@@ -10,7 +10,7 @@ if "dotenv" not in sys.modules:
     dotenv_stub.load_dotenv = lambda *args, **kwargs: None
     sys.modules["dotenv"] = dotenv_stub
 
-for module_name in ("requests", "order_executor", "binance_scraper"):
+for module_name in ("requests", "order_executor", "binance_scraper", "binance_executor"):
     if module_name not in sys.modules:
         sys.modules[module_name] = types.ModuleType(module_name)
 
@@ -93,6 +93,38 @@ class CopyPositionSummaryTests(unittest.TestCase):
         self.assertAlmostEqual(0.012, settings["follow_ratio_pct"], places=6)
         self.assertIn("p1", settings["binance_traders"])
 
+    def test_live_profile_trader_selection_is_shared_with_sim_profile(self):
+        db.update_copy_settings(
+            enabled_traders='["sim-u"]',
+            binance_traders='{"sim-p1": {"nickname": "Sim Trader", "copy_enabled": false}}',
+        )
+        db.update_copy_settings_profile(
+            "live",
+            enabled_traders='["live-u"]',
+            binance_traders='{"live-p1": {"nickname": "Live Trader", "copy_enabled": true}}',
+        )
+
+        settings = db.get_copy_settings_profile("live")
+        self.assertEqual('["sim-u"]', settings["enabled_traders"])
+        self.assertIn("sim-p1", settings["binance_traders"])
+        self.assertNotIn("live-p1", settings["binance_traders"])
+
+    def test_parse_copy_settings_payload_keeps_explicit_empty_binance_traders(self):
+        import web
+
+        normalized = web._parse_copy_settings_payload(
+            {
+                "binance_traders": {},
+                "enabled_traders": [],
+            },
+            {
+                "binance_traders": {"old-p1": {"nickname": "Old Trader", "copy_enabled": True}},
+                "enabled_traders": ["old-u"],
+            },
+        )
+
+        self.assertEqual("{}", normalized["binance_traders"])
+
     def test_get_copy_orders_can_filter_by_profile_platforms(self):
         self._insert_order(timestamp=1, tracking_no="sim-open", platform="bitget", exec_qty=1.0)
         self._insert_order(timestamp=2, tracking_no="live-open", platform="live_bitget", exec_qty=2.0)
@@ -102,6 +134,109 @@ class CopyPositionSummaryTests(unittest.TestCase):
 
         self.assertEqual(["live-open"], [row["tracking_no"] for row in live_rows])
         self.assertEqual(["sim-open"], [row["tracking_no"] for row in sim_rows])
+
+    def test_live_loop_uses_live_runtime_for_balance_sync(self):
+        order_executor_stub = sys.modules["order_executor"]
+        binance_executor_stub = sys.modules["binance_executor"]
+        binance_scraper_stub = sys.modules["binance_scraper"]
+        calls = []
+
+        class _Ctx:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def __enter__(self):
+                calls.append(self.payload)
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        order_executor_stub.use_runtime = lambda simulated=None: _Ctx(("bitget_runtime", simulated))
+        order_executor_stub.get_account_balance = lambda *args, **kwargs: {"available": 10, "_posMode": "2"}
+
+        binance_executor_stub.use_runtime = lambda base_url=None: _Ctx(("binance_runtime", base_url))
+        binance_executor_stub.get_account_balance = lambda *args, **kwargs: {"availableBalance": 20, "balance": 20}
+
+        binance_scraper_stub.fetch_latest_orders = lambda *args, **kwargs: []
+
+        db.update_copy_settings_profile(
+            "live",
+            engine_enabled=1,
+            api_key="live-ak",
+            api_secret="live-sk",
+            api_passphrase="live-pp",
+            binance_api_key="live-bn-ak",
+            binance_api_secret="live-bn-sk",
+        )
+        db.update_shared_copy_settings(binance_traders='{"pid-1": {"copy_enabled": true}}')
+
+        from copy_engine import CopyEngine
+
+        engine = CopyEngine("live")
+        engine._last_bn_metadata_refresh = time.time()
+        engine._loop_binance_once()
+
+        self.assertIn(("bitget_runtime", False), calls)
+        self.assertIn(("binance_runtime", config.BINANCE_LIVE_BASE_URL), calls)
+
+
+    def test_live_loop_processes_open_signal_with_settings_payload(self):
+        order_executor_stub = sys.modules["order_executor"]
+        binance_executor_stub = sys.modules["binance_executor"]
+        binance_scraper_stub = sys.modules["binance_scraper"]
+        seen_settings = []
+
+        class _Ctx:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        order_executor_stub.use_runtime = lambda simulated=None: _Ctx()
+        order_executor_stub.get_account_balance = lambda *args, **kwargs: {"available": 10, "_posMode": "2"}
+
+        binance_executor_stub.use_runtime = lambda base_url=None: _Ctx()
+        binance_executor_stub.get_account_balance = lambda *args, **kwargs: {"availableBalance": 20, "balance": 20}
+
+        binance_scraper_stub.fetch_latest_orders = lambda *args, **kwargs: [{
+            "order_id": "ord-1",
+            "symbol": "ETHUSDT",
+            "action": "open_long",
+            "direction": "long",
+            "qty": 0.5,
+            "price": 2000.0,
+            "order_time": 1,
+            "pnl": 0.0,
+            "leverage": 1,
+        }]
+
+        db.update_copy_settings_profile(
+            "live",
+            engine_enabled=1,
+            api_key="live-ak",
+            api_secret="live-sk",
+            api_passphrase="live-pp",
+            binance_api_key="live-bn-ak",
+            binance_api_secret="live-bn-sk",
+            total_capital=100.0,
+            binance_total_capital=100.0,
+            follow_ratio_pct=0.1,
+            binance_follow_ratio_pct=0.1,
+        )
+        db.update_shared_copy_settings(binance_traders='{"pid-1": {"copy_enabled": true}}')
+
+        from copy_engine import CopyEngine
+
+        engine = CopyEngine("live")
+        engine._last_bn_metadata_refresh = time.time()
+        engine._evaluate_open_guard = lambda platform, wallet_balance, settings: (True, "")
+        engine._execute_open_for_platform = lambda **kwargs: seen_settings.append(kwargs["settings"])
+        engine._loop_binance_once()
+
+        self.assertEqual(2, len(seen_settings))
+        self.assertTrue(all(s.get("engine_enabled") == 1 for s in seen_settings))
 
 
 class TakeProfitDecisionTests(unittest.TestCase):

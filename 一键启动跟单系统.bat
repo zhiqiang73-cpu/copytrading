@@ -12,6 +12,7 @@ set "URL=http://127.0.0.1:8080"
 set "LOG_FILE=%ROOT%\bitgetfollow.log"
 set "STAMP_FILE=%TEMP%\bitgetfollow_last_open_ts.txt"
 set "OPEN_COOLDOWN=8"
+set "VENV_PY=%ROOT%\.venv\Scripts\python.exe"
 
 echo.
 echo   ======================================
@@ -20,10 +21,17 @@ echo   ======================================
 echo.
 
 set "PYTHON_CMD="
-where py >nul 2>nul
-if not errorlevel 1 (
-    py -3 -V >nul 2>nul
-    if not errorlevel 1 set "PYTHON_CMD=py -3"
+if exist "%VENV_PY%" (
+    set PYTHON_CMD="%VENV_PY%"
+    echo [0/3] Using project virtualenv: %VENV_PY%
+)
+
+if not defined PYTHON_CMD (
+    where py >nul 2>nul
+    if not errorlevel 1 (
+        py -3 -V >nul 2>nul
+        if not errorlevel 1 set "PYTHON_CMD=py -3"
+    )
 )
 
 if not defined PYTHON_CMD (

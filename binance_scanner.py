@@ -45,87 +45,118 @@ def _update_status(**kwargs):
 
 # ── 浏览器扫描排行榜 ──────────────────────────────────────────────────────
 
+def _get_sync_playwright():
+    try:
+        from playwright.sync_api import sync_playwright
+    except ModuleNotFoundError as exc:
+        raise RuntimeError("未安装 Playwright，请先在项目环境执行 `pip install -r requirements.txt`") from exc
+    return sync_playwright
+
+
+def _launch_browser(playwright):
+    launch_attempts = [
+        ("bundled-chromium", {}),
+        ("msedge", {"channel": "msedge"}),
+        ("chrome", {"channel": "chrome"}),
+    ]
+    last_error = None
+    for label, extra_kwargs in launch_attempts:
+        try:
+            logger.info("scanner browser launch via %s", label)
+            return playwright.chromium.launch(headless=True, **extra_kwargs)
+        except Exception as exc:
+            last_error = exc
+            logger.warning("scanner browser launch failed via %s: %s", label, exc)
+    raise RuntimeError(
+        "无法启动 Playwright 浏览器，请确认已安装 Microsoft Edge/Chrome，或执行 `playwright install chromium`。最近错误：{}".format(last_error)
+    )
+
+
 def _scan_leaderboard_ids(max_scroll: int = 8) -> list[str]:
     """
-    用 Playwright 打开币安跟单排行榜页面，滚动加载，提取所有交易员的 portfolio_id。
+    ? Playwright ????????????????????????? portfolio_id?
     """
-    from playwright.sync_api import sync_playwright
-    
+    sync_playwright = _get_sync_playwright()
+
     portfolio_ids = []
-    
-    logger.info("启动浏览器扫描币安排行榜…")
-    _update_status(phase="scanning", progress="正在启动浏览器…")
-    
+
+    logger.info("?????????????")
+    _update_status(phase="scanning", progress="????????")
+
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/121.0.0.0 Safari/537.36"
-            ),
-            locale="zh-CN",
-        )
-        page = context.new_page()
-        
+        browser = None
+        context = None
         try:
-            _update_status(progress="正在加载排行榜页面…")
+            browser = _launch_browser(p)
+            context = browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/121.0.0.0 Safari/537.36"
+                ),
+                locale="zh-CN",
+            )
+            page = context.new_page()
+
+            _update_status(progress="??????????")
             page.goto("https://www.binance.com/zh-CN/copy-trading", wait_until="domcontentloaded", timeout=30000)
-            
-            # 等待页面内容加载
+
             time.sleep(5)
-            _update_status(progress="页面已加载，开始提取交易员数据…")
-            
-            # 尝试多种选择器来找到交易员卡片
+            _update_status(progress="????????????????")
+
             seen_ids = set()
-            
+
             for scroll_i in range(max_scroll):
-                # 提取当前可见的所有链接中的 portfolio_id
                 links = page.evaluate("""() => {
                     const results = [];
-                    // 提取所有包含 lead-details 的链接
                     document.querySelectorAll('a[href*="lead-details"]').forEach(a => {
                         const match = a.href.match(/lead-details\\/(\\d+)/);
                         if (match) results.push(match[1]);
                     });
-                    // 也尝试从 data 属性提取
                     document.querySelectorAll('[data-portfolio-id]').forEach(el => {
                         results.push(el.getAttribute('data-portfolio-id'));
                     });
                     return [...new Set(results)];
                 }""")
-                
+
                 for pid in links:
                     if pid and pid not in seen_ids:
                         seen_ids.add(pid)
                         portfolio_ids.append(pid)
-                
+
                 _update_status(
-                    progress=f"第 {scroll_i + 1}/{max_scroll} 次滚动，已发现 {len(portfolio_ids)} 个交易员",
+                    progress=f"? {scroll_i + 1}/{max_scroll} ??????? {len(portfolio_ids)} ????",
                     total_found=len(portfolio_ids),
                 )
-                logger.info("滚动 %d/%d，已发现 %d 个交易员", scroll_i + 1, max_scroll, len(portfolio_ids))
-                
-                # 滚动加载更多
+                logger.info("?? %d/%d???? %d ????", scroll_i + 1, max_scroll, len(portfolio_ids))
+
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 time.sleep(2)
-                
-                # 检查是否有"加载更多"按钮
+
                 try:
-                    load_more = page.query_selector('button:has-text("查看更多"), button:has-text("加载更多"), button:has-text("Load More")')
+                    load_more = page.query_selector('button:has-text("????"), button:has-text("????"), button:has-text("Load More")')
                     if load_more:
                         load_more.click()
                         time.sleep(2)
                 except Exception:
                     pass
-            
+
         except Exception as exc:
-            logger.error("浏览器扫描失败: %s", exc, exc_info=True)
-            _update_status(error=f"浏览器扫描失败：{str(exc)[:200]}")
+            logger.error("???????: %s", exc, exc_info=True)
+            _update_status(error=f"????????{str(exc)[:200]}")
         finally:
-            browser.close()
-    
-    logger.info("浏览器扫描完成，共发现 %d 个交易员", len(portfolio_ids))
+            if context is not None:
+                try:
+                    context.close()
+                except Exception:
+                    pass
+            if browser is not None:
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+
+    logger.info("??????????? %d ????", len(portfolio_ids))
     return portfolio_ids
 
 
