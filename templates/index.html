@@ -1,631 +1,574 @@
 {% extends "base.html" %}
-{% block title %}仪表盘 — BitgetFollow{% endblock %}
+{% block title %}发现 - BitgetFollow{% endblock %}
 
 {% block content %}
+<div class="space-y-6 fade-in">
+    <div id="home-notice" class="fixed right-4 top-20 z-50 hidden max-w-sm rounded-lg border px-4 py-2 text-sm shadow-lg"></div>
 
-<!-- ══ 币安跟单交易员 ════════════════════════════════════════════════════════ -->
-<div class="mb-6">
-    <!-- 标题 + 添加区 -->
-    <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 mb-4">
-        <div class="flex items-center space-x-3">
-            <h2 class="text-xl font-bold text-white tracking-tight">币安跟单交易员</h2>
-            <span id="bn-count"
-                class="px-2 py-0.5 bg-dark-card border border-dark-border rounded text-yellow-400 text-xs font-mono">0</span>
-            <p class="text-xs text-gray-500">监控币安信号 → 自动在 Bitget 复制交易</p>
+    <!-- 顶部标题 & 状态 -->
+    <div class="flex items-center justify-between">
+        <div>
+            <h1 class="text-xl font-bold">精选交易员</h1>
+            <p class="text-xs text-zinc-500 mt-0.5">三轮筛选 · 最多推荐 6 人 · 自动分配核心/增强/观察仓位</p>
+        </div>
+        <div class="flex gap-3">
+            <div class="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-dark-border bg-dark-card text-xs">
+                <span class="text-zinc-500">API</span>
+                <span id="home-api-state" class="font-semibold {{ 'text-green-400' if api_configured else 'text-amber-400' }}">
+                    {{ "已连接" if api_configured else "待配置" }}
+                </span>
+            </div>
+            <div class="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-dark-border bg-dark-card text-xs">
+                <span class="text-zinc-500">扫描器</span>
+                <span id="home-scan-state" class="font-semibold text-blue-400">待命</span>
+            </div>
         </div>
     </div>
 
-    <!-- 添加输入框 -->
-    <div class="mb-4 flex gap-2 flex-wrap p-4 bg-dark-card border border-yellow-500/20 rounded-xl">
-        <div class="flex-1 min-w-64">
-            <label class="text-xs text-gray-400 block mb-1.5">粘贴币安交易员 URL 或 Portfolio ID</label>
-            <input id="bn-url-input" type="text"
-                placeholder="https://www.binance.com/zh-CN/copy-trading/lead-details/..."
-                class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-yellow-400">
-        </div>
-        <div class="flex items-end">
-            <button onclick="addBinanceFromHome()"
-                class="px-5 py-2 bg-yellow-500/90 hover:bg-yellow-500 text-black font-bold rounded-lg text-sm transition-colors">
-                + 添加交易员
-            </button>
-        </div>
-    </div>
+    <!-- 主区域：扫描器 + 观察名单 -->
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
 
-    <!-- 币安交易员卡片网格 -->
-    <div id="bn-grid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4"></div>
-    <div id="bn-empty-home" class="text-sm text-gray-500 py-8 text-center">暂未添加币安交易员</div>
-</div>
-
-<!-- ══ 🔍 自动筛选优质交易员 ═══════════════════════════════════════════════ -->
-<div class="mb-6">
-    <div class="bg-dark-card border border-blue-500/30 rounded-2xl overflow-hidden">
-        <!-- 头部 -->
-        <div class="p-5 border-b border-dark-border/50">
-            <div class="flex items-center justify-between">
+        <!-- ── 扫描器 ── -->
+        <section id="scanner" class="bg-dark-card border border-dark-border rounded-xl overflow-hidden flex flex-col">
+            <div class="px-4 py-3 border-b border-dark-border bg-zinc-800/30 flex items-center justify-between">
                 <div>
-                    <h2 class="text-xl font-bold text-white flex items-center space-x-2">
-                        <span>🔍</span>
-                        <span>自动筛选优质交易员</span>
-                    </h2>
-                    <p class="text-gray-500 text-xs mt-1">自动扫描币安排行榜，筛选出最近赚钱多、回撤少、胜率高的交易员</p>
+                    <h3 class="text-sm font-bold">精选扫描器</h3>
+                    <p class="text-[10px] text-zinc-500 mt-0.5">硬性淘汰 → 深度评分 → 仓位分级</p>
                 </div>
-                <div class="flex items-center space-x-2">
+                <div class="flex gap-2">
                     <button id="btn-scan-start" onclick="startScan()"
-                        class="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-bold transition-all shadow-lg shadow-blue-600/20 flex items-center space-x-2">
-                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-                        </svg>
-                        <span>开始扫描</span>
+                        class="bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold px-4 py-1.5 rounded transition-colors">
+                        开始精选
                     </button>
                     <button id="btn-scan-stop" onclick="stopScan()"
-                        class="hidden px-4 py-2.5 bg-red-600/20 hover:bg-red-600/30 text-red-400 border border-red-500/30 rounded-xl text-sm font-medium transition-all">
+                        class="bg-red-600/80 hover:bg-red-600 text-white text-xs font-bold px-4 py-1.5 rounded transition-colors hidden">
                         停止
                     </button>
                 </div>
             </div>
-        </div>
 
-        <!-- 筛选参数面板（可折叠） -->
-        <div id="scan-filters-panel" class="p-5 border-b border-dark-border/30 bg-dark-bg/30">
-            <div class="flex items-center justify-between mb-3 cursor-pointer" onclick="toggleFilters()">
-                <span class="text-gray-400 text-sm font-medium">⚙️ 筛选参数（可调）</span>
-                <span id="filter-toggle" class="text-gray-500 text-xs">▼ 展开</span>
-            </div>
-            <div id="filters-body" class="hidden">
-                <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-                    <div>
-                        <label class="text-xs text-gray-500 block mb-1">最低跟单者收益 ($)</label>
-                        <input id="f-min-pnl" type="number" value="0" step="1000"
-                            class="w-full bg-dark-card border border-dark-border rounded-lg px-3 py-1.5 text-white text-sm focus:outline-none focus:border-blue-400">
+            <div class="p-4 space-y-4">
+
+                <!-- 筛选条件说明 -->
+                <div class="bg-zinc-900/60 border border-zinc-800 rounded-lg p-3 space-y-1.5 text-[10px] text-zinc-400">
+                    <div class="font-semibold text-zinc-300 mb-1">第一轮：硬性条件</div>
+                    <div class="grid grid-cols-2 gap-x-4 gap-y-1">
+                        <span>跟随人数 ≥ <span class="text-white font-mono" id="disp-followers">100</span> 人</span>
+                        <span>带单时间 ≥ <span class="text-white font-mono">90</span> 天</span>
+                        <span>管理资产 ≥ <span class="text-white font-mono">$50,000</span></span>
+                        <span>跟单者收益 ≥ <span class="text-white font-mono" id="disp-min-pnl">$0</span></span>
                     </div>
-                    <div>
-                        <label class="text-xs text-gray-500 block mb-1">最低跟单人数</label>
-                        <input id="f-min-followers" type="number" value="10" step="10"
-                            class="w-full bg-dark-card border border-dark-border rounded-lg px-3 py-1.5 text-white text-sm focus:outline-none focus:border-blue-400">
-                    </div>
-                    <div>
-                        <label class="text-xs text-gray-500 block mb-1">最低夏普比率</label>
-                        <input id="f-min-sharp" type="number" value="0" step="0.5"
-                            class="w-full bg-dark-card border border-dark-border rounded-lg px-3 py-1.5 text-white text-sm focus:outline-none focus:border-blue-400">
-                    </div>
-                    <div>
-                        <label class="text-xs text-gray-500 block mb-1">最低7天交易次数</label>
-                        <input id="f-min-trades" type="number" value="5" step="1"
-                            class="w-full bg-dark-card border border-dark-border rounded-lg px-3 py-1.5 text-white text-sm focus:outline-none focus:border-blue-400">
-                    </div>
-                    <div>
-                        <label class="text-xs text-gray-500 block mb-1">最低胜率 (%)</label>
-                        <input id="f-min-wr" type="number" value="0" step="5"
-                            class="w-full bg-dark-card border border-dark-border rounded-lg px-3 py-1.5 text-white text-sm focus:outline-none focus:border-blue-400">
-                    </div>
-                    <div>
-                        <label class="text-xs text-gray-500 block mb-1">排序方式</label>
-                        <select id="f-sort-by"
-                            class="w-full bg-dark-card border border-dark-border rounded-lg px-3 py-1.5 text-white text-sm focus:outline-none focus:border-blue-400">
-                            <option value="copier_pnl">跟单者收益</option>
-                            <option value="score">综合评分</option>
-                            <option value="sharp_ratio">夏普比率</option>
-                            <option value="win_rate">胜率</option>
-                            <option value="followers">跟单人数</option>
-                            <option value="aum">管理资产</option>
-                        </select>
+                    <div class="font-semibold text-zinc-300 mt-2 mb-1">第二轮：质量评分</div>
+                    <div class="grid grid-cols-2 gap-x-4 gap-y-1">
+                        <span>稳定性 <span class="text-blue-400">35%</span></span>
+                        <span>回撤控制 <span class="text-blue-400">30%</span></span>
+                        <span>跟单收益 <span class="text-blue-400">20%</span></span>
+                        <span>跟随人数 <span class="text-blue-400">15%</span></span>
                     </div>
                 </div>
-                <div class="mt-3 flex items-center space-x-4">
-                    <div>
-                        <label class="text-xs text-gray-500 block mb-1">滚动加载次数（越多扫描范围越大）</label>
-                        <input id="f-max-scroll" type="number" value="8" min="3" max="20"
-                            class="w-24 bg-dark-card border border-dark-border rounded-lg px-3 py-1.5 text-white text-sm focus:outline-none focus:border-blue-400">
+
+                <!-- 自定义参数（可折叠）-->
+                <details class="group">
+                    <summary class="text-[10px] text-zinc-500 cursor-pointer select-none hover:text-zinc-300 transition-colors">
+                        自定义参数
+                        <span class="text-zinc-600">（点击展开）</span>
+                    </summary>
+                    <div class="mt-3 grid grid-cols-2 gap-3">
+                        <div class="space-y-1">
+                            <label class="text-[10px] text-zinc-500 uppercase tracking-wider">最低跟单收益 ($)</label>
+                            <input id="f-min-pnl" type="number" value="0"
+                                oninput="document.getElementById('disp-min-pnl').textContent='$'+this.value"
+                                class="w-full bg-dark-bg border border-dark-border rounded px-2 py-1.5 text-xs text-white">
+                        </div>
+                        <div class="space-y-1">
+                            <label class="text-[10px] text-zinc-500 uppercase tracking-wider">最低跟随人数</label>
+                            <input id="f-min-followers" type="number" value="100"
+                                oninput="document.getElementById('disp-followers').textContent=this.value"
+                                class="w-full bg-dark-bg border border-dark-border rounded px-2 py-1.5 text-xs text-white">
+                        </div>
+                        <div class="space-y-1">
+                            <label class="text-[10px] text-zinc-500 uppercase tracking-wider">排序方式</label>
+                            <select id="f-sort-by" class="w-full bg-dark-bg border border-dark-border rounded px-2 py-1.5 text-xs text-white">
+                                <option value="score" selected>综合评分</option>
+                                <option value="copier_pnl">跟单收益</option>
+                                <option value="win_rate">胜率</option>
+                            </select>
+                        </div>
+                        <div class="space-y-1">
+                            <label class="text-[10px] text-zinc-500 uppercase tracking-wider">扫描页数（每页20人）</label>
+                            <input id="f-max-scroll" type="number" value="5"
+                                class="w-full bg-dark-bg border border-dark-border rounded px-2 py-1.5 text-xs text-white">
+                        </div>
                     </div>
-                    <div class="text-xs text-gray-600 pt-4">
-                        预计扫描时间：<span id="est-time">2-3 分钟</span>
+                </details>
+
+                <!-- 进度 -->
+                <div id="scan-progress" class="hidden space-y-2">
+                    <div class="flex items-center gap-2 text-xs">
+                        <div class="spinner !w-3 !h-3 !border-2"></div>
+                        <span id="scan-progress-text" class="text-zinc-400">初始化...</span>
+                    </div>
+                    <div class="h-1 bg-dark-bg rounded-full overflow-hidden">
+                        <div id="scan-progress-bar" class="h-full bg-blue-500 transition-all duration-500" style="width:0%"></div>
+                    </div>
+                    <div id="scan-round-badges" class="flex gap-2 text-[10px]">
+                        <span id="badge-r1" class="px-2 py-0.5 rounded-full bg-zinc-800 text-zinc-500">第一轮筛选</span>
+                        <span id="badge-r2" class="px-2 py-0.5 rounded-full bg-zinc-800 text-zinc-500">深度评分</span>
+                        <span id="badge-r3" class="px-2 py-0.5 rounded-full bg-zinc-800 text-zinc-500">仓位分级</span>
                     </div>
                 </div>
-            </div>
-        </div>
 
-        <!-- 扫描进度 -->
-        <div id="scan-progress" class="hidden p-5 border-b border-dark-border/30">
-            <div class="flex items-center space-x-3 mb-2">
-                <div class="spinner"></div>
-                <span id="scan-progress-text" class="text-gray-300 text-sm">正在扫描…</span>
+                <!-- 结果 -->
+                <div id="scan-results" class="hidden space-y-3 pt-1">
+                    <div class="flex items-center justify-between">
+                        <div id="scan-results-summary" class="text-xs text-zinc-400"></div>
+                        <button onclick="addAllScanResults()"
+                            class="text-xs text-blue-400 hover:text-blue-300 font-medium transition-colors">
+                            全部加入观察名单
+                        </button>
+                    </div>
+                    <div id="scan-results-list" class="max-h-[380px] overflow-y-auto space-y-2 pr-1"></div>
+                </div>
             </div>
-            <div class="w-full bg-dark-bg rounded-full h-1.5 overflow-hidden">
-                <div id="scan-progress-bar" class="h-full bg-blue-500 rounded-full transition-all duration-500"
-                    style="width: 0%"></div>
-            </div>
-        </div>
+        </section>
 
-        <!-- 扫描结果 -->
-        <div id="scan-results" class="hidden">
-            <div class="p-4 border-b border-dark-border/30 flex items-center justify-between">
-                <span id="scan-results-summary" class="text-gray-300 text-sm"></span>
-                <button id="btn-add-all-scan" onclick="addAllScanResults()"
-                    class="hidden px-4 py-1.5 bg-green-600 hover:bg-green-700 text-white rounded-lg text-xs font-medium transition-colors">
-                    一键添加全部通过
-                </button>
+        <!-- ── 观察名单 ── -->
+        <section class="bg-dark-card border border-dark-border rounded-xl overflow-hidden flex flex-col">
+            <div class="px-4 py-3 border-b border-dark-border bg-zinc-800/30 flex items-center justify-between">
+                <div>
+                    <h3 class="text-sm font-bold">观察名单</h3>
+                    <p class="text-[10px] text-zinc-500 mt-0.5">上限 6 人 · 当前：{{ home_copy_mode_label }} · 仓位比例自动分配</p>
+                </div>
+                <span id="hero-bn-count-badge"
+                    class="text-xs px-2.5 py-0.5 rounded-full bg-blue-500/10 text-blue-400 font-mono border border-blue-500/20">
+                    0 / 6
+                </span>
             </div>
-            <div id="scan-results-list" class="divide-y divide-dark-border/30 max-h-[60vh] overflow-y-auto"></div>
-        </div>
 
-        <!-- 扫描错误 -->
-        <div id="scan-error" class="hidden p-5">
-            <div class="p-4 bg-red-500/10 border border-red-500/30 rounded-xl">
-                <p id="scan-error-text" class="text-red-300 text-sm"></p>
+            <div class="p-4 space-y-4">
+                <!-- 手动添加 -->
+                <div class="flex gap-2">
+                    <input id="bn-url-input" type="text"
+                        class="flex-1 bg-dark-bg border border-dark-border rounded px-3 py-2 text-xs text-white placeholder:text-zinc-600"
+                        placeholder="Binance 交易员 URL 或 Portfolio ID">
+                    <button onclick="addBinanceFromHome(this)"
+                        class="bg-zinc-800 hover:bg-zinc-700 text-white text-xs font-bold px-4 py-2 rounded transition-colors border border-zinc-700">
+                        添加
+                    </button>
+                </div>
+
+                <!-- 仓位分级说明 -->
+                <div class="flex gap-2 text-[10px]">
+                    <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-emerald-500"></span><span class="text-zinc-400">核心 30%</span></span>
+                    <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-blue-400"></span><span class="text-zinc-400">增强 15%</span></span>
+                    <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-amber-400"></span><span class="text-zinc-400">观察 5%</span></span>
+                    <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-zinc-500"></span><span class="text-zinc-400">手动添加</span></span>
+                </div>
+
+                <!-- 卡片列表 -->
+                <div id="bn-grid" class="space-y-2 overflow-y-auto max-h-[460px]"></div>
+
+                <!-- 空状态 -->
+                <div id="bn-empty-home" class="flex flex-col items-center justify-center py-14 text-zinc-600 border border-dashed border-dark-border rounded-xl">
+                    <svg class="w-8 h-8 mb-2 opacity-20" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+                            d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"/>
+                    </svg>
+                    <p class="text-xs">暂无观察中的交易员</p>
+                    <p class="text-[10px] text-zinc-700 mt-1">点击左侧"开始精选"自动扫描推荐</p>
+                </div>
             </div>
-        </div>
+        </section>
     </div>
 </div>
-
 {% endblock %}
 
 {% block scripts %}
 <script>
-    // ── 币安交易员管理 ──────────────────────────────────────────────────────────
-
+    const HOME_INITIAL_API_CONFIGURED = {{ 'true' if api_configured else 'false' }};
     let bnListHome = [];
+    let scanPollingTimer = null;
+
+    // 仓位等级配置
+    const TIER_CONFIG = {
+        core:    { label: '核心', color: 'emerald', dot: 'bg-emerald-500', badge: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30', ratio: '30%' },
+        enhance: { label: '增强', color: 'blue',    dot: 'bg-blue-400',    badge: 'bg-blue-500/10 text-blue-400 border-blue-500/30',       ratio: '15%' },
+        observe: { label: '观察', color: 'amber',   dot: 'bg-amber-400',   badge: 'bg-amber-500/10 text-amber-400 border-amber-500/30',     ratio: '5%'  },
+    };
+
+    function escapeHtml(v) {
+        return String(v ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+    function formatCompact(n) {
+        n = Number(n || 0);
+        if (Math.abs(n) >= 1e6) return (n/1e6).toFixed(1)+'M';
+        if (Math.abs(n) >= 1e3) return (n/1e3).toFixed(1)+'K';
+        return n.toFixed(0);
+    }
+    function formatScore(s) { return s ? Number(s).toFixed(1) : '--'; }
+
+    function updateCountBadges(count) {
+        const el = document.getElementById('hero-bn-count-badge');
+        if (el) el.textContent = `${count} / 6`;
+        if (el) el.className = `text-xs px-2.5 py-0.5 rounded-full font-mono border ${count >= 6 ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' : 'bg-blue-500/10 text-blue-400 border-blue-500/20'}`;
+    }
+
+    function showHomeNotice(msg, type = 'info') {
+        const n = document.getElementById('home-notice');
+        const colors = {
+            success: 'bg-green-900/80 border-green-500 text-green-100',
+            error:   'bg-red-900/80 border-red-500 text-red-100',
+            info:    'bg-zinc-900/80 border-zinc-700 text-zinc-100',
+        };
+        const cls = colors[type] || colors.info;
+        n.className = `fixed right-4 top-20 z-50 rounded-lg border px-4 py-2 text-sm shadow-lg flex items-center gap-3 ${cls}`;
+        n.innerHTML = `
+            <span>${msg}</span>
+            <button onclick="this.parentElement.classList.add('hidden')" class="text-current opacity-70 hover:opacity-100 transition-opacity">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+                </svg>
+            </button>
+        `;
+        n.classList.remove('hidden');
+        // 成功消息8秒后自动消失,错误消息15秒后自动消失,信息消息5秒后消失
+        const autoCloseTime = type === 'error' ? 15000 : (type === 'success' ? 8000 : 5000);
+        setTimeout(() => n.classList.add('hidden'), autoCloseTime);
+    }
+
+    // ── 观察名单 ────────────────────────────────────────────────────────────
 
     async function loadBinanceList() {
         try {
-            const res = await apiGet('/api/copy/settings');
-            if (res && res.binance_traders) {
-                let tradersRaw = res.binance_traders;
-                if (typeof tradersRaw === 'string') {
-                    tradersRaw = JSON.parse(tradersRaw || '{}');
-                }
+            const res = await apiGet({{ home_copy_settings_url|tojson }});
+            let t = res?.binance_traders || {};
+            if (typeof t === 'string') t = JSON.parse(t || '{}');
+            bnListHome = Object.entries(t).map(([pid, d]) => ({
+                portfolio_id:  pid,
+                nickname:      d.nickname || pid.slice(0,8),
+                copier_pnl:    d.copier_pnl   || 0,
+                follower_count:d.follower_count|| 0,
+                copy_enabled:  d.copy_enabled === true,
+                tier:          d.tier || null,
+                tier_label:    d.tier_label || null,
+                follow_ratio:  d.follow_ratio || null,
+                bitget_effective_follow_ratio: d.bitget_effective_follow_ratio || 0,
+                binance_effective_follow_ratio: d.binance_effective_follow_ratio || 0,
+                bitget_allocation_pool: d.bitget_allocation_pool || 0,
+                binance_allocation_pool: d.binance_allocation_pool || 0,
+                bitget_fallback_margin_cap: d.bitget_fallback_margin_cap || 0,
+                binance_fallback_margin_cap: d.binance_fallback_margin_cap || 0,
+                bitget_available_margin_cap: d.bitget_available_margin_cap || 0,
+                binance_available_margin_cap: d.binance_available_margin_cap || 0,
+                bitget_effective_margin_cap: d.bitget_effective_margin_cap || 0,
+                binance_effective_margin_cap: d.binance_effective_margin_cap || 0,
+                bitget_sizing_mode: d.bitget_sizing_mode || 'global_ratio',
+                binance_sizing_mode: d.binance_sizing_mode || 'global_ratio',
+                score:         d.score || null,
+                aum:           d.aum || 0,
+                copy_days:     d.copy_days || 0,
+            }));
+            renderBinanceListHome();
+        } catch (e) { showHomeNotice('加载列表失败', 'error'); }
+    }
 
-                if (Array.isArray(tradersRaw)) {
-                    bnListHome = tradersRaw.map(pid => ({
-                        portfolio_id: pid,
-                        nickname: `币安交易员_${pid.substring(0, 8)}`,
-                        copy_enabled: false
-                    }));
-                } else if (typeof tradersRaw === 'object') {
-                    bnListHome = Object.entries(tradersRaw).map(([pid, data]) => ({
-                        portfolio_id: pid,
-                        nickname: data.nickname || `币安交易员_${pid.substring(0, 8)}`,
-                        follower_count: data.follower_count || 0,
-                        copier_pnl: data.copier_pnl || 0,
-                        aum: data.aum || 0,
-                        total_trades: data.total_trades || 0,
-                        copy_enabled: data.copy_enabled === true
-                    }));
-                } else {
-                    bnListHome = [];
-                }
-                renderBinanceListHome();
-            }
-        } catch (e) {
-            console.error('加载币安交易员失败:', e);
-            bnListHome = [];
-        }
+    function _tierBadgeHtml(tier, tier_label, follow_ratio) {
+        if (!tier || !TIER_CONFIG[tier]) return '<span class="text-[10px] text-zinc-600 px-1.5 py-0.5 rounded border border-zinc-800">手动</span>';
+        const cfg = TIER_CONFIG[tier];
+        return `<span class="text-[10px] px-1.5 py-0.5 rounded border ${cfg.badge} font-semibold">${tier_label} · ${follow_ratio ? (follow_ratio*100).toFixed(0)+'%' : cfg.ratio}</span>`;
+    }
+
+    function _capReason(effective, fallback, available) {
+        const eff = Number(effective || 0);
+        const fb = Number(fallback || 0);
+        const av = Number(available || 0);
+        const near = (a, b) => Math.abs(a - b) <= 0.02;
+        if (eff <= 0) return '未启用';
+        if (av > 0 && fb > 0 && eff + 0.02 < fb && near(eff, av)) return '余额限制';
+        if (fb > 0 && near(eff, fb)) return '配置上限';
+        if (av > 0 && fb <= 0 && near(eff, av)) return '余额限制';
+        return '最终上限';
     }
 
     function renderBinanceListHome() {
-        const grid = document.getElementById('bn-grid');
+        const grid  = document.getElementById('bn-grid');
         const empty = document.getElementById('bn-empty-home');
-        const count = document.getElementById('bn-count');
-
+        updateCountBadges(bnListHome.length);
         grid.innerHTML = '';
-        if (!bnListHome.length) {
-            empty.classList.remove('hidden');
-            count.textContent = '0';
-            return;
-        }
+        if (!bnListHome.length) { empty.classList.remove('hidden'); return; }
         empty.classList.add('hidden');
-        count.textContent = bnListHome.length;
 
-        bnListHome.forEach((trader) => {
+        bnListHome.forEach(t => {
+            const tier = t.tier;
+            const dotClass = tier && TIER_CONFIG[tier] ? TIER_CONFIG[tier].dot : 'bg-zinc-500';
             const card = document.createElement('div');
-            const pid = trader.portfolio_id;
-            const nickname = trader.nickname || `币安交易员_${pid.substring(0, 8)}`;
-            const followers = trader.follower_count || 0;
-            const copierPnl = trader.copier_pnl || 0;
-            const aum = trader.aum || 0;
-            const totalTrades = trader.total_trades || 0;
-            const copyEnabled = trader.copy_enabled === true;
-
-            const borderClass = copyEnabled
-                ? 'border-green-500/40 ring-1 ring-green-500/20'
-                : 'border-yellow-500/25 hover:border-yellow-400/60';
-            card.className = `bg-dark-card border ${borderClass} rounded-xl overflow-hidden transition-all cursor-pointer group`;
-
-            function formatNum(n) {
-                if (n >= 1000000) return (n / 1000000).toFixed(2) + 'M';
-                if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
-                return n.toFixed(0);
-            }
-            const pnlStr = copierPnl > 0 ? `+$${formatNum(copierPnl)}` : copierPnl < 0 ? `-$${formatNum(Math.abs(copierPnl))}` : '$0';
-            const pnlColor = copierPnl > 0 ? 'text-profit' : copierPnl < 0 ? 'text-loss' : 'text-gray-400';
-            const aumStr = aum > 0 ? `$${formatNum(aum)}` : '—';
-
-            const btnClass = copyEnabled
-                ? 'bg-green-500/20 text-green-400 border border-green-500/30 hover:bg-green-500/30'
-                : 'bg-gray-700 text-gray-400 border border-gray-600 hover:bg-yellow-600 hover:text-white hover:border-yellow-500';
-            const btnText = copyEnabled ? '✓ 跟单中' : '+ 跟单';
-
+            card.className = 'bg-dark-bg/50 border border-dark-border p-3 rounded-lg flex items-center gap-3 hover:border-zinc-700 transition-colors';
             card.innerHTML = `
-            <div class="p-4">
-                <div class="flex items-start justify-between mb-3">
-                    <div class="flex-1 min-w-0">
-                        <div class="font-bold text-white text-sm truncate group-hover:text-yellow-300 transition-colors">
-                            ${nickname}
-                        </div>
-                        <div class="flex items-center space-x-1.5 mt-1">
-                            ${copyEnabled
-                    ? '<span class="w-2 h-2 bg-green-400 rounded-full animate-pulse"></span><span class="text-xs text-green-400 font-medium">跟单中</span>'
-                    : '<span class="w-2 h-2 bg-yellow-400 rounded-full"></span><span class="text-xs text-yellow-400 font-medium">仅监控</span>'
-                }
-                        </div>
+                <span class="w-2 h-2 rounded-full flex-shrink-0 ${t.copy_enabled ? dotClass + ' ring-2 ring-offset-1 ring-offset-dark-bg ' + dotClass.replace('bg-','ring-') : 'bg-zinc-700'}"></span>
+                <div class="min-w-0 flex-1">
+                    <div class="flex items-center gap-2 flex-wrap">
+                        <span class="text-sm font-bold text-white truncate">${escapeHtml(t.nickname)}</span>
+                        ${_tierBadgeHtml(t.tier, t.tier_label, t.follow_ratio)}
+                        ${t.score ? `<span class="text-[10px] text-zinc-500">评分 <span class="text-zinc-300">${formatScore(t.score)}</span></span>` : ''}
                     </div>
-                    <button onclick="event.stopPropagation(); removeBnFromHome('${pid}')" 
-                            class="ml-2 text-gray-600 hover:text-red-400 transition-colors flex-shrink-0">
-                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                    <div class="flex items-center gap-3 mt-1 text-[10px] text-zinc-500">
+                        <span>收益 <span class="${t.copier_pnl>0?'text-green-400':'text-red-400'}">$${formatCompact(t.copier_pnl)}</span></span>
+                        <span>跟随 <span class="text-zinc-300">${t.follower_count}</span></span>
+                        ${t.aum ? `<span>AUM <span class="text-zinc-300">$${formatCompact(t.aum)}</span></span>` : ''}
+                        ${t.copy_days ? `<span>带单 <span class="text-zinc-300">${t.copy_days}天</span></span>` : ''}
+                    </div>
+                    <div class="flex items-center gap-3 mt-1 text-[10px] text-zinc-500 flex-wrap">
+                        <span>Bitget 池 <span class="text-zinc-300">${Number(t.bitget_allocation_pool || 0).toFixed(2)}U</span> / 上限 <span class="text-zinc-300">${Number(t.bitget_effective_margin_cap || 0).toFixed(2)}U</span> <span class="text-zinc-400">(${_capReason(t.bitget_effective_margin_cap, t.bitget_fallback_margin_cap, t.bitget_available_margin_cap)})</span></span>
+                        <span>Binance 池 <span class="text-zinc-300">${Number(t.binance_allocation_pool || 0).toFixed(2)}U</span> / 上限 <span class="text-zinc-300">${Number(t.binance_effective_margin_cap || 0).toFixed(2)}U</span> <span class="text-zinc-400">(${_capReason(t.binance_effective_margin_cap, t.binance_fallback_margin_cap, t.binance_available_margin_cap)})</span></span>
+                        <span>实际比例 <span class="text-zinc-300">${((Number(t.binance_effective_follow_ratio || t.bitget_effective_follow_ratio || 0)) * 100).toFixed(1)}%</span></span>
+                    </div>
+                </div>
+                <div class="flex items-center gap-3 flex-shrink-0">
+                    <button onclick="toggleBinanceCopy('${t.portfolio_id}', ${!t.copy_enabled}, this)"
+                        class="text-xs font-bold ${t.copy_enabled?'text-red-400 hover:text-red-300':'text-blue-400 hover:text-blue-300'} transition-colors whitespace-nowrap">
+                        ${t.copy_enabled ? '暂停' : '跟随'}
+                    </button>
+                    <button onclick="removeBnFromHome('${t.portfolio_id}')"
+                        class="text-zinc-600 hover:text-zinc-300 transition-colors">
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+                        </svg>
                     </button>
                 </div>
-                <div class="flex items-baseline justify-between mb-3">
-                    <div>
-                        <div class="text-gray-500 text-xs mb-0.5">跟单收益</div>
-                        <div class="font-bold text-xl ${pnlColor}">${pnlStr}</div>
-                    </div>
-                    <div class="text-right">
-                        <div class="text-gray-500 text-xs mb-0.5">管理资产</div>
-                        <div class="font-bold text-base text-white">${aumStr}</div>
-                    </div>
-                </div>
-                <div class="flex items-center justify-between text-xs text-gray-500 mb-3">
-                    <span>跟单人数: <b class="text-white">${followers > 0 ? followers.toLocaleString() : '—'}</b></span>
-                    <span>带单次数: <b class="text-white">${totalTrades > 0 ? totalTrades : '—'}</b></span>
-                </div>
-                <div class="flex items-center justify-between border-t border-dark-border/50 pt-3">
-                    <button onclick="event.stopPropagation(); toggleBinanceCopy('${pid}', ${!copyEnabled}, this)"
-                            class="px-4 py-1.5 rounded-lg text-xs font-medium transition-all ${btnClass}">
-                        ${btnText}
-                    </button>
-                    <span class="text-xs text-yellow-600">币安信号</span>
-                </div>
-            </div>
-        `;
+            `;
             grid.appendChild(card);
         });
     }
 
     async function toggleBinanceCopy(pid, enabled, btn) {
-        btn.disabled = true;
-        const origText = btn.textContent;
-        btn.textContent = '...';
         try {
-            const res = await apiPost('/api/toggle_copy', { uid: pid, enabled });
-            if (res.ok) {
-                const trader = bnListHome.find(t => t.portfolio_id === pid);
-                if (trader) trader.copy_enabled = enabled;
-                renderBinanceListHome();
-            } else {
-                alert(res.error || '切换失败');
-                btn.textContent = origText;
-            }
-        } catch (e) {
-            alert('切换失败：' + e.message);
-            btn.textContent = origText;
-        }
-        btn.disabled = false;
+            const res = await apiPost({{ home_copy_toggle_url|tojson }}, { uid: pid, enabled });
+            if (!res.ok) throw new Error();
+            await loadBinanceList();
+            showHomeNotice(enabled ? '已启动跟随' : '已暂停跟随', 'success');
+        } catch(e) { showHomeNotice('操作失败', 'error'); }
     }
 
-    async function addBinanceFromHome() {
-        const input = document.getElementById('bn-url-input');
-        const url = input.value.trim();
-        if (!url) { alert('请输入 URL 或 Portfolio ID'); return; }
-
-        const btn = event.target;
-        btn.disabled = true;
-        btn.textContent = '添加中…';
-
-        try {
-            const res = await apiPost('/api/add_binance_trader', { url });
-            if (res.error) {
-                alert('❌ 添加失败\n\n' + res.error);
-                btn.disabled = false;
-                btn.textContent = '+ 添加交易员';
-                return;
-            }
-            await loadBinanceList();
-            btn.disabled = false;
-            btn.textContent = '+ 添加交易员';
-            input.value = '';
-            const info = res.info || {};
-            const nickname = info.nickname || res.portfolio_id;
-            alert(`✓ 已添加 ${nickname}`);
-        } catch (e) {
-            alert('❌ 添加失败：' + e.message);
-            btn.disabled = false;
-            btn.textContent = '+ 添加交易员';
+    async function addBinanceFromHome(btn) {
+        const i = document.getElementById('bn-url-input');
+        if (!i.value.trim()) return;
+        if (bnListHome.length >= 6) {
+            showHomeNotice('观察名单已满（最多 6 人），请先移除一位', 'error');
+            return;
         }
+        try {
+            const res = await apiPost({{ home_copy_add_url|tojson }}, { url: i.value.trim() });
+            if (res.error) throw new Error(res.error);
+            i.value = '';
+            await loadBinanceList();
+            showHomeNotice('已成功加入观察名单', 'success');
+        } catch(e) { showHomeNotice(e.message || '添加失败', 'error'); }
     }
 
     async function removeBnFromHome(pid) {
-        const trader = bnListHome.find(t => t.portfolio_id === pid);
-        const name = trader?.nickname || pid.substring(0, 12);
-        if (!confirm(`确定删除 ${name} ？`)) return;
+        if (!confirm('确定从观察名单中移除该交易员？')) return;
         try {
-            const res = await apiPost('/api/remove_binance_trader', { portfolio_id: pid });
-            if (res.error) { alert('删除失败：' + res.error); return; }
+            await apiPost({{ home_copy_remove_url|tojson }}, { portfolio_id: pid });
             await loadBinanceList();
-        } catch (e) {
-            alert('删除失败：' + e.message);
-        }
+        } catch(e) {}
     }
 
-    // ── 扫描功能 ──────────────────────────────────────────────────────────────────
+    // ── 扫描器 ──────────────────────────────────────────────────────────────
 
-    let scanPollingTimer = null;
-
-    function toggleFilters() {
-        const body = document.getElementById('filters-body');
-        const toggle = document.getElementById('filter-toggle');
-        if (body.classList.contains('hidden')) {
-            body.classList.remove('hidden');
-            toggle.textContent = '▲ 收起';
-        } else {
-            body.classList.add('hidden');
-            toggle.textContent = '▼ 展开';
-        }
+    function setScanButtons(running) {
+        document.getElementById('btn-scan-start').classList.toggle('hidden', running);
+        document.getElementById('btn-scan-stop').classList.toggle('hidden', !running);
+        document.getElementById('home-scan-state').textContent = running ? '扫描中' : '待命';
+        document.getElementById('home-scan-state').className = `font-semibold ${running ? 'text-green-400' : 'text-blue-400'}`;
     }
 
-    function showScanSection(section) {
-        ['scan-progress', 'scan-results', 'scan-error'].forEach(id => {
-            document.getElementById(id).classList.toggle('hidden', id !== section);
-        });
+    function _highlightBadge(id) {
+        const el = document.getElementById(id);
+        if (el) el.className = 'px-2 py-0.5 rounded-full bg-blue-600/20 text-blue-300 border border-blue-600/30';
     }
 
     async function startScan() {
-        const btnStart = document.getElementById('btn-scan-start');
-        const btnStop = document.getElementById('btn-scan-stop');
-        btnStart.disabled = true;
-        btnStart.innerHTML = '<div class="spinner mr-2"></div><span>启动中…</span>';
-        btnStop.classList.remove('hidden');
-
         const filters = {
             min_copier_pnl: parseFloat(document.getElementById('f-min-pnl').value) || 0,
-            min_followers: parseInt(document.getElementById('f-min-followers').value) || 10,
-            min_sharp_ratio: parseFloat(document.getElementById('f-min-sharp').value) || 0,
-            min_trades: parseInt(document.getElementById('f-min-trades').value) || 5,
-            min_win_rate: parseFloat(document.getElementById('f-min-wr').value) || 0,
-            sort_by: document.getElementById('f-sort-by').value,
-            max_scroll: parseInt(document.getElementById('f-max-scroll').value) || 8,
+            min_followers:  parseInt(document.getElementById('f-min-followers').value) || 100,
+            sort_by:        document.getElementById('f-sort-by').value,
+            max_results:    6,
         };
-
+        const max_scroll = parseInt(document.getElementById('f-max-scroll').value) || 5;
         try {
-            const res = await apiPost('/api/scan/start', filters);
-            if (res.error) {
-                alert(res.error);
-                resetScanButton();
-                return;
-            }
-            showScanSection('scan-progress');
-            startScanPolling();
-        } catch (e) {
-            alert('启动扫描失败：' + e.message);
-            resetScanButton();
-        }
+            const res = await apiPost('/api/scan/start', { ...filters, max_scroll });
+            if (res.error) throw new Error(res.error);
+            document.getElementById('scan-progress').classList.remove('hidden');
+            document.getElementById('scan-results').classList.add('hidden');
+            document.getElementById('scan-progress-bar').style.width = '5%';
+            ['badge-r1','badge-r2','badge-r3'].forEach(id => {
+                const el = document.getElementById(id);
+                if (el) el.className = 'px-2 py-0.5 rounded-full bg-zinc-800 text-zinc-500';
+            });
+            setScanButtons(true);
+            scanPollingTimer = setInterval(pollScanStatus, 2000);
+        } catch(e) { showHomeNotice(e.message, 'error'); }
     }
 
     async function stopScan() {
-        try {
-            await apiPost('/api/scan/stop');
-        } catch (e) { }
-        stopScanPolling();
-        resetScanButton();
-    }
-
-    function resetScanButton() {
-        const btnStart = document.getElementById('btn-scan-start');
-        const btnStop = document.getElementById('btn-scan-stop');
-        btnStart.disabled = false;
-        btnStart.innerHTML = '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg><span>开始扫描</span>';
-        btnStop.classList.add('hidden');
-    }
-
-    function startScanPolling() {
-        if (scanPollingTimer) clearInterval(scanPollingTimer);
-        scanPollingTimer = setInterval(pollScanStatus, 2000);
-    }
-
-    function stopScanPolling() {
-        if (scanPollingTimer) {
-            clearInterval(scanPollingTimer);
-            scanPollingTimer = null;
-        }
+        await apiPost('/api/scan/stop');
+        clearInterval(scanPollingTimer);
+        setScanButtons(false);
     }
 
     async function pollScanStatus() {
-        try {
-            const status = await apiGet('/api/scan/status');
-            document.getElementById('scan-progress-text').textContent = status.progress || '处理中…';
+        const s = await apiGet('/api/scan/status');
+        const bar  = document.getElementById('scan-progress-bar');
+        const text = document.getElementById('scan-progress-text');
+        text.textContent = s.progress || '处理中...';
 
-            // 更新进度条
-            if (status.phase === 'analyzing' && status.total_found > 0) {
-                const pct = Math.min((status.analyzed / status.total_found) * 100, 100);
-                document.getElementById('scan-progress-bar').style.width = pct + '%';
-            } else if (status.phase === 'scanning') {
-                document.getElementById('scan-progress-bar').style.width = '10%';
-            }
+        // 进度条 & 轮次徽章
+        if (s.phase === 'scanning') {
+            bar.style.width = '30%';
+            _highlightBadge('badge-r1');
+        } else if (s.phase === 'analyzing') {
+            const pct = s.total_found > 0 ? (s.analyzed / s.total_found) * 60 + 30 : 50;
+            bar.style.width = Math.min(pct, 90) + '%';
+            _highlightBadge('badge-r1');
+            _highlightBadge('badge-r2');
+        } else if (s.phase === 'done') {
+            bar.style.width = '100%';
+            ['badge-r1','badge-r2','badge-r3'].forEach(_highlightBadge);
+        }
 
-            if (!status.running) {
-                stopScanPolling();
-                resetScanButton();
-
-                if (status.phase === 'done') {
-                    await loadScanResults();
-                } else if (status.phase === 'error') {
-                    showScanSection('scan-error');
-                    document.getElementById('scan-error-text').textContent = status.error || '扫描失败';
-                }
-            }
-        } catch (e) {
-            console.error('轮询扫描状态失败:', e);
+        if (!s.running) {
+            clearInterval(scanPollingTimer);
+            setScanButtons(false);
+            if (s.phase === 'done') await loadScanResults();
+            else if (s.phase === 'error') showHomeNotice('扫描出错: ' + (s.error || '未知'), 'error');
         }
     }
 
     async function loadScanResults() {
-        try {
-            const data = await apiGet('/api/scan/results');
-            const results = data.results || [];
-            showScanSection('scan-results');
+        const data    = await apiGet('/api/scan/results');
+        const results = data.results || [];
 
-            const passed = results.filter(r => r.all_passed);
-            document.getElementById('scan-results-summary').innerHTML =
-                `共分析 <b class="text-white">${results.length}</b> 个交易员，` +
-                `<b class="text-green-400">${passed.length}</b> 人全部通过筛选`;
+        document.getElementById('scan-progress').classList.add('hidden');
+        document.getElementById('scan-results').classList.remove('hidden');
 
-            const btnAddAll = document.getElementById('btn-add-all-scan');
-            if (passed.length > 0) {
-                btnAddAll.textContent = `一键添加全部 ${passed.length} 人`;
-                btnAddAll.classList.remove('hidden');
-            } else {
-                btnAddAll.classList.add('hidden');
-            }
+        const passedR1 = await apiGet('/api/scan/status').then(s => s.passed_round1 || 0).catch(() => 0);
+        document.getElementById('scan-results-summary').textContent =
+            `通过硬性条件 ${passedR1} 人 → 精选出 ${results.length} 位`;
 
-            const list = document.getElementById('scan-results-list');
-            list.innerHTML = results.map((r, i) => renderScanResult(r, i)).join('');
-        } catch (e) {
-            console.error('加载扫描结果失败:', e);
+        const list = document.getElementById('scan-results-list');
+        if (!results.length) {
+            list.innerHTML = '<div class="text-xs text-zinc-500 text-center py-4">暂无符合条件的交易员，尝试放宽筛选条件</div>';
+            return;
         }
-    }
 
-    function formatNum(n) {
-        if (n >= 1000000) return (n / 1000000).toFixed(2) + 'M';
-        if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
-        return n.toFixed(0);
-    }
-
-    function renderScanResult(r, idx) {
-        const pnl = r.copier_pnl || 0;
-        const pnlStr = pnl > 0 ? `+$${formatNum(pnl)}` : pnl < 0 ? `-$${formatNum(Math.abs(pnl))}` : '$0';
-        const pnlColor = pnl > 0 ? 'text-green-400' : pnl < 0 ? 'text-red-400' : 'text-gray-400';
-
-        const sr = r.sharp_ratio || 0;
-        const srColor = sr >= 2 ? 'text-green-400' : sr >= 1 ? 'text-yellow-400' : 'text-gray-400';
-
-        const wr = r.win_rate || 0;
-        const wrColor = wr >= 60 ? 'text-green-400' : wr >= 45 ? 'text-yellow-400' : 'text-red-400';
-
-        const score = r.score || 0;
-        const scoreColor = score >= 60 ? 'text-green-400' : score >= 30 ? 'text-yellow-400' : 'text-gray-400';
-
-        // 通过的筛选项
-        const filters = r.passed_filters || {};
-        const filterIcons = Object.entries(filters).map(([k, v]) => {
-            const label = { copier_pnl: '收益', followers: '人数', sharp_ratio: '夏普', trades: '交易', win_rate: '胜率' }[k] || k;
-            return `<span class="px-1.5 py-0.5 rounded text-xs ${v ? 'bg-green-500/15 text-green-400' : 'bg-red-500/10 text-red-400'}">${v ? '✓' : '✗'} ${label}</span>`;
-        }).join('');
-
-        const badge = r.badge ? `<span class="px-1.5 py-0.5 bg-yellow-500/20 text-yellow-300 text-xs rounded font-medium">${r.badge}</span>` : '';
-        const tags = (r.tags || []).slice(0, 2).map(t => `<span class="px-1.5 py-0.5 bg-blue-500/15 text-blue-300 text-xs rounded">${t.label}</span>`).join('');
-
-        const addBtn = r.already_added
-            ? '<span class="text-gray-500 text-xs">已添加</span>'
-            : `<button onclick="addFromScan('${r.portfolio_id}', '${(r.nickname || '').replace(/'/g, "\\'")}', this)"
-                 class="px-4 py-1.5 bg-green-600 hover:bg-green-700 text-white rounded-lg text-xs font-medium transition-colors">
-                 添加
-               </button>`;
-
-        const rankBadge = idx < 3 ? ['🥇', '🥈', '🥉'][idx] : `#${idx + 1}`;
-
-        return `
-        <div class="p-4 hover:bg-dark-bg/30 transition-colors">
-            <div class="flex items-start justify-between gap-4">
-                <div class="flex-1 min-w-0">
-                    <div class="flex items-center space-x-2 mb-2">
-                        <span class="text-lg">${rankBadge}</span>
-                        <span class="text-white font-bold text-sm truncate">${r.nickname || '未知'}</span>
-                        ${badge} ${tags}
-                    </div>
-                    <div class="grid grid-cols-3 sm:grid-cols-6 gap-2 text-center mb-2">
-                        <div class="bg-dark-bg/50 rounded-lg p-1.5">
-                            <div class="text-gray-500 text-xs">跟单收益</div>
-                            <div class="font-bold text-sm ${pnlColor}">${pnlStr}</div>
+        list.innerHTML = results.map(item => {
+            const tier = item.tier;
+            const cfg  = tier && TIER_CONFIG[tier] ? TIER_CONFIG[tier] : null;
+            const tierHtml = cfg
+                ? `<span class="text-[10px] px-1.5 py-0.5 rounded border ${cfg.badge} font-semibold">${item.tier_label} · ${cfg.ratio}</span>`
+                : '';
+            const scoreHtml = item.score
+                ? `<span class="text-[10px] text-zinc-500">评分 <span class="text-zinc-200 font-mono">${formatScore(item.score)}</span></span>`
+                : '';
+            const addBtn = item.already_added
+                ? '<span class="text-xs text-zinc-600">已在名单</span>'
+                : `<button onclick="addFromScan('${item.portfolio_id}', '${escapeHtml(item.tier||'')}', '${escapeHtml(item.tier_label||'')}', ${item.follow_ratio||0}, ${item.score||0}, ${item.aum||0}, ${item.copy_days||0}, this)"
+                       class="text-xs bg-zinc-800 hover:bg-zinc-700 text-blue-400 px-3 py-1 rounded border border-zinc-700 transition-colors font-medium">
+                       加入
+                   </button>`;
+            return `
+                <div class="py-2.5 flex items-center gap-3 border-b border-zinc-800/50 last:border-0">
+                    ${cfg ? `<span class="w-2 h-2 rounded-full flex-shrink-0 ${cfg.dot}"></span>` : '<span class="w-2 h-2 rounded-full flex-shrink-0 bg-zinc-600"></span>'}
+                    <div class="min-w-0 flex-1">
+                        <div class="flex items-center gap-2 flex-wrap">
+                            <span class="text-sm font-bold text-white">${escapeHtml(item.nickname)}</span>
+                            ${tierHtml}
+                            ${scoreHtml}
                         </div>
-                        <div class="bg-dark-bg/50 rounded-lg p-1.5">
-                            <div class="text-gray-500 text-xs">夏普比率</div>
-                            <div class="font-bold text-sm ${srColor}">${sr.toFixed(2)}</div>
-                        </div>
-                        <div class="bg-dark-bg/50 rounded-lg p-1.5">
-                            <div class="text-gray-500 text-xs">7天胜率</div>
-                            <div class="font-bold text-sm ${wrColor}">${wr.toFixed(1)}%</div>
-                        </div>
-                        <div class="bg-dark-bg/50 rounded-lg p-1.5">
-                            <div class="text-gray-500 text-xs">盈亏比</div>
-                            <div class="font-bold text-sm text-white">${(r.avg_rr_ratio || 0).toFixed(2)}</div>
-                        </div>
-                        <div class="bg-dark-bg/50 rounded-lg p-1.5">
-                            <div class="text-gray-500 text-xs">跟单人数</div>
-                            <div class="font-bold text-sm text-white">${(r.current_copy_count || 0).toLocaleString()}</div>
-                        </div>
-                        <div class="bg-dark-bg/50 rounded-lg p-1.5">
-                            <div class="text-gray-500 text-xs">评分</div>
-                            <div class="font-bold text-sm ${scoreColor}">${score.toFixed(0)}</div>
+                        <div class="flex items-center gap-3 mt-0.5 text-[10px] text-zinc-500">
+                            <span>收益 <span class="text-green-400">$${formatCompact(item.copier_pnl)}</span></span>
+                            <span>跟随 <span class="text-zinc-300">${item.follower_count}</span></span>
+                            ${item.aum ? `<span>AUM <span class="text-zinc-300">$${formatCompact(item.aum)}</span></span>` : ''}
+                            ${item.copy_days ? `<span>带单 <span class="text-zinc-300">${item.copy_days}天</span></span>` : ''}
                         </div>
                     </div>
-                    <div class="flex flex-wrap gap-1">${filterIcons}</div>
+                    <div class="flex-shrink-0">${addBtn}</div>
                 </div>
-                <div class="flex-shrink-0 flex items-center">${addBtn}</div>
-            </div>
-        </div>`;
+            `;
+        }).join('');
     }
 
-    async function addFromScan(pid, name, btn) {
-        btn.disabled = true;
-        btn.textContent = '添加中…';
-        try {
-            const res = await apiPost('/api/add_binance_trader', { url: pid });
-            if (res.ok) {
-                btn.textContent = '✔ 已添加';
-                btn.className = 'px-4 py-1.5 bg-green-800 text-green-300 rounded-lg text-xs font-medium cursor-default';
-                await loadBinanceList();
-            } else {
-                btn.disabled = false;
-                btn.textContent = '添加';
-                alert(res.error || '添加失败');
-            }
-        } catch (e) {
-            btn.disabled = false;
-            btn.textContent = '添加';
+    async function addFromScan(pid, tier, tier_label, follow_ratio, score, aum, copy_days, btn) {
+        if (bnListHome.length >= 6) {
+            showHomeNotice('观察名单已满（最多 6 人）', 'error');
+            return;
         }
+        try {
+            await apiPost({{ home_copy_add_url|tojson }}, { url: pid });
+            // 保存等级信息到设置
+            if (tier) {
+                await _saveTierInfo(pid, tier, tier_label, follow_ratio, score, aum, copy_days);
+            }
+            await loadBinanceList();
+            await loadScanResults();
+            showHomeNotice(`已加入观察名单（${tier_label || '手动'}仓）`, 'success');
+        } catch(e) { showHomeNotice(e.message || '添加失败', 'error'); }
+    }
+
+    async function _saveTierInfo(pid, tier, tier_label, follow_ratio, score, aum, copy_days) {
+        try {
+            const settings = await apiGet({{ home_copy_settings_url|tojson }});
+            let traders = settings?.binance_traders || {};
+            if (typeof traders === 'string') traders = JSON.parse(traders || '{}');
+            if (traders[pid]) {
+                traders[pid].tier         = tier;
+                traders[pid].tier_label   = tier_label;
+                traders[pid].follow_ratio = follow_ratio;
+                traders[pid].score        = score;
+                traders[pid].aum          = aum;
+                traders[pid].copy_days    = copy_days;
+                await apiPost({{ home_copy_settings_url|tojson }}, { binance_traders: traders });
+            }
+        } catch(e) { /* 保存失败不中断主流程 */ }
     }
 
     async function addAllScanResults() {
-        const btn = document.getElementById('btn-add-all-scan');
-        if (!confirm('确定添加全部通过筛选的交易员？')) return;
-        btn.disabled = true;
-        btn.textContent = '添加中…';
+        const data    = await apiGet('/api/scan/results');
+        const results = (data.results || []).filter(r => !r.already_added);
+        if (!results.length) { showHomeNotice('没有可添加的新交易员', 'info'); return; }
+        const slots = 6 - bnListHome.length;
+        if (slots <= 0) { showHomeNotice('观察名单已满（最多 6 人）', 'error'); return; }
+        const toAdd = results.slice(0, slots);
+        for (const item of toAdd) {
+            await addFromScan(item.portfolio_id, item.tier, item.tier_label,
+                item.follow_ratio, item.score, item.aum, item.copy_days, null);
+        }
+        showHomeNotice(`已加入 ${toAdd.length} 位交易员`, 'success');
+    }
 
-        try {
-            const data = await apiGet('/api/scan/results');
-            const passed = (data.results || []).filter(r => r.all_passed && !r.already_added);
+    // ── 状态轮询 ────────────────────────────────────────────────────────────
 
-            for (const r of passed) {
-                try {
-                    await apiPost('/api/add_binance_trader', { url: r.portfolio_id });
-                } catch (e) { }
-            }
-
-            btn.textContent = `✔ 已添加 ${passed.length} 人`;
-            await loadBinanceList();
-            // 刷新扫描结果中的 "已添加" 标记
-            await loadScanResults();
-        } catch (e) {
-            btn.disabled = false;
-            btn.textContent = '添加失败';
+    async function refreshHeroStatus() {
+        const s  = await apiGet('/api/status');
+        const el = document.getElementById('home-api-state');
+        if (el) {
+            el.textContent = s.api_configured ? '已连接' : '待配置';
+            el.className   = `font-semibold ${s.api_configured ? 'text-green-400' : 'text-amber-400'}`;
         }
     }
 
-    // ── 页面初始化 ──────────────────────────────────────────────────────────────
-
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', loadBinanceList);
-    } else {
+    async function boot() {
         loadBinanceList();
+        refreshHeroStatus();
+        const scan = await apiGet('/api/scan/status');
+        if (scan.running) {
+            setScanButtons(true);
+            document.getElementById('scan-progress').classList.remove('hidden');
+            scanPollingTimer = setInterval(pollScanStatus, 2000);
+        } else if (scan.phase === 'done') {
+            loadScanResults();
+        }
     }
+    boot();
 </script>
 {% endblock %}

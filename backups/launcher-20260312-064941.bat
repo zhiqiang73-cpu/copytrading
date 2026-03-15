@@ -9,27 +9,20 @@ cd /d "%~dp0" || (
 
 set "ROOT=%CD%"
 set "URL=http://127.0.0.1:8080"
-set "HEALTH_URL=%URL%/api/status"
 set "LOG_FILE=%ROOT%\bitgetfollow.log"
-set "START_OUT=%ROOT%\_web_start.out"
-set "START_ERR=%ROOT%\_web_start.err"
 set "STAMP_FILE=%TEMP%\bitgetfollow_last_open_ts.txt"
 set "OPEN_COOLDOWN=8"
 set "VENV_PY=%ROOT%\.venv\Scripts\python.exe"
 
- echo.
- echo   ======================================
- echo     BitgetFollow Windows Launcher
- echo   ======================================
- echo.
+echo.
+echo   ======================================
+echo     BitgetFollow Windows Launcher
+echo   ======================================
+echo.
 
 set "PYTHON_CMD="
-set "PYTHON_START_EXE="
-set "USE_VENV=0"
 if exist "%VENV_PY%" (
     set PYTHON_CMD="%VENV_PY%"
-    set "PYTHON_START_EXE=%VENV_PY%"
-    set "USE_VENV=1"
     echo [0/3] Using project virtualenv: %VENV_PY%
 )
 
@@ -37,10 +30,7 @@ if not defined PYTHON_CMD (
     where py >nul 2>nul
     if not errorlevel 1 (
         py -3 -V >nul 2>nul
-        if not errorlevel 1 (
-            set "PYTHON_CMD=py -3"
-            set "PYTHON_START_EXE=py"
-        )
+        if not errorlevel 1 set "PYTHON_CMD=py -3"
     )
 )
 
@@ -48,10 +38,7 @@ if not defined PYTHON_CMD (
     where python >nul 2>nul
     if not errorlevel 1 (
         python -V >nul 2>nul
-        if not errorlevel 1 (
-            set "PYTHON_CMD=python"
-            set "PYTHON_START_EXE=python"
-        )
+        if not errorlevel 1 set "PYTHON_CMD=python"
     )
 )
 
@@ -83,15 +70,7 @@ if %errorlevel% equ 0 (
     echo [2/3] Service is already running, opening browser...
 ) else (
     echo [2/3] Starting service in background...
-    call :start_service
-    if errorlevel 1 (
-        echo [ERROR] Failed to launch background service.
-        echo Please check:
-        echo %START_ERR%
-        echo.
-        pause
-        exit /b 1
-    )
+    start "BitgetFollow" /min cmd /c "cd /d ""%ROOT%"" && %PYTHON_CMD% web.py >> ""%LOG_FILE%"" 2>&1"
     call :wait_ready
 )
 
@@ -102,24 +81,15 @@ if %errorlevel% equ 0 (
     exit /b 0
 )
 
-echo [ERROR] Service failed to start. Check logs:
-echo %START_ERR%
+echo [ERROR] Service failed to start. Check log:
 echo %LOG_FILE%
 echo.
 pause
 exit /b 1
 
 :is_running
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference='SilentlyContinue'; try { Invoke-WebRequest -UseBasicParsing -Uri '%HEALTH_URL%' -TimeoutSec 2 | Out-Null; exit 0 } catch { exit 1 }" >nul 2>nul
-    exit /b !errorlevel!
-
-:start_service
-if "%USE_VENV%"=="1" (
-    powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%PYTHON_START_EXE%' -ArgumentList 'web.py' -WorkingDirectory '%ROOT%' -WindowStyle Hidden" >nul 2>nul
-    exit /b !errorlevel!
-)
-start "BitgetFollow" /min cmd /c "cd /d ""%ROOT%"" && %PYTHON_CMD% web.py >> ""%LOG_FILE%"" 2>&1"
-exit /b 0
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference='SilentlyContinue'; try { Invoke-WebRequest -UseBasicParsing -Uri '%URL%' -TimeoutSec 2 | Out-Null; exit 0 } catch { exit 1 }" >nul 2>nul
+exit /b %errorlevel%
 
 :wait_ready
 for /L %%I in (1,1,25) do (

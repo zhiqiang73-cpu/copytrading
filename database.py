@@ -30,6 +30,243 @@ def _clean_symbol_value(symbol: Any) -> str:
         s = s.replace(suffix, "")
     return s
 
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _estimate_margin_from_position(size: float, price: float, leverage: int) -> float:
+    if size <= 0 or price <= 0 or leverage <= 0:
+        return 0.0
+    return (abs(size) * price) / max(leverage, 1)
+
+
+def _mean(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    return sum(values) / len(values)
+
+
+def _median(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(float(v) for v in values)
+    mid = len(ordered) // 2
+    if len(ordered) % 2 == 1:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2.0
+
+
+def _upsert_trader_metadata_value(conn, trader_uid: str, key: str, value: Any) -> None:
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO trader_metadata (trader_uid, key, value)
+        VALUES (?, ?, ?)
+        """,
+        (trader_uid, key, "" if value is None else str(value)),
+    )
+
+
+def _collect_trader_analysis(conn, trader_uid: str, lookback_days: int = 45) -> dict[str, Any]:
+    now_ms = int(time.time() * 1000)
+    lookback_ms = max(0, int(lookback_days or 0)) * 86400_000
+    cutoff_ms = now_ms - lookback_ms if lookback_ms > 0 else 0
+
+    source_rows = conn.execute(
+        """
+        SELECT action, direction, qty, price, leverage, order_time
+        FROM source_trader_events
+        WHERE trader_uid = ? AND order_time >= ?
+        ORDER BY order_time ASC, id ASC
+        """,
+        (trader_uid, cutoff_ms),
+    ).fetchall()
+    open_margins: list[float] = []
+    open_leverages: list[float] = []
+    source_open_count = 0
+    source_close_count = 0
+    for row in source_rows:
+        action = str(row["action"] or "")
+        qty = _safe_float(row["qty"], 0.0)
+        price = _safe_float(row["price"], 0.0)
+        leverage = max(1, _safe_int(row["leverage"], 1))
+        if action in ("open_long", "open_short"):
+            source_open_count += 1
+            margin = _estimate_margin_from_position(qty, price, leverage)
+            if margin > 0:
+                open_margins.append(margin)
+            open_leverages.append(float(leverage))
+        elif action in ("close_long", "close_short"):
+            source_close_count += 1
+
+    cycle_rows = conn.execute(
+        """
+        SELECT hold_duration_sec, realized_pnl, close_reason
+        FROM trader_position_cycles
+        WHERE trader_uid = ? AND open_time >= ?
+        ORDER BY open_time DESC
+        LIMIT 500
+        """,
+        (trader_uid, cutoff_ms),
+    ).fetchall()
+    closed_cycles = [
+        row for row in cycle_rows
+        if str(row["close_reason"] or "") in ("normal_close", "reverse_transition")
+    ]
+    hold_secs = [
+        max(0.0, _safe_float(row["hold_duration_sec"], 0.0))
+        for row in closed_cycles
+        if row["hold_duration_sec"] not in (None, "")
+    ]
+    reverse_count = sum(1 for row in closed_cycles if str(row["close_reason"] or "") == "reverse_transition")
+    win_count = sum(1 for row in closed_cycles if _safe_float(row["realized_pnl"], 0.0) > 0)
+    stability_score = (win_count / len(closed_cycles) * 100.0) if closed_cycles else 0.0
+
+    copy_rows = conn.execute(
+        """
+        SELECT action, status, notes, platform, tracking_no, timestamp
+        FROM copy_orders
+        WHERE trader_uid = ? AND timestamp >= ?
+        ORDER BY timestamp DESC, id DESC
+        """,
+        (trader_uid, cutoff_ms),
+    ).fetchall()
+    open_rows = [row for row in copy_rows if str(row["action"] or "") == "open"]
+    close_rows = [row for row in copy_rows if str(row["action"] or "") == "close"]
+
+    platform_stats: dict[str, dict[str, int]] = {}
+    for row in copy_rows:
+        platform = str(row["platform"] or "bitget")
+        stats = platform_stats.setdefault(platform, {"filled": 0, "total": 0})
+        stats["total"] += 1
+        if str(row["status"] or "") == "filled":
+            stats["filled"] += 1
+
+    preferred_platform = "bitget"
+    execution_score = 0.0
+    if platform_stats:
+        preferred_platform = max(
+            platform_stats.items(),
+            key=lambda item: (item[1]["filled"], item[1]["total"], item[0]),
+        )[0]
+        preferred = platform_stats.get(preferred_platform) or {"filled": 0, "total": 0}
+        execution_score = (
+            preferred["filled"] / preferred["total"] * 100.0
+            if preferred["total"] > 0 else 0.0
+        )
+
+    clip_count = 0
+    min_adjust_count = 0
+    small_order_skip_count = 0
+    fallback_market_count = 0
+    for row in open_rows:
+        notes = str(row["notes"] or "")
+        if "[保证金裁剪]" in notes:
+            clip_count += 1
+        if "[最小下单修正]" in notes:
+            min_adjust_count += 1
+        if "最小开仓金额不足" in notes:
+            small_order_skip_count += 1
+        if "[FallbackMarket]" in notes:
+            fallback_market_count += 1
+
+    reconcile_close_count = 0
+    close_filled_count = 0
+    for row in close_rows:
+        notes = str(row["notes"] or "")
+        tracking_no = str(row["tracking_no"] or "")
+        if str(row["status"] or "") == "filled":
+            close_filled_count += 1
+        if tracking_no.startswith("REC_") or "reconcile_close" in notes:
+            reconcile_close_count += 1
+
+    if open_rows and clip_count == 0:
+        clip_count = sum(
+            1
+            for row in open_rows
+            if ("src=" in str(row["notes"] or "") and "cap=" in str(row["notes"] or ""))
+        )
+    if open_rows and min_adjust_count == 0:
+        min_adjust_count = sum(
+            1
+            for row in open_rows
+            if ("target=" in str(row["notes"] or "") and "min=" in str(row["notes"] or ""))
+        )
+    if open_rows and small_order_skip_count == 0:
+        small_order_skip_count = sum(
+            1
+            for row in open_rows
+            if ("need=" in str(row["notes"] or "") and "cap=" in str(row["notes"] or ""))
+        )
+
+    open_total = len(open_rows)
+    close_total = len(close_rows)
+    clip_rate = clip_count / open_total if open_total > 0 else 0.0
+    min_adjust_rate = min_adjust_count / open_total if open_total > 0 else 0.0
+    small_order_skip_rate = small_order_skip_count / open_total if open_total > 0 else 0.0
+    fallback_market_rate = fallback_market_count / open_total if open_total > 0 else 0.0
+    reverse_rate = reverse_count / len(closed_cycles) if closed_cycles else 0.0
+    close_reliability_base = max(source_close_count, len(closed_cycles), 1)
+    close_reliability_score = min(100.0, (close_filled_count / close_reliability_base) * 100.0)
+    risk_score = 100.0 - min(100.0, abs(stability_score - 50.0))
+    total_score = (
+        stability_score * 0.35
+        + execution_score * 0.25
+        + close_reliability_score * 0.20
+        + (1.0 - clip_rate) * 10.0
+        + (1.0 - reverse_rate) * 10.0
+    )
+    behavior_score = max(
+        0.0,
+        min(
+            100.0,
+            100.0
+            - clip_rate * 35.0
+            - reverse_rate * 25.0
+            - small_order_skip_rate * 15.0
+            - fallback_market_rate * 10.0,
+        ),
+    )
+
+    return {
+        "trader_uid": trader_uid,
+        "lookback_days": max(0, int(lookback_days or 0)),
+        "analysis_updated_at": now_ms,
+        "history_sample_size": source_open_count,
+        "source_close_count": source_close_count,
+        "cycle_sample_size": len(closed_cycles),
+        "copy_open_sample_size": open_total,
+        "copy_close_sample_size": close_total,
+        "median_source_margin": _median(open_margins),
+        "avg_source_margin": _mean(open_margins),
+        "median_source_leverage": _median(open_leverages),
+        "avg_hold_sec": _mean(hold_secs),
+        "median_hold_sec": _median(hold_secs),
+        "reverse_rate": reverse_rate,
+        "clip_rate": clip_rate,
+        "min_adjust_rate": min_adjust_rate,
+        "small_order_skip_rate": small_order_skip_rate,
+        "fallback_market_rate": fallback_market_rate,
+        "reconcile_close_rate": (reconcile_close_count / close_total) if close_total > 0 else 0.0,
+        "stability_score": stability_score,
+        "execution_score": execution_score,
+        "close_reliability_score": close_reliability_score,
+        "risk_score": risk_score,
+        "total_score": total_score,
+        "behavior_score": behavior_score,
+        "preferred_platform": preferred_platform,
+    }
+
 def mark_deleted(uid: str):
     """标记交易员为已删除。"""
     with _deleted_lock:
@@ -53,6 +290,8 @@ def init_db():
     os.makedirs(os.path.dirname(config.DB_PATH), exist_ok=True)
     with get_conn() as conn:
         conn.executescript(_SCHEMA)
+        _migrate_trader_position_cycles(conn)
+        _migrate_trader_research_scores(conn)
         conn.commit()
     logger.info("数据库就绪：%s", config.DB_PATH)
 
@@ -92,6 +331,107 @@ def get_conn():
     
     if last_error:
         raise last_error
+
+
+def _table_column_names(conn, table: str) -> set[str]:
+    try:
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    except Exception:
+        return set()
+    names: set[str] = set()
+    for row in rows:
+        if isinstance(row, sqlite3.Row):
+            names.add(str(row["name"] or ""))
+        elif len(row) > 1:
+            names.add(str(row[1] or ""))
+    return names
+
+
+def _migrate_trader_position_cycles(conn) -> None:
+    columns = _table_column_names(conn, "trader_position_cycles")
+    if not columns:
+        return
+    legacy_markers = {"cycle_key", "hold_seconds", "updated_at", "avg_open_price", "max_leverage_seen"}
+    if columns & legacy_markers:
+        conn.execute("DROP TABLE IF EXISTS trader_position_cycles_legacy")
+        conn.execute("ALTER TABLE trader_position_cycles RENAME TO trader_position_cycles_legacy")
+        conn.execute(
+            """
+            CREATE TABLE trader_position_cycles (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                trader_uid      TEXT NOT NULL,
+                symbol          TEXT NOT NULL,
+                direction       TEXT NOT NULL,
+                open_event_id   INTEGER,
+                close_event_id  INTEGER,
+                open_time       INTEGER NOT NULL,
+                close_time      INTEGER,
+                open_price      REAL NOT NULL,
+                close_price     REAL,
+                qty             REAL NOT NULL,
+                leverage        INTEGER DEFAULT 1,
+                hold_duration_sec INTEGER,
+                realized_pnl    REAL,
+                roi_pct         REAL,
+                close_reason    TEXT DEFAULT 'still_open',
+                created_at      INTEGER NOT NULL,
+                FOREIGN KEY (open_event_id) REFERENCES source_trader_events(id),
+                FOREIGN KEY (close_event_id) REFERENCES source_trader_events(id)
+            )
+            """
+        )
+        conn.execute("DROP TABLE trader_position_cycles_legacy")
+        columns = _table_column_names(conn, "trader_position_cycles")
+    required_columns = [
+        ("open_event_id", "INTEGER"),
+        ("close_event_id", "INTEGER"),
+        ("open_price", "REAL DEFAULT 0"),
+        ("close_price", "REAL"),
+        ("qty", "REAL DEFAULT 0"),
+        ("leverage", "INTEGER DEFAULT 1"),
+        ("hold_duration_sec", "INTEGER"),
+        ("roi_pct", "REAL"),
+    ]
+    for column, ddl in required_columns:
+        if column in columns:
+            continue
+        conn.execute(f"ALTER TABLE trader_position_cycles ADD COLUMN {column} {ddl}")
+
+
+def _migrate_trader_research_scores(conn) -> None:
+    columns = _table_column_names(conn, "trader_research_scores")
+    if not columns:
+        return
+    legacy_markers = {"as_of_day", "platform_fit_score", "signal_stability_score", "small_cap_compatibility_score"}
+    if columns & legacy_markers:
+        conn.execute("DROP TABLE IF EXISTS trader_research_scores_legacy")
+        conn.execute("ALTER TABLE trader_research_scores RENAME TO trader_research_scores_legacy")
+        conn.execute(
+            """
+            CREATE TABLE trader_research_scores (
+                trader_uid      TEXT PRIMARY KEY,
+                stability_score REAL DEFAULT 0,
+                execution_score REAL DEFAULT 0,
+                risk_score      REAL DEFAULT 0,
+                total_score     REAL DEFAULT 0,
+                rank            INTEGER DEFAULT 0,
+                updated_at      INTEGER NOT NULL
+            )
+            """
+        )
+        conn.execute("DROP TABLE trader_research_scores_legacy")
+        columns = _table_column_names(conn, "trader_research_scores")
+    required_columns = [
+        ("stability_score", "REAL DEFAULT 0"),
+        ("execution_score", "REAL DEFAULT 0"),
+        ("risk_score", "REAL DEFAULT 0"),
+        ("total_score", "REAL DEFAULT 0"),
+        ("rank", "INTEGER DEFAULT 0"),
+    ]
+    for column, ddl in required_columns:
+        if column in columns:
+            continue
+        conn.execute(f"ALTER TABLE trader_research_scores ADD COLUMN {column} {ddl}")
 
 
 # ── 建表 DDL ──────────────────────────────────────────────────────────────────
@@ -169,7 +509,7 @@ CREATE TABLE IF NOT EXISTS copy_settings (
     total_capital   REAL DEFAULT 0,
     follow_ratio_pct REAL DEFAULT 0.003,
     max_margin_pct  REAL DEFAULT 0.20,
-    price_tolerance REAL DEFAULT 0.0002,
+    price_tolerance REAL DEFAULT 0.01,
     sl_pct          REAL DEFAULT 0.15,
     tp_pct          REAL DEFAULT 0.30,
     daily_loss_limit_pct REAL DEFAULT 0.03,
@@ -191,7 +531,7 @@ CREATE TABLE IF NOT EXISTS copy_settings (
     binance_total_capital REAL DEFAULT 0,
     binance_follow_ratio_pct REAL DEFAULT 0.003,
     binance_max_margin_pct REAL DEFAULT 0.20,
-    binance_price_tolerance REAL DEFAULT 0.0002,
+    binance_price_tolerance REAL DEFAULT 0.01,
     enabled_traders TEXT DEFAULT '[]',
     binance_traders TEXT DEFAULT '{}',
     engine_enabled  INTEGER DEFAULT 0
@@ -261,7 +601,75 @@ CREATE TABLE IF NOT EXISTS copy_orders (
     platform        TEXT DEFAULT 'bitget'  -- 区分是下单在 bitget 还是 binance
 );
 
+CREATE TABLE IF NOT EXISTS source_trader_events (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    trader_uid      TEXT NOT NULL,
+    source_order_id TEXT NOT NULL,
+    symbol          TEXT NOT NULL,
+    action          TEXT NOT NULL,
+    direction       TEXT NOT NULL,
+    qty             REAL NOT NULL,
+    price           REAL NOT NULL,
+    leverage        INTEGER DEFAULT 1,
+    order_time      INTEGER NOT NULL,
+    source_kind     TEXT DEFAULT 'live',
+    raw_payload     TEXT,
+    created_at      INTEGER NOT NULL,
+    UNIQUE(trader_uid, source_order_id)
+);
 
+CREATE TABLE IF NOT EXISTS trader_position_cycles (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    trader_uid      TEXT NOT NULL,
+    symbol          TEXT NOT NULL,
+    direction       TEXT NOT NULL,
+    open_event_id   INTEGER,
+    close_event_id  INTEGER,
+    open_time       INTEGER NOT NULL,
+    close_time      INTEGER,
+    open_price      REAL NOT NULL,
+    close_price     REAL,
+    qty             REAL NOT NULL,
+    leverage        INTEGER DEFAULT 1,
+    hold_duration_sec INTEGER,
+    realized_pnl    REAL,
+    roi_pct         REAL,
+    close_reason    TEXT DEFAULT 'still_open',
+    created_at      INTEGER NOT NULL,
+    FOREIGN KEY (open_event_id) REFERENCES source_trader_events(id),
+    FOREIGN KEY (close_event_id) REFERENCES source_trader_events(id)
+);
+
+CREATE TABLE IF NOT EXISTS trader_execution_daily (
+    trader_uid      TEXT NOT NULL,
+    day             TEXT NOT NULL,
+    platform        TEXT DEFAULT 'bitget',
+    total_orders    INTEGER DEFAULT 0,
+    filled_orders   INTEGER DEFAULT 0,
+    skipped_orders  INTEGER DEFAULT 0,
+    avg_delay_ms    REAL DEFAULT 0,
+    avg_slippage_pct REAL DEFAULT 0,
+    total_pnl       REAL DEFAULT 0,
+    updated_at      INTEGER NOT NULL,
+    PRIMARY KEY (trader_uid, day, platform)
+);
+
+CREATE TABLE IF NOT EXISTS trader_research_scores (
+    trader_uid      TEXT PRIMARY KEY,
+    stability_score REAL DEFAULT 0,
+    execution_score REAL DEFAULT 0,
+    risk_score      REAL DEFAULT 0,
+    total_score     REAL DEFAULT 0,
+    rank            INTEGER DEFAULT 0,
+    updated_at      INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS trader_metadata (
+    trader_uid      TEXT NOT NULL,
+    key             TEXT NOT NULL,
+    value           TEXT,
+    PRIMARY KEY (trader_uid, key)
+);
 
 CREATE INDEX IF NOT EXISTS idx_trades_trader ON trades(trader_uid);
 CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol);
@@ -269,6 +677,10 @@ CREATE INDEX IF NOT EXISTS idx_snapshots_trader ON snapshots(trader_uid);
 CREATE INDEX IF NOT EXISTS idx_copy_orders_time ON copy_orders(timestamp);
 CREATE INDEX IF NOT EXISTS idx_copy_orders_trader ON copy_orders(trader_uid);
 CREATE INDEX IF NOT EXISTS idx_copy_orders_tracking ON copy_orders(tracking_no);
+CREATE INDEX IF NOT EXISTS idx_source_events_trader ON source_trader_events(trader_uid);
+CREATE INDEX IF NOT EXISTS idx_source_events_time ON source_trader_events(order_time);
+CREATE INDEX IF NOT EXISTS idx_cycles_trader ON trader_position_cycles(trader_uid);
+CREATE INDEX IF NOT EXISTS idx_cycles_open_time ON trader_position_cycles(open_time);
 """
 
 # ── traders CRUD ──────────────────────────────────────────────────────────────
@@ -627,7 +1039,7 @@ def _ensure_copy_settings(conn) -> None:
         ("binance_total_capital", "REAL", "0"),
         ("binance_follow_ratio_pct", "REAL", "0.003"),
         ("binance_max_margin_pct", "REAL", "0.20"),
-        ("binance_price_tolerance", "REAL", "0.0002"),
+        ("binance_price_tolerance", "REAL", "0.01"),
     ]:
         try:
             conn.execute(f"ALTER TABLE copy_settings ADD COLUMN {col} {dtype} DEFAULT {default}")
@@ -743,7 +1155,7 @@ def _default_copy_settings_payload(profile: str = "sim") -> dict[str, Any]:
         "total_capital": 0.0,
         "follow_ratio_pct": 0.003,
         "max_margin_pct": 0.20,
-        "price_tolerance": 0.0002,
+        "price_tolerance": 0.01,
         "sl_pct": 0.15,
         "tp_pct": 0.30,
         "daily_loss_limit_pct": config.DEFAULT_DAILY_LOSS_LIMIT_PCT,
@@ -770,7 +1182,7 @@ def _default_copy_settings_payload(profile: str = "sim") -> dict[str, Any]:
         "binance_total_capital": 0.0,
         "binance_follow_ratio_pct": 0.003,
         "binance_max_margin_pct": 0.20,
-        "binance_price_tolerance": 0.0002,
+        "binance_price_tolerance": 0.01,
     }
     if profile_key == "live":
         payload["api_key"] = os.getenv("LIVE_BITGET_API_KEY", "")
@@ -1477,3 +1889,1041 @@ def get_last_copy_order(symbol: str, direction: str):
             ORDER BY id DESC LIMIT 1
         ''', (symbol, direction)).fetchone()
     return dict(row) if row else None
+
+
+# ── 延迟监控与交易员性能统计 (Added 2026-03-14) ────────────────────────────
+
+
+def record_trade_delay(trader_uid: str, delay_ms: int, slippage_pct: float):
+    """记录单笔跟单的延迟和滑点"""
+    import time
+    today = time.strftime("%Y-%m-%d")
+    with get_conn() as conn:
+        conn.execute("""
+            INSERT INTO trader_performance 
+                (trader_uid, date, total_orders, avg_delay_ms, avg_slippage)
+            VALUES (?, ?, 1, ?, ?)
+            ON CONFLICT(trader_uid, date) DO UPDATE SET
+                total_orders = total_orders + 1,
+                avg_delay_ms = ((avg_delay_ms * (total_orders - 1)) + ?) / total_orders,
+                avg_slippage = ((avg_slippage * (total_orders - 1)) + ?) / total_orders
+        """, (trader_uid, today, delay_ms, slippage_pct, delay_ms, slippage_pct))
+        conn.commit()
+
+
+def get_trader_performance(trader_uid: str, days: int = 7) -> dict:
+    """获取交易员最近N天的性能统计"""
+    import time
+    cutoff_date = time.strftime("%Y-%m-%d", time.localtime(time.time() - days * 86400))
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT 
+                AVG(avg_delay_ms) as avg_delay,
+                AVG(avg_slippage) as avg_slippage,
+                SUM(total_orders) as total_orders,
+                MAX(date) as last_date,
+                AVG(CASE WHEN date >= ? THEN pnl_7d ELSE NULL END) as recent_pnl
+            FROM trader_performance
+            WHERE trader_uid = ? AND date >= ?
+        """, (cutoff_date, trader_uid, cutoff_date)).fetchone()
+        
+        if rows:
+            return dict(rows)
+        return {
+            "avg_delay": 0,
+            "avg_slippage": 0,
+            "total_orders": 0,
+            "last_date": None,
+            "recent_pnl": 0,
+        }
+
+
+def should_pause_trader(trader_uid: str) -> tuple:
+    """判断是否应该暂停交易员"""
+    perf = get_trader_performance(trader_uid, days=7)
+    
+    if perf["avg_delay"] > 15000:
+        return True, f"平均延迟过高: {perf['avg_delay']/1000:.1f}秒"
+    
+    if perf["avg_slippage"] > 0.01:
+        return True, f"平均滑点过高: {perf['avg_slippage']*100:.2f}%"
+    
+    if perf["total_orders"] >= 10 and perf["recent_pnl"] < -500:
+        return True, f"近7天亏损: ${perf['recent_pnl']:.2f}"
+    
+    return False, ""
+
+
+def update_trader_pnl_stats():
+    """更新所有交易员的7天/30天盈亏统计"""
+    import time
+    today = time.strftime("%Y-%m-%d")
+    cutoff_7d = time.strftime("%Y-%m-%d", time.localtime(time.time() - 7 * 86400))
+    cutoff_30d = time.strftime("%Y-%m-%d", time.localtime(time.time() - 30 * 86400))
+    
+    with get_conn() as conn:
+        traders = conn.execute("SELECT DISTINCT trader_uid FROM copy_orders").fetchall()
+        
+        for row in traders:
+            trader_uid = row["trader_uid"]
+            
+            pnl_7d = conn.execute("""
+                SELECT COALESCE(SUM(pnl), 0) as total_pnl
+                FROM copy_orders
+                WHERE trader_uid = ? AND action = 'close' AND status = 'filled'
+                  AND date(timestamp / 1000, 'unixepoch', 'localtime') >= ?
+            """, (trader_uid, cutoff_7d)).fetchone()["total_pnl"]
+            
+            pnl_30d = conn.execute("""
+                SELECT COALESCE(SUM(pnl), 0) as total_pnl
+                FROM copy_orders
+                WHERE trader_uid = ? AND action = 'close' AND status = 'filled'
+                  AND date(timestamp / 1000, 'unixepoch', 'localtime') >= ?
+            """, (trader_uid, cutoff_30d)).fetchone()["total_pnl"]
+            
+            conn.execute("""
+                INSERT INTO trader_performance 
+                    (trader_uid, date, pnl_7d, pnl_30d, total_orders)
+                VALUES (?, ?, ?, ?, 0)
+                ON CONFLICT(trader_uid, date) DO UPDATE SET
+                    pnl_7d = ?, pnl_30d = ?
+            """, (trader_uid, today, pnl_7d, pnl_30d, pnl_7d, pnl_30d))
+        
+        conn.commit()
+    logger.info("更新了 %d 个交易员的盈亏统计", len(traders))
+
+
+# ── 延迟监控与交易员性能统计 (Added 2026-03-14) ────────────────────────────
+
+
+def record_trade_delay(trader_uid: str, delay_ms: int, slippage_pct: float):
+    """记录单笔跟单的延迟和滑点"""
+    import time
+    today = time.strftime("%Y-%m-%d")
+    with get_conn() as conn:
+        conn.execute("""
+            INSERT INTO trader_performance 
+                (trader_uid, date, total_orders, avg_delay_ms, avg_slippage)
+            VALUES (?, ?, 1, ?, ?)
+            ON CONFLICT(trader_uid, date) DO UPDATE SET
+                total_orders = total_orders + 1,
+                avg_delay_ms = ((avg_delay_ms * (total_orders - 1)) + ?) / total_orders,
+                avg_slippage = ((avg_slippage * (total_orders - 1)) + ?) / total_orders
+        """, (trader_uid, today, delay_ms, slippage_pct, delay_ms, slippage_pct))
+        conn.commit()
+
+
+def get_trader_performance(trader_uid: str, days: int = 7) -> dict:
+    """获取交易员最近N天的性能统计"""
+    import time
+    cutoff_date = time.strftime("%Y-%m-%d", time.localtime(time.time() - days * 86400))
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT 
+                AVG(avg_delay_ms) as avg_delay,
+                AVG(avg_slippage) as avg_slippage,
+                SUM(total_orders) as total_orders,
+                MAX(date) as last_date,
+                AVG(CASE WHEN date >= ? THEN pnl_7d ELSE NULL END) as recent_pnl
+            FROM trader_performance
+            WHERE trader_uid = ? AND date >= ?
+        """, (cutoff_date, trader_uid, cutoff_date)).fetchone()
+        
+        if rows:
+            return dict(rows)
+        return {
+            "avg_delay": 0,
+            "avg_slippage": 0,
+            "total_orders": 0,
+            "last_date": None,
+            "recent_pnl": 0,
+        }
+
+
+def should_pause_trader(trader_uid: str) -> tuple:
+    """判断是否应该暂停交易员"""
+    perf = get_trader_performance(trader_uid, days=7)
+    
+    if perf["avg_delay"] > 15000:
+        return True, f"平均延迟过高: {perf['avg_delay']/1000:.1f}秒"
+    
+    if perf["avg_slippage"] > 0.01:
+        return True, f"平均滑点过高: {perf['avg_slippage']*100:.2f}%"
+    
+    if perf["total_orders"] >= 10 and perf["recent_pnl"] < -500:
+        return True, f"近7天亏损: ${perf['recent_pnl']:.2f}"
+    
+    return False, ""
+
+
+def update_trader_pnl_stats():
+    """更新所有交易员的7天/30天盈亏统计"""
+    import time
+    today = time.strftime("%Y-%m-%d")
+    cutoff_7d = time.strftime("%Y-%m-%d", time.localtime(time.time() - 7 * 86400))
+    cutoff_30d = time.strftime("%Y-%m-%d", time.localtime(time.time() - 30 * 86400))
+    
+    with get_conn() as conn:
+        traders = conn.execute("SELECT DISTINCT trader_uid FROM copy_orders").fetchall()
+        
+        for row in traders:
+            trader_uid = row["trader_uid"]
+            
+            pnl_7d = conn.execute("""
+                SELECT COALESCE(SUM(pnl), 0) as total_pnl
+                FROM copy_orders
+                WHERE trader_uid = ? AND action = 'close' AND status = 'filled'
+                  AND date(timestamp / 1000, 'unixepoch', 'localtime') >= ?
+            """, (trader_uid, cutoff_7d)).fetchone()["total_pnl"]
+            
+            pnl_30d = conn.execute("""
+                SELECT COALESCE(SUM(pnl), 0) as total_pnl
+                FROM copy_orders
+                WHERE trader_uid = ? AND action = 'close' AND status = 'filled'
+                  AND date(timestamp / 1000, 'unixepoch', 'localtime') >= ?
+            """, (trader_uid, cutoff_30d)).fetchone()["total_pnl"]
+            
+            conn.execute("""
+                INSERT INTO trader_performance 
+                    (trader_uid, date, pnl_7d, pnl_30d, total_orders)
+                VALUES (?, ?, ?, ?, 0)
+                ON CONFLICT(trader_uid, date) DO UPDATE SET
+                    pnl_7d = ?, pnl_30d = ?
+            """, (trader_uid, today, pnl_7d, pnl_30d, pnl_7d, pnl_30d))
+        
+        conn.commit()
+    logger.info("更新了 %d 个交易员的盈亏统计", len(traders))
+
+
+# ── 源交易事件与研究管线 ────────────────────────────────────────────────────────
+
+
+def upsert_source_trader_events(events: list[dict], source_kind: str = "live") -> None:
+    """
+    插入或更新源交易员事件（用于研究管线和对账）。
+    幂等操作：相同 (trader_uid, source_order_id) 的事件不会重复插入。
+    
+    参数:
+        events: 事件列表，每个事件需包含:
+            - trader_uid: 交易员 UID
+            - source_order_id: 源订单 ID
+            - symbol: 交易对
+            - action: 动作 (open_long, close_long, open_short, close_short)
+            - direction: 方向 (long, short)
+            - qty: 数量
+            - price: 价格
+            - leverage: 杠杆
+            - order_time: 订单时间戳（毫秒）
+            - raw_payload: 原始数据（dict，会自动序列化为 JSON）
+        source_kind: 数据源类型 ('live', 'history', 'reconcile')
+    """
+    if not events:
+        return
+    
+    now_ms = int(time.time() * 1000)
+    with _db_write_lock:
+        with get_conn() as conn:
+            for evt in events:
+                raw = evt.get("raw_payload")
+                raw_json = json.dumps(raw) if isinstance(raw, dict) else str(raw or "")
+                
+                conn.execute("""
+                    INSERT INTO source_trader_events
+                        (trader_uid, source_order_id, symbol, action, direction,
+                         qty, price, leverage, order_time, source_kind, raw_payload, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(trader_uid, source_order_id) DO UPDATE SET
+                        symbol = excluded.symbol,
+                        action = excluded.action,
+                        direction = excluded.direction,
+                        qty = excluded.qty,
+                        price = excluded.price,
+                        leverage = excluded.leverage,
+                        order_time = excluded.order_time,
+                        source_kind = excluded.source_kind,
+                        raw_payload = excluded.raw_payload
+                """, (
+                    evt["trader_uid"],
+                    str(evt["source_order_id"]),
+                    evt.get("symbol", ""),
+                    evt.get("action", ""),
+                    evt.get("direction", ""),
+                    float(evt.get("qty", 0)),
+                    float(evt.get("price", 0)),
+                    int(evt.get("leverage", 1)),
+                    int(evt.get("order_time", 0)),
+                    source_kind,
+                    raw_json,
+                    now_ms,
+                ))
+            conn.commit()
+    
+    logger.debug("upsert %d 个源事件 (source_kind=%s)", len(events), source_kind)
+
+
+def get_source_trader_events(
+    trader_uid: str,
+    symbol: str | None = None,
+    since_ms: int = 0,
+    limit: int = 1000
+) -> list[dict]:
+    """获取交易员的源事件列表"""
+    sql = "SELECT * FROM source_trader_events WHERE trader_uid = ?"
+    params: list[Any] = [trader_uid]
+    
+    if symbol:
+        sql += " AND symbol = ?"
+        params.append(symbol)
+    
+    if since_ms > 0:
+        sql += " AND order_time > ?"
+        params.append(since_ms)
+    
+    sql += " ORDER BY order_time ASC, id ASC LIMIT ?"
+    params.append(limit)
+    
+    with get_conn() as conn:
+        rows = conn.execute(sql, params).fetchall()
+    
+    return [dict(r) for r in rows]
+
+
+def rebuild_trader_position_cycles(trader_uid: str) -> int:
+    """
+    根据 source_trader_events 重建交易员的仓位周期。
+    返回：新建或更新的周期数量。
+    
+    逻辑：
+    1. 按时间顺序遍历所有事件
+    2. open_long/open_short 开启新周期
+    3. close_long/close_short 结束对应周期
+    4. 反向开仓（long→short 或 short→long）标记为 reverse_transition
+    """
+    events = get_source_trader_events(trader_uid, limit=10000)
+    if not events:
+        return 0
+    
+    now_ms = int(time.time() * 1000)
+    cycles_created = 0
+    
+    # key: (symbol, direction) -> 当前活跃周期的 open_event
+    active_positions: dict[tuple[str, str], dict] = {}
+    
+    with _db_write_lock:
+        with get_conn() as conn:
+            # 清空旧周期（重建逻辑）
+            conn.execute(
+                "DELETE FROM trader_position_cycles WHERE trader_uid = ?",
+                (trader_uid,)
+            )
+            
+            for evt in events:
+                symbol = evt["symbol"]
+                action = evt["action"]
+                direction = evt["direction"]
+                order_time = evt["order_time"]
+                qty = evt["qty"]
+                price = evt["price"]
+                leverage = evt["leverage"]
+                event_id = evt["id"]
+                
+                key = (symbol, direction)
+                opposite_key = (symbol, "short" if direction == "long" else "long")
+                
+                if action in ("open_long", "open_short"):
+                    # 如果有反向持仓，先关闭它（reverse_transition）
+                    if opposite_key in active_positions:
+                        opp = active_positions.pop(opposite_key)
+                        hold_sec = (order_time - opp["open_time"]) // 1000
+                        pnl = (price - opp["open_price"]) * opp["qty"]
+                        if opp["direction"] == "short":
+                            pnl = -pnl
+                        roi = (pnl / (opp["open_price"] * opp["qty"])) * opp["leverage"] * 100 if opp["qty"] > 0 else 0
+                        
+                        conn.execute("""
+                            INSERT INTO trader_position_cycles
+                                (trader_uid, symbol, direction, open_event_id, close_event_id,
+                                 open_time, close_time, open_price, close_price, qty, leverage,
+                                 hold_duration_sec, realized_pnl, roi_pct, close_reason, created_at)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (
+                            trader_uid, opp["symbol"], opp["direction"], opp["event_id"], event_id,
+                            opp["open_time"], order_time, opp["open_price"], price, opp["qty"], opp["leverage"],
+                            hold_sec, pnl, roi, "reverse_transition", now_ms
+                        ))
+                        cycles_created += 1
+                    
+                    # 开启新周期（允许覆盖）
+                    active_positions[key] = {
+                        "event_id": event_id,
+                        "symbol": symbol,
+                        "direction": direction,
+                        "open_time": order_time,
+                        "open_price": price,
+                        "qty": qty,
+                        "leverage": leverage,
+                    }
+                
+                elif action in ("close_long", "close_short"):
+                    if key in active_positions:
+                        pos = active_positions.pop(key)
+                        hold_sec = (order_time - pos["open_time"]) // 1000
+                        pnl = (price - pos["open_price"]) * pos["qty"]
+                        if direction == "short":
+                            pnl = -pnl
+                        roi = (pnl / (pos["open_price"] * pos["qty"])) * pos["leverage"] * 100 if pos["qty"] > 0 else 0
+                        
+                        conn.execute("""
+                            INSERT INTO trader_position_cycles
+                                (trader_uid, symbol, direction, open_event_id, close_event_id,
+                                 open_time, close_time, open_price, close_price, qty, leverage,
+                                 hold_duration_sec, realized_pnl, roi_pct, close_reason, created_at)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (
+                            trader_uid, pos["symbol"], pos["direction"], pos["event_id"], event_id,
+                            pos["open_time"], order_time, pos["open_price"], price, pos["qty"], pos["leverage"],
+                            hold_sec, pnl, roi, "normal_close", now_ms
+                        ))
+                        cycles_created += 1
+            
+            # 剩余未关闭的仓位标记为 still_open
+            for pos in active_positions.values():
+                conn.execute("""
+                    INSERT INTO trader_position_cycles
+                        (trader_uid, symbol, direction, open_event_id, close_event_id,
+                         open_time, close_time, open_price, close_price, qty, leverage,
+                         hold_duration_sec, realized_pnl, roi_pct, close_reason, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    trader_uid, pos["symbol"], pos["direction"], pos["event_id"], None,
+                    pos["open_time"], None, pos["open_price"], None, pos["qty"], pos["leverage"],
+                    None, None, None, "still_open", now_ms
+                ))
+                cycles_created += 1
+            
+            conn.commit()
+    
+    logger.debug("重建 trader=%s 的仓位周期：%d 个", trader_uid[:12], cycles_created)
+    return cycles_created
+
+
+def get_trader_position_cycles(
+    trader_uid: str,
+    symbol: str | None = None,
+    limit: int = 100
+) -> list[dict]:
+    """获取交易员的仓位周期列表"""
+    sql = "SELECT * FROM trader_position_cycles WHERE trader_uid = ?"
+    params: list[Any] = [trader_uid]
+    
+    if symbol:
+        sql += " AND symbol = ?"
+        params.append(symbol)
+    
+    sql += " ORDER BY open_time DESC LIMIT ?"
+    params.append(limit)
+    
+    with get_conn() as conn:
+        rows = conn.execute(sql, params).fetchall()
+    
+    return [dict(r) for r in rows]
+
+
+def _refresh_trader_execution_daily_single(trader_uid: str, day: str | None = None) -> None:
+    """
+    刷新指定交易员在指定日期的执行统计（从 copy_orders 表聚合）。
+    按 platform 分别存储。
+    
+    参数:
+        trader_uid: 交易员 UID
+        day: 日期字符串 YYYY-MM-DD，默认为今天
+    """
+    import datetime
+    if not day:
+        day = datetime.date.today().isoformat()
+    
+    day_start_ms = int(time.mktime(time.strptime(day, "%Y-%m-%d"))) * 1000
+    day_end_ms = day_start_ms + 86400_000
+    now_ms = int(time.time() * 1000)
+    
+    with _db_write_lock:
+        with get_conn() as conn:
+            # 按平台分组聚合
+            platforms = conn.execute("""
+                SELECT DISTINCT COALESCE(platform, 'bitget') as platform
+                FROM copy_orders
+                WHERE trader_uid = ? AND timestamp >= ? AND timestamp < ?
+            """, (trader_uid, day_start_ms, day_end_ms)).fetchall()
+            
+            for platform_row in platforms:
+                platform = platform_row["platform"]
+                
+                stats = conn.execute("""
+                    SELECT
+                        COUNT(*) as total,
+                        SUM(CASE WHEN status = 'filled' THEN 1 ELSE 0 END) as filled,
+                        SUM(CASE WHEN status = 'skipped' THEN 1 ELSE 0 END) as skipped,
+                        SUM(CASE WHEN action = 'open' THEN 1 ELSE 0 END) as open_total,
+                        SUM(CASE WHEN action = 'open' AND status = 'filled' THEN 1 ELSE 0 END) as open_filled,
+                        SUM(CASE WHEN action = 'close' THEN 1 ELSE 0 END) as close_total,
+                        SUM(CASE WHEN action = 'close' AND status = 'filled' THEN 1 ELSE 0 END) as close_filled,
+                        SUM(CASE WHEN status = 'skipped' AND notes LIKE '%invalid symbol%' THEN 1 ELSE 0 END) as invalid_symbol,
+                        COALESCE(SUM(CASE WHEN status = 'filled' THEN pnl ELSE 0 END), 0) as total_pnl
+                    FROM copy_orders
+                    WHERE trader_uid = ? AND COALESCE(platform, 'bitget') = ? 
+                      AND timestamp >= ? AND timestamp < ?
+                """, (trader_uid, platform, day_start_ms, day_end_ms)).fetchone()
+                
+                total = stats["total"] or 0
+                filled = stats["filled"] or 0
+                skipped = stats["skipped"] or 0
+                total_pnl = stats["total_pnl"] or 0.0
+                
+                open_total = stats["open_total"] or 0
+                open_filled = stats["open_filled"] or 0
+                close_total = stats["close_total"] or 0
+                close_filled = stats["close_filled"] or 0
+                invalid_symbol = stats["invalid_symbol"] or 0
+                
+                open_fill_rate = (open_filled / open_total) if open_total > 0 else 0.0
+                close_completion_rate = (close_filled / close_total) if close_total > 0 else 0.0
+                invalid_symbol_rate = (invalid_symbol / open_total) if open_total > 0 else 0.0
+                
+                conn.execute("""
+                    INSERT INTO trader_execution_daily
+                        (trader_uid, day, platform, total_orders, filled_orders, skipped_orders,
+                         avg_delay_ms, avg_slippage_pct, total_pnl, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
+                    ON CONFLICT(trader_uid, day, platform) DO UPDATE SET
+                        total_orders = excluded.total_orders,
+                        filled_orders = excluded.filled_orders,
+                        skipped_orders = excluded.skipped_orders,
+                        total_pnl = excluded.total_pnl,
+                        updated_at = excluded.updated_at
+                """, (trader_uid, day, platform, total, filled, skipped, total_pnl, now_ms))
+                
+                # 存储额外的比率字段到元数据
+                for key, value in [
+                    ("open_fill_rate", open_fill_rate),
+                    ("close_completion_rate", close_completion_rate),
+                    ("invalid_symbol_rate", invalid_symbol_rate),
+                ]:
+                    conn.execute("""
+                        INSERT OR REPLACE INTO trader_metadata (trader_uid, key, value)
+                        VALUES (?, ?, ?)
+                    """, (trader_uid, f"{day}_{key}", str(value)))
+            
+            conn.commit()
+    
+    logger.debug("刷新 trader=%s day=%s 执行统计", trader_uid[:12], day)
+
+
+def get_trader_execution_daily(
+    trader_uid: str,
+    days: int = 365
+) -> list[dict]:
+    """获取交易员最近 N 天的执行统计（默认1年）"""
+    import datetime
+    cutoff_day = (datetime.date.today() - datetime.timedelta(days=days)).isoformat()
+    
+    with get_conn() as conn:
+        # 确保 trader_metadata 表存在
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS trader_metadata (
+                trader_uid TEXT NOT NULL,
+                key TEXT NOT NULL,
+                value TEXT,
+                PRIMARY KEY (trader_uid, key)
+            )
+        """)
+        
+        rows = conn.execute("""
+            SELECT * FROM trader_execution_daily
+            WHERE trader_uid = ? AND day >= ?
+            ORDER BY day DESC
+        """, (trader_uid, cutoff_day)).fetchall()
+        
+        result = []
+        for row in rows:
+            item = dict(row)
+            day = item["day"]
+            
+            # 加载额外字段
+            for key in ["open_fill_rate", "close_completion_rate", "invalid_symbol_rate"]:
+                meta = conn.execute("""
+                    SELECT value FROM trader_metadata
+                    WHERE trader_uid = ? AND key = ?
+                """, (trader_uid, f"{day}_{key}")).fetchone()
+                item[key] = float(meta["value"]) if meta else 0.0
+            
+            result.append(item)
+        
+        return result
+
+
+def get_source_position_summaries(trader_uid: str) -> list[dict]:
+    """
+    从 source_trader_events 聚合当前源端活跃仓位。
+    返回：[{symbol, direction, remaining_qty, last_event_time, ...}]
+    用于对账逻辑。
+    """
+    events = get_source_trader_events(trader_uid, limit=5000)
+    if not events:
+        return []
+    
+    # key: (symbol, direction) -> position state
+    positions: dict[tuple[str, str], dict[str, Any]] = {}
+    
+    for evt in events:
+        symbol = str(evt.get("symbol") or "")
+        action = str(evt.get("action") or "")
+        direction = str(evt.get("direction") or "")
+        qty = _safe_float(evt.get("qty"), 0.0)
+        price = _safe_float(evt.get("price"), 0.0)
+        leverage = max(1, _safe_int(evt.get("leverage"), 1))
+        order_time = _safe_int(evt.get("order_time"), 0)
+        source_order_id = str(evt.get("source_order_id") or "")
+
+        key = (symbol, direction)
+
+        if action in ("open_long", "open_short"):
+            state = positions.setdefault(
+                key,
+                {
+                    "trader_uid": trader_uid,
+                    "symbol": symbol,
+                    "direction": direction,
+                    "remaining_qty": 0.0,
+                    "remaining_margin": 0.0,
+                    "avg_entry_price": 0.0,
+                    "price": 0.0,
+                    "last_open_price": 0.0,
+                    "last_open_time": 0,
+                    "last_event_time": 0,
+                    "last_close_time": 0,
+                    "last_source_order_id": "",
+                    "leverage": leverage,
+                },
+            )
+            before_qty = state["remaining_qty"]
+            if price > 0 and qty > 0:
+                if before_qty > 0:
+                    state["avg_entry_price"] = ((state["avg_entry_price"] * before_qty) + (price * qty)) / (before_qty + qty)
+                else:
+                    state["avg_entry_price"] = price
+            state["remaining_qty"] = before_qty + qty
+            state["remaining_margin"] += _estimate_margin_from_position(qty, price, leverage)
+            state["last_event_time"] = max(state["last_event_time"], order_time)
+            state["last_open_time"] = max(state["last_open_time"], order_time)
+            if price > 0:
+                state["price"] = price
+                state["last_open_price"] = price
+            if source_order_id:
+                state["last_source_order_id"] = source_order_id
+            state["leverage"] = leverage or state.get("leverage") or 1
+
+        elif action in ("close_long", "close_short") and key in positions:
+            state = positions[key]
+            before_qty = max(state["remaining_qty"], 0.0)
+            close_qty = min(qty, before_qty) if before_qty > 0 else 0.0
+            state["remaining_qty"] = max(0.0, before_qty - close_qty)
+            if before_qty > 0:
+                state["remaining_margin"] = max(0.0, state["remaining_margin"] * (1.0 - (close_qty / before_qty)))
+            state["last_event_time"] = max(state["last_event_time"], order_time)
+            state["last_close_time"] = order_time
+            if price > 0:
+                state["price"] = price
+            if source_order_id:
+                state["last_source_order_id"] = source_order_id
+            if state["remaining_qty"] <= 1e-6:
+                # 仓位已平，标记但保留（对账需要 last_close_time）
+                state["remaining_qty"] = 0.0
+                state["remaining_margin"] = 0.0
+
+    return [p for p in positions.values()]
+
+
+def refresh_trader_execution_daily_batch(trader_uids: list[str], day: str | None = None) -> int:
+    """
+    批量刷新多个交易员的执行统计。
+    如果 day 为 None，会从 copy_orders 中查找该交易员的所有日期并分别刷新。
+    返回：成功刷新的交易员数量。
+    """
+    import datetime
+    count = 0
+    
+    if day is None:
+        # 自动查找所有需要刷新的日期
+        with get_conn() as conn:
+            for uid in trader_uids:
+                try:
+                    days = conn.execute("""
+                        SELECT DISTINCT date(timestamp / 1000, 'unixepoch', 'localtime') as day
+                        FROM copy_orders
+                        WHERE trader_uid = ?
+                    """, (uid,)).fetchall()
+                    
+                    for day_row in days:
+                        _refresh_trader_execution_daily_single(uid, day_row["day"])
+                    
+                    if days:
+                        count += 1
+                except Exception as e:
+                    logger.error("刷新 trader=%s 执行统计失败: %s", uid[:12], e)
+    else:
+        for uid in trader_uids:
+            try:
+                _refresh_trader_execution_daily_single(uid, day)
+                count += 1
+            except Exception as e:
+                logger.error("刷新 trader=%s 执行统计失败: %s", uid[:12], e)
+    
+    return count
+
+
+def refresh_trader_execution_daily(trader_uids_or_uid, day: str | None = None):
+    """
+    刷新交易员执行统计（兼容单个和批量）。
+    - 如果传入 list，返回成功计数
+    - 如果传入 str，无返回值
+    """
+    if isinstance(trader_uids_or_uid, list):
+        return refresh_trader_execution_daily_batch(trader_uids_or_uid, day)
+    else:
+        return _refresh_trader_execution_daily_single(trader_uids_or_uid, day)
+
+
+def refresh_trader_history_analytics(trader_uids: list[str], lookback_days: int = 45) -> int:
+    """Refresh cached trader history analytics into trader_metadata."""
+    count = 0
+    metric_keys = (
+        "analysis_updated_at",
+        "history_sample_size",
+        "source_close_count",
+        "cycle_sample_size",
+        "copy_open_sample_size",
+        "copy_close_sample_size",
+        "median_source_margin",
+        "avg_source_margin",
+        "median_source_leverage",
+        "avg_hold_sec",
+        "median_hold_sec",
+        "reverse_rate",
+        "clip_rate",
+        "min_adjust_rate",
+        "small_order_skip_rate",
+        "fallback_market_rate",
+        "reconcile_close_rate",
+        "stability_score",
+        "execution_score",
+        "close_reliability_score",
+        "risk_score",
+        "total_score",
+        "behavior_score",
+        "preferred_platform",
+    )
+
+    with _db_write_lock:
+        with get_conn() as conn:
+            for trader_uid in trader_uids:
+                try:
+                    snapshot = _collect_trader_analysis(conn, trader_uid, lookback_days=lookback_days)
+                    has_samples = any(
+                        _safe_float(snapshot.get(key), 0.0) > 0
+                        for key in ("history_sample_size", "cycle_sample_size", "copy_open_sample_size", "copy_close_sample_size")
+                    )
+                    if not has_samples:
+                        continue
+                    for key in metric_keys:
+                        _upsert_trader_metadata_value(conn, trader_uid, key, snapshot.get(key))
+                    count += 1
+                except Exception as exc:
+                    logger.error("刷新 trader=%s 历史分析失败: %s", trader_uid[:12], exc)
+            conn.commit()
+
+    return count
+
+
+def _refresh_trader_research_scores_legacy(trader_uids: list[str]) -> int:
+    """
+    批量刷新交易员的研究评分（基于周期和执行数据）。
+    返回：成功刷新的交易员数量。
+    """
+    now_ms = int(time.time() * 1000)
+    count = 0
+    
+    with _db_write_lock:
+        with get_conn() as conn:
+            for trader_uid in trader_uids:
+                try:
+                    # 聚合周期数据
+                    snapshot = _collect_trader_analysis(conn, trader_uid, lookback_days=45)
+                    has_samples = any(
+                        _safe_float(snapshot.get(key), 0.0) > 0
+                        for key in ("history_sample_size", "cycle_sample_size", "copy_open_sample_size", "copy_close_sample_size")
+                    )
+                    if not has_samples:
+                        continue
+                    
+                    stability_score = _safe_float(snapshot.get("stability_score"), 0.0)
+                    execution_score = _safe_float(snapshot.get("execution_score"), 0.0)
+                    risk_score = _safe_float(snapshot.get("risk_score"), 0.0)
+                    total_score = _safe_float(snapshot.get("total_score"), 0.0)
+                    
+                    # 聚合执行数据（最近7天）
+                    close_reliability_score = _safe_float(snapshot.get("close_reliability_score"), 0.0)
+                    if False:
+                        exec_stats = conn.execute("""
+                        SELECT
+                            platform,
+                            SUM(filled_orders) as filled,
+                            SUM(total_orders) as total
+                        FROM trader_execution_daily
+                        WHERE trader_uid = ? AND day >= ?
+                        GROUP BY platform
+                        ORDER BY filled DESC
+                    """, (trader_uid, cutoff_day)).fetchall()
+                    
+                    preferred_platform = "bitget"
+                    execution_score = 0.0
+                    close_reliability_score = 0.0
+                    
+                    if exec_stats:
+                        top = exec_stats[0]
+                        preferred_platform = top["platform"] or "bitget"
+                        filled = top["filled"] or 0
+                        total = top["total"] or 1
+                        execution_score = (filled / total * 100) if total > 0 else 0.0
+                        
+                        # 平仓完成率（假设 close 动作都成功了）
+                        close_count = conn.execute("""
+                            SELECT COUNT(*) as cnt FROM copy_orders
+                            WHERE trader_uid = ? AND action = 'close' AND status = 'filled'
+                              AND timestamp >= ?
+                        """, (trader_uid, now_ms - 7*86400_000)).fetchone()["cnt"]
+                        
+                        close_reliability_score = min(100.0, (close_count / max(1, len(closed_cycles))) * 100)
+                    
+                    risk_score = 100.0 - min(100.0, abs(stability_score - 50.0))
+                    total_score = (stability_score * 0.4 + execution_score * 0.3 + 
+                                   close_reliability_score * 0.2 + risk_score * 0.1)
+                    
+                    conn.execute("""
+                        INSERT INTO trader_research_scores
+                            (trader_uid, stability_score, execution_score, risk_score,
+                             total_score, rank, updated_at)
+                        VALUES (?, ?, ?, ?, ?, 0, ?)
+                        ON CONFLICT(trader_uid) DO UPDATE SET
+                            stability_score = excluded.stability_score,
+                            execution_score = excluded.execution_score,
+                            risk_score = excluded.risk_score,
+                            total_score = excluded.total_score,
+                            updated_at = excluded.updated_at
+                    """, (trader_uid, stability_score, execution_score, risk_score, total_score, now_ms))
+                    
+                    # 额外存储 preferred_platform（扩展字段）
+                    conn.execute("""
+                        UPDATE trader_research_scores
+                        SET rank = (SELECT COUNT(*) FROM trader_research_scores t2 WHERE t2.total_score > trader_research_scores.total_score) + 1
+                        WHERE trader_uid = ?
+                    """, (trader_uid,))
+                    
+                    # 将 preferred_platform 存入额外的元数据表（为简化，直接用 JSON 存）
+                    conn.execute("""
+                        INSERT OR REPLACE INTO trader_metadata (trader_uid, key, value)
+                        VALUES (?, 'preferred_platform', ?)
+                    """, (trader_uid, preferred_platform))
+                    conn.execute("""
+                        INSERT OR REPLACE INTO trader_metadata (trader_uid, key, value)
+                        VALUES (?, 'close_reliability_score', ?)
+                    """, (trader_uid, str(close_reliability_score)))
+                    
+                    count += 1
+                except Exception as e:
+                    logger.error("刷新 trader=%s 研究评分失败: %s", trader_uid[:12], e)
+            
+            conn.commit()
+    
+    return count
+
+
+def _get_trader_research_scores_legacy(trader_uid: str) -> list[dict]:
+    """获取交易员的研究评分（返回列表格式以兼容测试）"""
+    with get_conn() as conn:
+        # 确保 trader_metadata 表存在
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS trader_metadata (
+                trader_uid TEXT NOT NULL,
+                key TEXT NOT NULL,
+                value TEXT,
+                PRIMARY KEY (trader_uid, key)
+            )
+        """)
+        
+        row = conn.execute("""
+            SELECT * FROM trader_research_scores WHERE trader_uid = ?
+        """, (trader_uid,)).fetchone()
+        
+        if not row:
+            return []
+        
+        result = dict(row)
+        
+        # 获取 preferred_platform
+        preferred_meta = conn.execute("""
+            SELECT value FROM trader_metadata WHERE trader_uid = ? AND key = 'preferred_platform'
+        """, (trader_uid,)).fetchone()
+        reliability_meta = conn.execute("""
+            SELECT value FROM trader_metadata WHERE trader_uid = ? AND key = 'close_reliability_score'
+        """, (trader_uid,)).fetchone()
+        
+        result["preferred_platform"] = preferred_meta["value"] if preferred_meta else "bitget"
+        result["close_reliability_score"] = float(reliability_meta["value"]) if reliability_meta and reliability_meta["value"] not in (None, "") else 0.0
+        
+        return [result]
+
+# 兼容测试用例的别名
+refresh_trader_execution_daily = lambda uids, day=None: refresh_trader_execution_daily_batch(uids, day) if isinstance(uids, list) else refresh_trader_execution_daily(uids, day)
+
+
+def refresh_trader_execution_daily(trader_uids_or_uid, day: str | None = None):
+    """Refresh execution stats for either one trader or a trader list."""
+    if isinstance(trader_uids_or_uid, list):
+        return refresh_trader_execution_daily_batch(trader_uids_or_uid, day)
+    return _refresh_trader_execution_daily_single(trader_uids_or_uid, day)
+
+
+def refresh_trader_research_scores(trader_uids: list[str]) -> int:
+    """Refresh trader research scores from live history and execution analytics."""
+    now_ms = int(time.time() * 1000)
+    count = 0
+
+    with _db_write_lock:
+        with get_conn() as conn:
+            for trader_uid in trader_uids:
+                try:
+                    snapshot = _collect_trader_analysis(conn, trader_uid, lookback_days=45)
+                    has_samples = any(
+                        _safe_float(snapshot.get(key), 0.0) > 0
+                        for key in ("history_sample_size", "cycle_sample_size", "copy_open_sample_size", "copy_close_sample_size")
+                    )
+                    if not has_samples:
+                        continue
+
+                    stability_score = _safe_float(snapshot.get("stability_score"), 0.0)
+                    execution_score = _safe_float(snapshot.get("execution_score"), 0.0)
+                    risk_score = _safe_float(snapshot.get("risk_score"), 0.0)
+                    total_score = _safe_float(snapshot.get("total_score"), 0.0)
+
+                    conn.execute(
+                        """
+                        INSERT INTO trader_research_scores
+                            (trader_uid, stability_score, execution_score, risk_score,
+                             total_score, rank, updated_at)
+                        VALUES (?, ?, ?, ?, ?, 0, ?)
+                        ON CONFLICT(trader_uid) DO UPDATE SET
+                            stability_score = excluded.stability_score,
+                            execution_score = excluded.execution_score,
+                            risk_score = excluded.risk_score,
+                            total_score = excluded.total_score,
+                            updated_at = excluded.updated_at
+                        """,
+                        (trader_uid, stability_score, execution_score, risk_score, total_score, now_ms),
+                    )
+                    conn.execute(
+                        """
+                        UPDATE trader_research_scores
+                        SET rank = (
+                            SELECT COUNT(*) FROM trader_research_scores t2
+                            WHERE t2.total_score > trader_research_scores.total_score
+                        ) + 1
+                        WHERE trader_uid = ?
+                        """,
+                        (trader_uid,),
+                    )
+                    for key, value in snapshot.items():
+                        if key in {"trader_uid", "lookback_days"}:
+                            continue
+                        _upsert_trader_metadata_value(conn, trader_uid, key, value)
+                    count += 1
+                except Exception as exc:
+                    logger.error("刷新 trader=%s 研究评分失败: %s", trader_uid[:12], exc)
+            conn.commit()
+
+    return count
+
+
+def get_trader_research_scores(trader_uid: str) -> list[dict]:
+    """Return stored trader research score plus cached analytics metadata."""
+    with get_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT * FROM trader_research_scores WHERE trader_uid = ?
+            """,
+            (trader_uid,),
+        ).fetchone()
+        if not row:
+            return []
+
+        result = dict(row)
+        metadata_rows = conn.execute(
+            """
+            SELECT key, value FROM trader_metadata
+            WHERE trader_uid = ? AND key IN (
+                'preferred_platform',
+                'close_reliability_score',
+                'median_source_margin',
+                'avg_source_margin',
+                'median_source_leverage',
+                'avg_hold_sec',
+                'median_hold_sec',
+                'reverse_rate',
+                'clip_rate',
+                'min_adjust_rate',
+                'small_order_skip_rate',
+                'fallback_market_rate',
+                'reconcile_close_rate',
+                'behavior_score',
+                'history_sample_size',
+                'cycle_sample_size',
+                'copy_open_sample_size',
+                'copy_close_sample_size',
+                'analysis_updated_at'
+            )
+            """,
+            (trader_uid,),
+        ).fetchall()
+        metadata = {str(row["key"]): row["value"] for row in metadata_rows}
+
+        result["preferred_platform"] = metadata.get("preferred_platform", "bitget")
+        for key in (
+            "close_reliability_score",
+            "median_source_margin",
+            "avg_source_margin",
+            "median_source_leverage",
+            "avg_hold_sec",
+            "median_hold_sec",
+            "reverse_rate",
+            "clip_rate",
+            "min_adjust_rate",
+            "small_order_skip_rate",
+            "fallback_market_rate",
+            "reconcile_close_rate",
+            "behavior_score",
+        ):
+            result[key] = _safe_float(metadata.get(key), 0.0)
+        for key in (
+            "history_sample_size",
+            "cycle_sample_size",
+            "copy_open_sample_size",
+            "copy_close_sample_size",
+            "analysis_updated_at",
+        ):
+            result[key] = _safe_int(metadata.get(key), 0)
+        return [result]
+
+
+def get_trader_analysis_snapshot(trader_uid: str, lookback_days: int = 45) -> dict[str, Any]:
+    """Compute a fresh trader analysis snapshot from history and execution records."""
+    with get_conn() as conn:
+        return _collect_trader_analysis(conn, trader_uid, lookback_days=lookback_days)

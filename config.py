@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 鍏ㄥ眬閰嶇疆绠＄悊锛氫粠 .env 鍔犺浇鍑瘉鍜岃繍琛屽弬鏁?
 """
@@ -27,6 +27,14 @@ BINANCE_BASE_URL  = (os.getenv("BINANCE_BASE_URL", _default_binance_base_url) or
 if not BINANCE_BASE_URL:
     BINANCE_BASE_URL = _default_binance_base_url
 
+BINANCE_COPYTRADE_BASE = (os.getenv("BINANCE_COPYTRADE_BASE", "https://www.binance.com") or "https://www.binance.com").strip().rstrip("/")
+if not BINANCE_COPYTRADE_BASE:
+    BINANCE_COPYTRADE_BASE = "https://www.binance.com"
+BINANCE_COPYTRADE_USER_AGENT = (
+    os.getenv("BINANCE_COPYTRADE_USER_AGENT")
+    or "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+).strip()
+
 # 鈹€鈹€ 閲囬泦鍙傛暟 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 POLL_INTERVAL     = int(os.getenv("POLL_INTERVAL", "5"))   # 绉?
 HISTORY_DAYS      = 90                                      # 鍒濆鍖栨椂鎷夊彇鍘嗗彶澶╂暟
@@ -45,7 +53,7 @@ TRACKED_TRADERS: list[str] = []
 # 鈹€鈹€ 纭€х瓫閫夐棬妲涳紙6椤癸紝鍏ㄩ儴鐢ㄤ簬 PASS/WATCH/FAIL 璇勭骇锛夆攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 # 澶忔櫘銆丆almar銆佺泩浜忔瘮绛変粎灞曠ず锛屼笉鍋氱‖鎬ц繃婊?
 FILTER = {
-    "active_days":       7,    # 鈶?娲昏穬搴︼細鏈€杩?N 澶╁唴蹇呴』鏈変氦鏄?
+    "active_days":       3,    # 鈶?娲昏穬搴︼細鏈€杩?N 澶╁唴蹇呴』鏈変氦鏄?
     "max_drawdown":      0.25, # 鈶?鏈€澶у洖鎾?< 25%
     "min_expected_value": 0.0, # 鈶?鏈熸湜鍊?> 0锛堥暱鏈熺泩鍒╋級
     "min_trade_count":   30,   # 鈶?鎬荤瑪鏁?>= 30锛堟牱鏈彲淇★級
@@ -55,7 +63,7 @@ FILTER = {
 # 鈹€鈹€ 璺熷崟鍙傛暟琛ヤ竵 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 # 榛樿浠峰樊瀹瑰繊搴︼細0.005 (0.5%)銆?
 # 璋冮珮姝ゅ€煎彲浠ユ洿杞绘澗鍦板宸叉湁浠撲綅杩涜鈥滆ˉ绁ㄤ笂杞︹€濓紝浣嗚繃楂樺彲鑳藉鑷村湪鏋佺琛屾儏涓嬫帴鐩樸€?
-DEFAULT_PRICE_TOLERANCE = 0.005
+DEFAULT_PRICE_TOLERANCE = 0.01
 
 # ?? ???????????????? 0.03 = 3%??????????????????????????????
 DEFAULT_DAILY_LOSS_LIMIT_PCT = float(os.getenv("DEFAULT_DAILY_LOSS_LIMIT_PCT", "0.03"))
@@ -78,6 +86,5 @@ if DEFAULT_ENTRY_ORDER_MODE not in {"market", "maker_limit"}:
 DEFAULT_ENTRY_MAKER_LEVELS = max(0, int(os.getenv("DEFAULT_ENTRY_MAKER_LEVELS", "1")))
 DEFAULT_ENTRY_LIMIT_TIMEOUT_SEC = max(1, int(os.getenv("DEFAULT_ENTRY_LIMIT_TIMEOUT_SEC", "10")))
 DEFAULT_ENTRY_LIMIT_FALLBACK_TO_MARKET = os.getenv("DEFAULT_ENTRY_LIMIT_FALLBACK_TO_MARKET", "1") == "1"
-
 
 

@@ -1,171 +1,53 @@
-"""
-binance_scanner.py — 币安跟单排行榜自动扫描器
-
-通过 Playwright 浏览器自动化扫描排行榜，提取交易员 portfolio_id，
-然后调用 detail API 获取详细信息，最后按可调参数评分排序。
-"""
 from __future__ import annotations
 
-import json
 import logging
 import threading
 import time
-from typing import Any, Optional
+from typing import Optional
 
 import requests
-import binance_scraper
+import config
 
 logger = logging.getLogger(__name__)
 
-# ── 扫描状态管理 ──────────────────────────────────────────────────────────
+# Hard filters
+HARD_MIN_FOLLOWERS = 100
+HARD_MIN_DAYS = 90
+HARD_MIN_AUM = 50_000
+HARD_MIN_COPIER_PNL = 0
+HARD_MIN_AVG_HOLD_H = 4
 
-_scan_lock = threading.Lock()
-_scan_status: dict[str, Any] = {
+# Score weights
+SCORE_W_STABILITY = 25
+SCORE_W_DRAWDOWN = 25
+SCORE_W_COPIER_PNL = 15
+SCORE_W_FOLLOWERS = 10
+SCORE_W_ACTIVITY = 25
+
+# Selection buckets
+MAX_ELITE = 6
+CORE_COUNT = 2
+ENHANCE_COUNT = 2
+OBSERVE_COUNT = 2
+
+_SCAN_STATE: dict = {
     "running": False,
-    "phase": "",        # scanning / analyzing / done / error
+    "phase": "idle",
     "progress": "",
     "total_found": 0,
     "analyzed": 0,
+    "passed_round1": 0,
     "results": [],
-    "error": "",
-    "started_at": 0,
-    "finished_at": 0,
+    "error": None,
+    "started_at": None,
+    "finished_at": None,
 }
+_SCAN_LOCK = threading.Lock()
+_SCAN_THREAD: Optional[threading.Thread] = None
 
-
-def get_scan_status() -> dict:
-    with _scan_lock:
-        return dict(_scan_status)
-
-
-def _update_status(**kwargs):
-    with _scan_lock:
-        _scan_status.update(kwargs)
-
-
-# ── 浏览器扫描排行榜 ──────────────────────────────────────────────────────
-
-def _get_sync_playwright():
-    try:
-        from playwright.sync_api import sync_playwright
-    except ModuleNotFoundError as exc:
-        raise RuntimeError("未安装 Playwright，请先在项目环境执行 `pip install -r requirements.txt`") from exc
-    return sync_playwright
-
-
-def _launch_browser(playwright):
-    launch_attempts = [
-        ("bundled-chromium", {}),
-        ("msedge", {"channel": "msedge"}),
-        ("chrome", {"channel": "chrome"}),
-    ]
-    last_error = None
-    for label, extra_kwargs in launch_attempts:
-        try:
-            logger.info("scanner browser launch via %s", label)
-            return playwright.chromium.launch(headless=True, **extra_kwargs)
-        except Exception as exc:
-            last_error = exc
-            logger.warning("scanner browser launch failed via %s: %s", label, exc)
-    raise RuntimeError(
-        "无法启动 Playwright 浏览器，请确认已安装 Microsoft Edge/Chrome，或执行 `playwright install chromium`。最近错误：{}".format(last_error)
-    )
-
-
-def _scan_leaderboard_ids(max_scroll: int = 8) -> list[str]:
-    """
-    ? Playwright ????????????????????????? portfolio_id?
-    """
-    sync_playwright = _get_sync_playwright()
-
-    portfolio_ids = []
-
-    logger.info("?????????????")
-    _update_status(phase="scanning", progress="????????")
-
-    with sync_playwright() as p:
-        browser = None
-        context = None
-        try:
-            browser = _launch_browser(p)
-            context = browser.new_context(
-                user_agent=(
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/121.0.0.0 Safari/537.36"
-                ),
-                locale="zh-CN",
-            )
-            page = context.new_page()
-
-            _update_status(progress="??????????")
-            page.goto("https://www.binance.com/zh-CN/copy-trading", wait_until="domcontentloaded", timeout=30000)
-
-            time.sleep(5)
-            _update_status(progress="????????????????")
-
-            seen_ids = set()
-
-            for scroll_i in range(max_scroll):
-                links = page.evaluate("""() => {
-                    const results = [];
-                    document.querySelectorAll('a[href*="lead-details"]').forEach(a => {
-                        const match = a.href.match(/lead-details\\/(\\d+)/);
-                        if (match) results.push(match[1]);
-                    });
-                    document.querySelectorAll('[data-portfolio-id]').forEach(el => {
-                        results.push(el.getAttribute('data-portfolio-id'));
-                    });
-                    return [...new Set(results)];
-                }""")
-
-                for pid in links:
-                    if pid and pid not in seen_ids:
-                        seen_ids.add(pid)
-                        portfolio_ids.append(pid)
-
-                _update_status(
-                    progress=f"? {scroll_i + 1}/{max_scroll} ??????? {len(portfolio_ids)} ????",
-                    total_found=len(portfolio_ids),
-                )
-                logger.info("?? %d/%d???? %d ????", scroll_i + 1, max_scroll, len(portfolio_ids))
-
-                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                time.sleep(2)
-
-                try:
-                    load_more = page.query_selector('button:has-text("????"), button:has-text("????"), button:has-text("Load More")')
-                    if load_more:
-                        load_more.click()
-                        time.sleep(2)
-                except Exception:
-                    pass
-
-        except Exception as exc:
-            logger.error("???????: %s", exc, exc_info=True)
-            _update_status(error=f"????????{str(exc)[:200]}")
-        finally:
-            if context is not None:
-                try:
-                    context.close()
-                except Exception:
-                    pass
-            if browser is not None:
-                try:
-                    browser.close()
-                except Exception:
-                    pass
-
-    logger.info("??????????? %d ????", len(portfolio_ids))
-    return portfolio_ids
-
-
-# ── API 获取详情 ──────────────────────────────────────────────────────────
-
-_BN_BASE = "https://www.binance.com"
 _HEADERS = {
     "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/121.0.0.0 Safari/537.36"
     ),
@@ -174,290 +56,529 @@ _HEADERS = {
     "lang": "zh-CN",
 }
 
+_LEADERBOARD_PAGE_SIZE = 18
+_LEADERBOARD_ENDPOINT = (
+    "https://www.binance.com"
+    "/bapi/futures/v1/friendly/future/copy-trade/home-page/query-list"
+)
+_LEADERBOARD_DAILY_PICKS_ENDPOINT = (
+    "https://www.binance.com"
+    "/bapi/futures/v1/friendly/future/copy-trade/home-page/daily-picks"
+)
+_LEGACY_LEADERBOARD_ENDPOINT = (
+    "https://www.binance.com"
+    "/bapi/futures/v1/friendly/future/copy-trade/lead-portfolio/list"
+)
+_MS_PER_HOUR = 3600 * 1000
+_MS_PER_DAY = 24 * _MS_PER_HOUR
+_RECENT_ACTIVITY_PAGE_SIZE = 100
 
-def _safe_float(val, default=0.0) -> float:
+
+def _resolve_active_days(filters: dict | None = None) -> int:
+    filters = filters or {}
+    value = filters.get("active_days", config.FILTER.get("active_days", 7))
     try:
-        if isinstance(val, (int, float)):
-            return float(val)
-        if isinstance(val, str):
-            return float(val.replace("%", "").replace(",", "").strip())
-        return default
-    except (ValueError, TypeError):
-        return default
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return 7
 
 
-def fetch_trader_detail(portfolio_id: str) -> Optional[dict]:
-    """
-    调用已确认可用的 detail GET 接口，获取交易员详细信息。
-    返回标准化的字典。
-    """
-    try:
-        url = f"{_BN_BASE}/bapi/futures/v1/friendly/future/copy-trade/lead-portfolio/detail?portfolioId={portfolio_id}"
-        resp = requests.get(url, headers=_HEADERS, timeout=10)
-        resp.raise_for_status()
-        data = resp.json().get("data")
-        if not isinstance(data, dict):
-            return None
-        
-        # 提取标签
-        tags = []
-        for tag_item in (data.get("tagItemVos") or []):
-            tag_name = tag_item.get("tagName", "")
-            tag_label = tag_item.get("tagLangKeyMessage", tag_name)
-            tags.append({"name": tag_name, "label": tag_label})
-        
-        return {
-            "portfolio_id": portfolio_id,
-            "nickname": (data.get("nickname") or f"交易员_{portfolio_id[:8]}").strip(),
-            "avatar": data.get("avatarUrl") or "",
-            "status": data.get("status", ""),
-            "sharp_ratio": _safe_float(data.get("sharpRatio")),
-            "copier_pnl": _safe_float(data.get("copierPnl")),
-            "aum": _safe_float(data.get("aumAmount")),
-            "margin_balance": _safe_float(data.get("marginBalance")),
-            "current_copy_count": int(data.get("currentCopyCount") or 0),
-            "max_copy_count": int(data.get("maxCopyCount") or 0),
-            "total_copy_count": int(data.get("totalCopyCount") or 0),
-            "mock_copy_count": int(data.get("mockCopyCount") or 0),
-            "close_lead_count": int(data.get("closeLeadCount") or 0),
-            "profit_sharing_rate": _safe_float(data.get("profitSharingRate")),
-            "badge": data.get("badgeName") or "",
-            "tags": tags,
-            "description": (data.get("description") or "").strip()[:200],
-            "start_time": int(data.get("startTime") or 0),
-            "position_show": bool(data.get("positionShow")),
-        }
-    except Exception as exc:
-        logger.warning("获取交易员 %s 详情失败: %s", portfolio_id[:12], exc)
-        return None
+def _summarize_recent_activity(
+    records: list[dict],
+    *,
+    now_ms: int | None = None,
+    active_days: int = 7,
+) -> dict:
+    now_ms = int(now_ms or time.time() * 1000)
+    active_days = max(1, int(active_days))
+    active_window_start = now_ms - active_days * _MS_PER_DAY
+    day_1_start = now_ms - _MS_PER_DAY
+    day_7_start = now_ms - 7 * _MS_PER_DAY
 
+    order_times = sorted(
+        int(item.get("order_time") or 0)
+        for item in records
+        if int(item.get("order_time") or 0) > 0
+    )
+    last_trade_time = order_times[-1] if order_times else 0
+    recent_trade_count_24h = sum(1 for ts in order_times if ts >= day_1_start)
+    recent_trade_count_7d = sum(1 for ts in order_times if ts >= day_7_start)
+    recent_trade_count_window = sum(1 for ts in order_times if ts >= active_window_start)
+    is_recently_active = bool(last_trade_time and last_trade_time >= active_window_start)
+    last_trade_age_hours = ((now_ms - last_trade_time) / _MS_PER_HOUR) if last_trade_time else None
 
-def analyze_trader_orders(portfolio_id: str) -> dict:
-    """
-    分析交易员近7天的操作记录，统计胜率、盈亏比等。
-    """
-    try:
-        records = binance_scraper.fetch_operation_records(portfolio_id, page_size=50)
-    except Exception as e:
-        logger.warning("获取交易员 %s 操作记录失败: %s", portfolio_id[:12], e)
-        return {"win_rate": 0, "avg_pnl": 0, "total_trades": 0, "wins": 0, "losses": 0, "avg_rr_ratio": 0}
-    
-    # 只统计平仓单（有实际盈亏）
-    close_orders = [r for r in records if r["action"].startswith("close") and r.get("pnl", 0) != 0]
-    
-    if not close_orders:
-        return {"win_rate": 0, "avg_pnl": 0, "total_trades": 0, "wins": 0, "losses": 0, "avg_rr_ratio": 0}
-    
-    wins = [o for o in close_orders if o["pnl"] > 0]
-    losses = [o for o in close_orders if o["pnl"] < 0]
-    
-    win_rate = len(wins) / len(close_orders) * 100 if close_orders else 0
-    avg_pnl = sum(o["pnl"] for o in close_orders) / len(close_orders) if close_orders else 0
-    
-    avg_win = sum(o["pnl"] for o in wins) / len(wins) if wins else 0
-    avg_loss = abs(sum(o["pnl"] for o in losses) / len(losses)) if losses else 1
-    avg_rr_ratio = avg_win / avg_loss if avg_loss > 0 else 0
-    
+    recency_score = 0.0
+    if last_trade_time:
+        age_days = max(0.0, (now_ms - last_trade_time) / _MS_PER_DAY)
+        recency_score = max(0.0, 1.0 - min(age_days / active_days, 1.0))
+
+    window_target = max(1.0, float(active_days))
+    day_1_target = 2.0
+    window_count_score = min(1.0, recent_trade_count_window / window_target)
+    day_1_score = min(1.0, recent_trade_count_24h / day_1_target)
+    activity_ratio = recency_score * 0.55 + window_count_score * 0.30 + day_1_score * 0.15
+
     return {
-        "win_rate": round(win_rate, 1),
-        "avg_pnl": round(avg_pnl, 2),
-        "total_trades": len(close_orders),
-        "wins": len(wins),
-        "losses": len(losses),
-        "avg_rr_ratio": round(avg_rr_ratio, 2),
-        "total_pnl": round(sum(o["pnl"] for o in close_orders), 2),
+        "active_days_required": active_days,
+        "is_recently_active": is_recently_active,
+        "last_trade_time": last_trade_time or None,
+        "last_trade_age_hours": round(last_trade_age_hours, 1) if last_trade_age_hours is not None else None,
+        "recent_trade_count_24h": recent_trade_count_24h,
+        "recent_trade_count_7d": recent_trade_count_7d,
+        "recent_trade_count_window": recent_trade_count_window,
+        "activity_score_ratio": round(activity_ratio, 4),
+        "activity_score": round(activity_ratio * 100, 1),
     }
 
 
-# ── 评分排序 ──────────────────────────────────────────────────────────────
+def _load_recent_activity_snapshot(portfolio_id: str, filters: dict | None = None) -> dict:
+    import binance_scraper
 
-DEFAULT_FILTERS = {
-    "min_copier_pnl": 0,       # 跟单者收益 > 0
-    "min_followers": 10,       # 最低跟单人数
-    "min_sharp_ratio": 0,      # 最低夏普比率
-    "min_trades": 5,           # 最低交易次数
-    "min_win_rate": 0,         # 最低胜率
-    "sort_by": "copier_pnl",   # 排序方式
-    "max_results": 30,         # 最多返回结果数
-}
-
-
-def score_and_rank(candidates: list[dict], filters: dict = None) -> list[dict]:
-    """
-    对候选交易员进行评分和排序。
-    candidates 中每个 dict 包含 detail + order_stats 字段。
-    """
-    f = {**DEFAULT_FILTERS, **(filters or {})}
-    
-    results = []
-    for c in candidates:
-        # 应用门槛过滤
-        passed_filters = {}
-        passed_filters["copier_pnl"] = c.get("copier_pnl", 0) >= f["min_copier_pnl"]
-        passed_filters["followers"] = c.get("current_copy_count", 0) >= f["min_followers"]
-        passed_filters["sharp_ratio"] = c.get("sharp_ratio", 0) >= f["min_sharp_ratio"]
-        passed_filters["trades"] = c.get("total_trades_7d", 0) >= f["min_trades"]
-        passed_filters["win_rate"] = c.get("win_rate", 0) >= f["min_win_rate"]
-        
-        passed_count = sum(1 for v in passed_filters.values() if v)
-        all_passed = all(passed_filters.values())
-        
-        # 计算综合得分 (0-100)
-        score = 0
-        # 跟单者收益 (30分)
-        cpnl = c.get("copier_pnl", 0)
-        score += min(cpnl / 50000 * 30, 30) if cpnl > 0 else 0
-        # 夏普比率 (25分)
-        sr = c.get("sharp_ratio", 0)
-        score += min(sr / 3 * 25, 25) if sr > 0 else 0
-        # 胜率 (20分)
-        wr = c.get("win_rate", 0)
-        score += min((wr - 40) / 30 * 20, 20) if wr > 40 else 0
-        # 盈亏比 (15分)
-        rr = c.get("avg_rr_ratio", 0)
-        score += min(rr / 2 * 15, 15) if rr > 0 else 0
-        # 跟单人数 (10分)
-        fc = c.get("current_copy_count", 0)
-        score += min(fc / 200 * 10, 10) if fc > 0 else 0
-        
-        c["score"] = round(score, 1)
-        c["passed_filters"] = passed_filters
-        c["passed_count"] = passed_count
-        c["all_passed"] = all_passed
-        
-        results.append(c)
-    
-    # 排序
-    sort_key = f.get("sort_by", "copier_pnl")
-    if sort_key == "score":
-        results.sort(key=lambda x: x.get("score", 0), reverse=True)
-    elif sort_key == "copier_pnl":
-        results.sort(key=lambda x: x.get("copier_pnl", 0), reverse=True)
-    elif sort_key == "sharp_ratio":
-        results.sort(key=lambda x: x.get("sharp_ratio", 0), reverse=True)
-    elif sort_key == "win_rate":
-        results.sort(key=lambda x: x.get("win_rate", 0), reverse=True)
-    elif sort_key == "followers":
-        results.sort(key=lambda x: x.get("current_copy_count", 0), reverse=True)
-    elif sort_key == "aum":
-        results.sort(key=lambda x: x.get("aum", 0), reverse=True)
-    else:
-        results.sort(key=lambda x: x.get("score", 0), reverse=True)
-    
-    max_r = int(f.get("max_results", 30))
-    return results[:max_r]
+    active_days = _resolve_active_days(filters)
+    now_ms = int(time.time() * 1000)
+    lookback_days = max(active_days, 7)
+    records, error = binance_scraper.fetch_operation_records_with_status(
+        portfolio_id,
+        page_size=_RECENT_ACTIVITY_PAGE_SIZE,
+        start_ms=now_ms - lookback_days * _MS_PER_DAY,
+        end_ms=now_ms,
+    )
+    snapshot = _summarize_recent_activity(records, now_ms=now_ms, active_days=active_days)
+    snapshot["activity_fetch_error"] = error
+    snapshot["activity_verified"] = error is None
+    return snapshot
 
 
-# ── 主扫描流程 ──────────────────────────────────────────────────────────
-
-def start_scan(filters: dict = None, max_scroll: int = 8) -> None:
-    """
-    在后台线程启动扫描。
-    """
-    with _scan_lock:
-        if _scan_status["running"]:
-            return
-        _scan_status.update({
-            "running": True,
-            "phase": "scanning",
-            "progress": "初始化中…",
-            "total_found": 0,
-            "analyzed": 0,
-            "results": [],
-            "error": "",
-            "started_at": int(time.time()),
-            "finished_at": 0,
-        })
-    
-    t = threading.Thread(target=_run_scan, args=(filters or {}, max_scroll), daemon=True)
-    t.start()
-
-
-def _run_scan(filters: dict, max_scroll: int):
-    """后台执行完整扫描流程。"""
-    try:
-        # 第一步：浏览器扫描排行榜
-        portfolio_ids = _scan_leaderboard_ids(max_scroll=max_scroll)
-        
-        if not portfolio_ids:
-            _update_status(
-                running=False,
-                phase="error",
-                error="未能从排行榜中提取到任何交易员。可能是页面结构变化或网络问题。",
-                finished_at=int(time.time()),
-            )
-            return
-        
-        _update_status(
-            phase="analyzing",
-            total_found=len(portfolio_ids),
-            progress=f"共发现 {len(portfolio_ids)} 个交易员，开始逐个分析…",
-        )
-        
-        # 第二步：逐个获取详情 + 分析操作记录
-        candidates = []
-        for i, pid in enumerate(portfolio_ids):
-            _update_status(
-                analyzed=i,
-                progress=f"正在分析第 {i + 1}/{len(portfolio_ids)} 个交易员…",
-            )
-            
-            # 获取详情
-            detail = fetch_trader_detail(pid)
-            if not detail:
-                continue
-            
-            # 跳过非活跃的
-            if detail.get("status") != "ACTIVE":
-                continue
-            
-            # 分析操作记录
-            order_stats = analyze_trader_orders(pid)
-            
-            # 合并数据
-            trader = {
-                **detail,
-                "win_rate": order_stats.get("win_rate", 0),
-                "avg_pnl": order_stats.get("avg_pnl", 0),
-                "total_trades_7d": order_stats.get("total_trades", 0),
-                "wins_7d": order_stats.get("wins", 0),
-                "losses_7d": order_stats.get("losses", 0),
-                "avg_rr_ratio": order_stats.get("avg_rr_ratio", 0),
-                "total_pnl_7d": order_stats.get("total_pnl", 0),
-            }
-            candidates.append(trader)
-            
-            # 每分析完一批就限速（避免被封IP）
-            if (i + 1) % 5 == 0:
-                time.sleep(1)
-        
-        _update_status(
-            analyzed=len(portfolio_ids),
-            progress=f"分析完成，共 {len(candidates)} 个活跃交易员，正在评分排序…",
-        )
-        
-        # 第三步：评分排序
-        ranked = score_and_rank(candidates, filters)
-        
-        _update_status(
-            running=False,
-            phase="done",
-            progress=f"扫描完成！共分析 {len(portfolio_ids)} 人，{len(candidates)} 人活跃，推荐 {len(ranked)} 人",
-            results=ranked,
-            finished_at=int(time.time()),
-        )
-        logger.info("扫描完成：%d 发现 → %d 活跃 → %d 推荐", len(portfolio_ids), len(candidates), len(ranked))
-    
-    except Exception as exc:
-        logger.error("扫描流程异常: %s", exc, exc_info=True)
-        _update_status(
-            running=False,
-            phase="error",
-            error=f"扫描异常：{str(exc)[:300]}",
-            finished_at=int(time.time()),
-        )
+def get_scan_status() -> dict:
+    with _SCAN_LOCK:
+        return dict(_SCAN_STATE)
 
 
 def stop_scan():
-    """停止扫描（标记状态）"""
-    _update_status(running=False, phase="stopped", progress="用户手动停止")
+    with _SCAN_LOCK:
+        if _SCAN_STATE["running"]:
+            _SCAN_STATE["running"] = False
+            logger.info("精选扫描已停止")
+
+
+def start_scan(filters: dict, max_scroll: int = 5):
+    global _SCAN_THREAD
+    with _SCAN_LOCK:
+        if _SCAN_STATE["running"]:
+            return
+        _SCAN_STATE.update(
+            {
+                "running": True,
+                "phase": "scanning",
+                "progress": "启动精选扫描...",
+                "total_found": 0,
+                "analyzed": 0,
+                "passed_round1": 0,
+                "results": [],
+                "error": None,
+                "started_at": int(time.time() * 1000),
+                "finished_at": None,
+            }
+        )
+    _SCAN_THREAD = threading.Thread(
+        target=_scan_worker,
+        args=(filters, max_scroll),
+        daemon=True,
+    )
+    _SCAN_THREAD.start()
+    logger.info("精选扫描线程已启动")
+
+
+def _scan_worker(filters: dict, max_scroll: int):
+    try:
+        _update_state(phase="scanning", progress="正在加载币安排行榜...")
+        raw = _fetch_leaderboard(max_scroll, filters=filters)
+
+        if not _SCAN_STATE["running"]:
+            return
+
+        _update_state(
+            total_found=len(raw),
+            progress=f"排行榜共 {len(raw)} 人，开始第一轮硬性筛选...",
+        )
+
+        round1 = _hard_filter(raw, filters)
+        _update_state(
+            passed_round1=len(round1),
+            progress=f"第一轮通过 {len(round1)} 人，开始深度分析...",
+        )
+
+        if not round1 or not _SCAN_STATE["running"]:
+            _finish(round1[:MAX_ELITE])
+            return
+
+        _update_state(phase="analyzing")
+        scored = _score_with_details(round1, filters=filters)
+
+        if not _SCAN_STATE["running"]:
+            return
+
+        elite = _assign_tiers(scored)
+        _finish(elite)
+
+    except Exception as exc:
+        logger.error("精选扫描失败: %s", exc, exc_info=True)
+        with _SCAN_LOCK:
+            _SCAN_STATE.update(
+                {
+                    "running": False,
+                    "phase": "error",
+                    "error": str(exc)[:300],
+                    "finished_at": int(time.time() * 1000),
+                }
+            )
+
+
+def _hard_filter(candidates: list[dict], filters: dict) -> list[dict]:
+    min_followers = int(filters.get("min_followers", HARD_MIN_FOLLOWERS))
+    min_pnl = float(filters.get("min_copier_pnl", HARD_MIN_COPIER_PNL))
+    min_aum = float(filters.get("min_aum", HARD_MIN_AUM))
+    min_win_rate = float(filters.get("min_win_rate", 0))
+    min_trades = int(filters.get("min_trades", 0))
+
+    passed = []
+    for trader in candidates:
+        if trader.get("copier_pnl", 0) < min_pnl:
+            continue
+        if trader.get("follower_count", 0) < min_followers:
+            continue
+        if trader.get("aum", 0) < min_aum:
+            continue
+        if trader.get("win_rate", 0) < min_win_rate:
+            continue
+        if trader.get("total_trades", 0) and trader["total_trades"] < min_trades:
+            continue
+        days = trader.get("copy_days", 0)
+        if days and days < HARD_MIN_DAYS:
+            continue
+        passed.append(trader)
+
+    logger.info("第一轮筛选：%d -> %d", len(candidates), len(passed))
+    return passed
+
+
+def _score_with_details(candidates: list[dict], filters: dict | None = None) -> list[dict]:
+    import binance_scraper
+
+    filters = filters or {}
+    min_win_rate = float(filters.get("min_win_rate", 0))
+    min_trades = int(filters.get("min_trades", 0))
+    active_days = _resolve_active_days(filters)
+
+    scored = []
+    total = len(candidates)
+
+    for idx, trader in enumerate(candidates):
+        if not _SCAN_STATE["running"]:
+            break
+
+        pid = trader["portfolio_id"]
+        _update_state(
+            analyzed=idx + 1,
+            progress=f"深度分析 {idx + 1}/{total}: {trader['nickname']}",
+        )
+
+        try:
+            detail = binance_scraper.fetch_trader_info(pid)
+            trader.update(
+                {
+                    "copy_days": int(detail.get("copy_trade_days") or trader.get("copy_days") or 0),
+                    "total_trades": int(detail.get("total_trades") or trader.get("total_trades") or 0),
+                    "margin_balance": float(detail.get("margin_balance") or 0),
+                    "aum": float(detail.get("aum") or trader.get("aum") or 0),
+                    "follower_count": int(detail.get("follower_count") or trader.get("follower_count") or 0),
+                    "copier_pnl": float(detail.get("copier_pnl") or trader.get("copier_pnl") or 0),
+                    "win_rate": float(detail.get("win_rate") or trader.get("win_rate") or 0),
+                }
+            )
+        except Exception as exc:
+            logger.debug("拉取 %s 详情失败，继续使用列表数据: %s", pid[:12], exc)
+
+        activity = _load_recent_activity_snapshot(pid, filters=filters)
+        trader.update(activity)
+        if activity.get("activity_fetch_error"):
+            logger.warning("skip trader=%s activity unavailable: %s", pid[:12], activity["activity_fetch_error"])
+            continue
+        if not activity.get("is_recently_active"):
+            logger.info("skip trader=%s inactive for %d days", pid[:12], active_days)
+            continue
+
+        if trader.get("copy_days", 0) and trader["copy_days"] < HARD_MIN_DAYS:
+            continue
+        if trader.get("total_trades", 0) < max(min_trades, 20):
+            continue
+        if trader.get("win_rate", 0) < min_win_rate:
+            continue
+
+        trader["score"] = _calculate_score(trader)
+        scored.append(trader)
+        time.sleep(0.5)
+
+    scored.sort(key=lambda item: item["score"], reverse=True)
+    logger.info("第二轮评分完成，共 %d 人进入排序", len(scored))
+    return scored
+
+
+def _calculate_score(trader: dict) -> float:
+    score = 0.0
+
+    copy_days = max(int(trader.get("copy_days") or 0), 1)
+    total_trades = int(trader.get("total_trades") or 0)
+    daily_freq = total_trades / copy_days if copy_days > 0 else 0
+
+    days_score = min(1.0, copy_days / 365)
+    freq_score = max(0.0, 1.0 - abs(daily_freq - 4) / 6)
+    score += SCORE_W_STABILITY * (days_score * 0.6 + freq_score * 0.4)
+
+    aum = max(float(trader.get("aum") or 0), 1.0)
+    copier_pnl = float(trader.get("copier_pnl") or 0)
+    efficiency = copier_pnl / aum
+    drawdown_score = min(1.0, max(0.0, efficiency / 0.5))
+    score += SCORE_W_DRAWDOWN * drawdown_score
+
+    pnl_score = min(1.0, copier_pnl / 500_000)
+    score += SCORE_W_COPIER_PNL * pnl_score
+
+    followers = int(trader.get("follower_count") or 0)
+    follow_score = min(1.0, followers / 300)
+    score += SCORE_W_FOLLOWERS * follow_score
+
+    activity_score = float(trader.get("activity_score_ratio") or 0.0)
+    score += SCORE_W_ACTIVITY * activity_score
+
+    return round(score, 2)
+
+
+def _assign_tiers(scored: list[dict]) -> list[dict]:
+    elite = scored[:MAX_ELITE]
+
+    tier_map = {}
+    for index, trader in enumerate(elite):
+        if index < CORE_COUNT:
+            tier_map[trader["portfolio_id"]] = ("core", "核心", 0.30)
+        elif index < CORE_COUNT + ENHANCE_COUNT:
+            tier_map[trader["portfolio_id"]] = ("enhance", "增强", 0.15)
+        else:
+            tier_map[trader["portfolio_id"]] = ("observe", "观察", 0.05)
+
+    for trader in elite:
+        tier_key, tier_label, follow_ratio = tier_map[trader["portfolio_id"]]
+        trader["tier"] = tier_key
+        trader["tier_label"] = tier_label
+        trader["follow_ratio"] = follow_ratio
+
+    logger.info(
+        "精选完成：%s",
+        " | ".join(f"{item['nickname']}({item['tier_label']})" for item in elite),
+    )
+    return elite
+
+
+def _safe_float(value, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_int(value, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _normalize_leaderboard_item(item: dict) -> dict | None:
+    pid = str(item.get("leadPortfolioId") or item.get("portfolioId") or "").strip()
+    if not pid:
+        return None
+
+    return {
+        "portfolio_id": pid,
+        "nickname": (item.get("nickname") or f"交易员_{pid[:8]}").strip(),
+        "copier_pnl": _safe_float(item.get("pnl", item.get("copierPnl"))),
+        "follower_count": _safe_int(item.get("currentCopyCount", item.get("followerCount"))),
+        "aum": _safe_float(item.get("aum", item.get("aumAmount"))),
+        "win_rate": _safe_float(item.get("winRate")),
+        "roi": _safe_float(item.get("roi")),
+        "copy_days": _safe_int(item.get("copyTradingDays", item.get("copyDays"))),
+        "total_trades": _safe_int(item.get("closeLeadCount", item.get("totalTrades"))),
+        "avatar": item.get("avatarUrl") or "",
+        "sharp_ratio": _safe_float(item.get("sharpRatio")),
+        "max_copy_count": _safe_int(item.get("maxCopyCount")),
+    }
+
+
+def _build_query_list_payload(page: int, filters: dict | None = None) -> dict:
+    filters = filters or {}
+    sort_by = str(filters.get("sort_by") or "").strip().lower()
+    data_type = "PNL"
+    if sort_by in {"roi", "return", "yield"}:
+        data_type = "ROI"
+    elif sort_by in {"win_rate", "winrate"}:
+        data_type = "WIN_RATE"
+
+    return {
+        "pageNumber": page,
+        "pageSize": _LEADERBOARD_PAGE_SIZE,
+        "timeRange": "30D",
+        "dataType": data_type,
+        "favoriteOnly": False,
+        "hideFull": False,
+        "nickname": "",
+        "order": "DESC",
+        "userAsset": 0,
+        "portfolioType": "ALL",
+        "useAiRecommended": True,
+    }
+
+
+def _extract_query_list_items(data: dict) -> list[dict]:
+    if data.get("code") != "000000":
+        logger.warning(
+            "新排行榜接口返回异常: code=%s msg=%s",
+            data.get("code"),
+            data.get("message") or data.get("msg"),
+        )
+        return []
+    return list(((data.get("data") or {}).get("list") or []))
+
+
+def _fetch_query_list_page(page: int, filters: dict | None = None) -> list[dict]:
+    resp = requests.post(
+        _LEADERBOARD_ENDPOINT,
+        json=_build_query_list_payload(page, filters=filters),
+        headers=_HEADERS,
+        timeout=12,
+    )
+    resp.raise_for_status()
+    return _extract_query_list_items(resp.json())
+
+
+def _fetch_legacy_list_page(page: int) -> list[dict]:
+    resp = requests.post(
+        _LEGACY_LEADERBOARD_ENDPOINT,
+        json={
+            "pageSize": _LEADERBOARD_PAGE_SIZE,
+            "pageNumber": page,
+            "sortBy": "copierPnl",
+            "sortType": "desc",
+        },
+        headers=_HEADERS,
+        timeout=12,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if data.get("code") != "000000":
+        logger.warning(
+            "旧排行榜接口返回异常: code=%s msg=%s",
+            data.get("code"),
+            data.get("message") or data.get("msg"),
+        )
+        return []
+    return list(((data.get("data") or {}).get("data") or []))
+
+
+def _fetch_daily_picks() -> list[dict]:
+    resp = requests.get(
+        _LEADERBOARD_DAILY_PICKS_ENDPOINT,
+        headers=_HEADERS,
+        timeout=12,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if data.get("code") != "000000":
+        logger.warning(
+            "每日推荐接口返回异常: code=%s msg=%s",
+            data.get("code"),
+            data.get("message") or data.get("msg"),
+        )
+        return []
+    return list(((data.get("data") or {}).get("list") or []))
+
+
+def _dedupe_candidates(candidates: list[dict]) -> list[dict]:
+    seen: set[str] = set()
+    result: list[dict] = []
+    for item in candidates:
+        pid = str(item.get("portfolio_id") or "").strip()
+        if not pid or pid in seen:
+            continue
+        seen.add(pid)
+        result.append(item)
+    return result
+
+
+def _fetch_leaderboard(max_scroll: int, filters: dict | None = None) -> list[dict]:
+    candidates: list[dict] = []
+    page = 1
+
+    while page <= max_scroll and _SCAN_STATE["running"]:
+        _update_state(progress=f"加载排行榜第 {page}/{max_scroll} 页...")
+        try:
+            items = _fetch_query_list_page(page, filters=filters)
+        except Exception as exc:
+            logger.warning("新排行榜接口第 %d 页失败，尝试旧接口: %s", page, exc)
+            try:
+                items = _fetch_legacy_list_page(page)
+            except Exception as legacy_exc:
+                logger.error("排行榜第 %d 页抓取失败: %s", page, legacy_exc)
+                break
+
+        if not items:
+            break
+
+        page_candidates = []
+        for item in items:
+            normalized = _normalize_leaderboard_item(item)
+            if normalized:
+                page_candidates.append(normalized)
+
+        if not page_candidates:
+            break
+
+        candidates.extend(page_candidates)
+        logger.debug("排行榜第 %d 页：%d 人", page, len(page_candidates))
+        page += 1
+        time.sleep(1)
+
+    candidates = _dedupe_candidates(candidates)
+    if not candidates:
+        try:
+            candidates = _dedupe_candidates(
+                [
+                    normalized
+                    for normalized in (_normalize_leaderboard_item(item) for item in _fetch_daily_picks())
+                    if normalized
+                ]
+            )
+            if candidates:
+                logger.info("排行榜主接口为空，已退回每日推荐数据: %d 人", len(candidates))
+        except Exception as exc:
+            logger.warning("每日推荐接口也失败: %s", exc)
+
+    logger.info("排行榜采集完成：共 %d 人", len(candidates))
+    return candidates
+
+
+def _update_state(**kwargs):
+    with _SCAN_LOCK:
+        _SCAN_STATE.update(kwargs)
+
+
+def _finish(results: list[dict]):
+    with _SCAN_LOCK:
+        _SCAN_STATE.update(
+            {
+                "running": False,
+                "phase": "done",
+                "results": results,
+                "finished_at": int(time.time() * 1000),
+                "progress": f"精选完成，推荐 {len(results)} 位交易员",
+            }
+        )

@@ -28,6 +28,9 @@ _RUNTIME = threading.local()
 _RUNTIME_SENTINEL = object()
 _API_MODE_LOCK = threading.Lock()
 _API_MODE_BY_KEY: dict[str, str] = {}
+_POSITION_MODE_LOCK = threading.Lock()
+_POSITION_MODE_BY_KEY: dict[str, tuple[str, float]] = {}
+_POSITION_MODE_TTL_SEC = 15.0
 
 # ?????????????????????? (???????
 _SYMBOL_FILTERS: dict[str, dict] = {}
@@ -92,6 +95,50 @@ def _set_preferred_api_mode(api_key: str, mode: str | None, base_url: str | None
             _API_MODE_BY_KEY[cache_key] = str(mode)
         else:
             _API_MODE_BY_KEY.pop(cache_key, None)
+
+
+def _normalize_position_mode(value: Any) -> str:
+    if isinstance(value, bool):
+        return "hedge" if value else "oneway"
+    raw = str(value or "").strip().lower()
+    if raw in {"true", "1", "hedge", "hedge_mode", "dual", "dual_side", "dual-side", "dualside"}:
+        return "hedge"
+    if raw in {"false", "0", "oneway", "one-way", "one_way", "single", "single_side", "single-side"}:
+        return "oneway"
+    return ""
+
+
+def _get_cached_position_mode(api_key: str, base_url: str | None = None) -> str | None:
+    cache_key = _api_mode_cache_key(api_key, base_url)
+    now = time.time()
+    with _POSITION_MODE_LOCK:
+        cached = _POSITION_MODE_BY_KEY.get(cache_key)
+        if not cached:
+            return None
+        mode, cached_at = cached
+        if (now - cached_at) <= _POSITION_MODE_TTL_SEC:
+            return mode
+        _POSITION_MODE_BY_KEY.pop(cache_key, None)
+    return None
+
+
+def _set_cached_position_mode(api_key: str, mode: str | None, base_url: str | None = None) -> None:
+    if not api_key:
+        return
+    cache_key = _api_mode_cache_key(api_key, base_url)
+    with _POSITION_MODE_LOCK:
+        if mode in {"hedge", "oneway"}:
+            _POSITION_MODE_BY_KEY[cache_key] = (str(mode), time.time())
+        else:
+            _POSITION_MODE_BY_KEY.pop(cache_key, None)
+
+
+def _clear_cached_position_mode(api_key: str, base_url: str | None = None) -> None:
+    if not api_key:
+        return
+    cache_key = _api_mode_cache_key(api_key, base_url)
+    with _POSITION_MODE_LOCK:
+        _POSITION_MODE_BY_KEY.pop(cache_key, None)
 
 
 def _is_auth_or_permission_error(exc: Exception) -> bool:
@@ -348,13 +395,59 @@ def _request_with_pm_fallback(
         raise fallback_error or exc
 
 
+def _extract_position_mode(data: Any) -> str:
+    if isinstance(data, dict):
+        for key in ("dualSidePosition", "dualSide", "positionMode", "mode"):
+            mode = _normalize_position_mode(data.get(key))
+            if mode:
+                return mode
+    return _normalize_position_mode(data)
+
+
+def get_position_mode(api_key: str, api_secret: str, force_refresh: bool = False) -> dict:
+    """Return the account's current Binance position mode."""
+    if not force_refresh:
+        cached = _get_cached_position_mode(api_key)
+        if cached:
+            return {
+                "mode": cached,
+                "dualSidePosition": cached == "hedge",
+                "_cached": True,
+            }
+
+    data = _request_with_pm_fallback(
+        api_key,
+        api_secret,
+        "GET",
+        "/fapi/v1/positionSide/dual",
+        pm_endpoints=("/papi/v1/um/positionSide/dual", "/papi/v1/cm/positionSide/dual"),
+        max_retries=1,
+    )
+    mode = _extract_position_mode(data)
+    if not mode:
+        raise ValueError(f"unable to determine Binance position mode: {data}")
+
+    _set_cached_position_mode(api_key, mode)
+    result = dict(data) if isinstance(data, dict) else {}
+    result["mode"] = mode
+    result["dualSidePosition"] = (mode == "hedge")
+    return result
+
+
 def set_position_mode(api_key: str, api_secret: str, dual_side: bool = True) -> dict:
-    """设置双向持仓（Hedge Mode）"""
-    return _request_with_pm_fallback(
+    """Set Binance position mode explicitly."""
+    result = _request_with_pm_fallback(
         api_key, api_secret, "POST", "/fapi/v1/positionSide/dual",
         params={"dualSidePosition": "true" if dual_side else "false"},
         pm_endpoints=("/papi/v1/um/positionSide/dual", "/papi/v1/cm/positionSide/dual")
     )
+    mode = "hedge" if dual_side else "oneway"
+    _set_cached_position_mode(api_key, mode)
+    if isinstance(result, dict):
+        result["mode"] = mode
+        result["dualSidePosition"] = dual_side
+        return result
+    return {"msg": str(result), "mode": mode, "dualSidePosition": dual_side}
 
 
 def set_symbol_leverage(api_key: str, api_secret: str, symbol: str, leverage: int) -> dict:
@@ -516,10 +609,11 @@ def get_account_balance(api_key: str, api_secret: str) -> dict:
         balance = _pick(
             acct,
             (
+                "actualEquity",
+                "accountEquity",
                 "totalMarginBalance",
                 "totalWalletBalance",
                 "totalCrossWalletBalance",
-                "accountEquity",
                 "uniMMRBalance",
                 "marginBalance",
                 "balance",
@@ -534,6 +628,22 @@ def get_account_balance(api_key: str, api_secret: str) -> dict:
         out["availableBalance"] = available
         out["_endpoint"] = endpoint
         return out
+
+    def _has_account_totals(acct: dict[str, Any]) -> bool:
+        return any(
+            acct.get(key) is not None
+            for key in (
+                "actualEquity",
+                "accountEquity",
+                "totalMarginBalance",
+                "totalWalletBalance",
+                "totalCrossWalletBalance",
+                "totalAvailableBalance",
+                "virtualMaxWithdrawAmount",
+                "accountInitialMargin",
+                "uniMMR",
+            )
+        )
 
     preferred_mode = _get_preferred_api_mode(api_key)
     fapi_probes: list[tuple[str, str | None]] = [
@@ -570,24 +680,35 @@ def get_account_balance(api_key: str, api_secret: str) -> dict:
                 if isinstance(assets, list):
                     parsed = _from_rows([r for r in assets if isinstance(r, dict)], endpoint)
                     if parsed:
-                        merged = dict(data)
-                        merged.update(parsed)
+                        if _has_account_totals(data):
+                            merged = _from_account(data, endpoint)
+                            for key, value in parsed.items():
+                                if key in {"balance", "availableBalance", "_endpoint"}:
+                                    continue
+                                if key == "asset" and merged.get("asset"):
+                                    continue
+                                merged[key] = value
+                            if not merged.get("asset") and parsed.get("asset"):
+                                merged["asset"] = parsed.get("asset")
+                        else:
+                            merged = parsed
                         candidates.append(merged)
                         continue
                 candidates.append(_from_account(data, endpoint))
         return candidates, first_error
 
-    def _candidate_sort_key(candidate: dict[str, Any]) -> tuple[int, int, float, float]:
+    def _candidate_sort_key(candidate: dict[str, Any]) -> tuple[int, int, float, int, float]:
         endpoint = str(candidate.get("_endpoint") or "")
         available = float(candidate.get("availableBalance") or 0.0)
         balance = float(candidate.get("balance") or 0.0)
+        has_account_totals = 1 if _has_account_totals(candidate) else 0
         if endpoint.endswith("/account"):
             endpoint_priority = 2
         elif "account" in endpoint:
             endpoint_priority = 1
         else:
             endpoint_priority = 0
-        return (1 if available > 0 else 0, endpoint_priority, balance, available)
+        return (has_account_totals, endpoint_priority, balance, 1 if available > 0 else 0, available)
 
     probe_groups: list[tuple[str, list[tuple[str, str | None]]]] = []
     if preferred_mode == "pm":
@@ -699,7 +820,7 @@ def get_book_ticker(symbol: str) -> dict:
 
 
 def get_symbol_filters(symbol: str) -> dict:
-    """???????????????"""
+    """Fetch exchange filters for a Binance symbol."""
     symbol = _clean_symbol(symbol)
     base_url = _resolve_base_url()
     cache_key = f"{base_url}:{symbol}"
@@ -793,6 +914,118 @@ def get_min_order_requirements(symbol: str, leverage: int, price: float) -> dict
     }
 
 
+def _direction_to_open_side(direction: str) -> tuple[str, str]:
+    direction_key = str(direction or "").strip().lower()
+    if direction_key not in {"long", "short"}:
+        raise ValueError(f"invalid direction: {direction}")
+    position_side = "LONG" if direction_key == "long" else "SHORT"
+    side = "BUY" if direction_key == "long" else "SELL"
+    return side, position_side
+
+
+def _direction_to_close_side(direction: str) -> tuple[str, str]:
+    direction_key = str(direction or "").strip().lower()
+    if direction_key not in {"long", "short"}:
+        raise ValueError(f"invalid direction: {direction}")
+    position_side = "LONG" if direction_key == "long" else "SHORT"
+    side = "SELL" if direction_key == "long" else "BUY"
+    return side, position_side
+
+
+def _build_open_order_payload(
+    symbol: str,
+    direction: str,
+    qty_str: str,
+    position_mode: str,
+    *,
+    order_type: str,
+    client_oid: str = "",
+    price: str | None = None,
+    time_in_force: str | None = None,
+) -> dict[str, Any]:
+    side, position_side = _direction_to_open_side(direction)
+    payload: dict[str, Any] = {
+        "symbol": symbol,
+        "side": side,
+        "type": order_type,
+        "quantity": qty_str,
+    }
+    if position_mode == "hedge":
+        payload["positionSide"] = position_side
+    if order_type == "LIMIT":
+        payload["timeInForce"] = time_in_force or "GTC"
+        payload["price"] = price
+    if client_oid:
+        payload["newClientOrderId"] = client_oid
+    return payload
+
+
+def _build_close_order_payload(symbol: str, direction: str, qty_str: str, position_mode: str) -> dict[str, Any]:
+    side, position_side = _direction_to_close_side(direction)
+    payload: dict[str, Any] = {
+        "symbol": symbol,
+        "side": side,
+        "type": "MARKET",
+        "quantity": qty_str,
+    }
+    if position_mode == "hedge":
+        payload["positionSide"] = position_side
+    else:
+        payload["reduceOnly"] = "true"
+    return payload
+
+
+def _submit_order_with_position_mode(
+    api_key: str,
+    api_secret: str,
+    symbol: str,
+    payload_factory,
+) -> dict:
+    pm_endpoints = _resolve_pm_symbol_endpoints(symbol, "/papi/v1/um/order", "/papi/v1/cm/order")
+    mode_info = get_position_mode(api_key, api_secret)
+    position_mode = str(mode_info.get("mode") or "")
+    payload = payload_factory(position_mode)
+    try:
+        result = _request_with_pm_fallback(
+            api_key,
+            api_secret,
+            "POST",
+            "/fapi/v1/order",
+            params=payload,
+            pm_endpoints=pm_endpoints,
+        )
+        if isinstance(result, dict):
+            result["_position_mode"] = position_mode
+        return result
+    except Exception as exc:
+        if "code=-4061" not in str(exc):
+            raise
+        _clear_cached_position_mode(api_key)
+        refreshed = get_position_mode(api_key, api_secret, force_refresh=True)
+        refreshed_mode = str(refreshed.get("mode") or "")
+        if refreshed_mode == position_mode:
+            raise
+        logger.warning(
+            "Binance order hit -4061; refreshed position mode and retrying: symbol=%s old_mode=%s new_mode=%s",
+            symbol,
+            position_mode,
+            refreshed_mode,
+        )
+        retry_payload = payload_factory(refreshed_mode)
+        result = _request_with_pm_fallback(
+            api_key,
+            api_secret,
+            "POST",
+            "/fapi/v1/order",
+            params=retry_payload,
+            pm_endpoints=pm_endpoints,
+            max_retries=1,
+        )
+        if isinstance(result, dict):
+            result["_position_mode"] = refreshed_mode
+        return result
+
+
 def place_market_order(
     api_key: str,
     api_secret: str,
@@ -804,20 +1037,15 @@ def place_market_order(
     current_price: float = 0.0,
     client_oid: str = "",
 ) -> dict:
-    """???? (???????)"""
+    """Place a market order after detecting the live position mode."""
     symbol = _clean_symbol(symbol)
-    direction = direction.lower() # "long" or "short"
+    direction = direction.lower()
     margin_mode = "ISOLATED" if margin_mode.lower() in ["isolated", "fixed"] else "CROSSED"
-
-    try:
-        set_position_mode(api_key, api_secret, dual_side=True)
-    except Exception:
-        pass
 
     try:
         set_symbol_leverage(api_key, api_secret, symbol, leverage)
     except Exception as e:
-        logger.warning(f"设置杠杆失败(继续下单): {e}")
+        logger.warning(f"set leverage failed (continuing order): {e}")
 
     try:
         set_margin_type(api_key, api_secret, symbol, margin_mode)
@@ -829,28 +1057,26 @@ def place_market_order(
 
     filters = get_symbol_filters(symbol)
     if raw_qty < filters["minQty"]:
-        raise ValueError(f"数量 {raw_qty} 小于最小下单量 {filters['minQty']} (保证金: {usdt_margin})")
+        raise ValueError(f"quantity {raw_qty} is below minQty {filters['minQty']} (margin={usdt_margin})")
 
     qty_str = _format_qty(raw_qty, filters["stepSize"])
     if float(qty_str) == 0:
-        raise ValueError(f"按步长截断后数量为 0: {raw_qty}")
+        raise ValueError(f"quantity rounded to zero after stepSize adjustment: {raw_qty}")
 
-    position_side = "LONG" if direction == "long" else "SHORT"
-    side = "BUY" if direction == "long" else "SELL"
-
-    payload = {
-        "symbol": symbol,
-        "side": side,
-        "positionSide": position_side,
-        "type": "MARKET",
-        "quantity": qty_str,
-    }
-    if client_oid:
-        payload["newClientOrderId"] = client_oid
-
-    logger.info("币安按量下单: %s %s POS_SIDE=%s 数量=%s 预期保证金=%.2f", symbol, side, position_side, qty_str, usdt_margin)
-
-    res = _request_with_pm_fallback(api_key, api_secret, "POST", "/fapi/v1/order", params=payload, pm_endpoints=_resolve_pm_symbol_endpoints(symbol, "/papi/v1/um/order", "/papi/v1/cm/order"))
+    logger.info("Binance market order: %s %s qty=%s expected_margin=%.2f", symbol, direction.upper(), qty_str, usdt_margin)
+    res = _submit_order_with_position_mode(
+        api_key,
+        api_secret,
+        symbol,
+        lambda position_mode: _build_open_order_payload(
+            symbol,
+            direction,
+            qty_str,
+            position_mode,
+            order_type="MARKET",
+            client_oid=client_oid,
+        ),
+    )
     if isinstance(res, dict):
         res["_calculated_size"] = qty_str
     return res
@@ -873,14 +1099,9 @@ def place_limit_order(
     margin_mode = "ISOLATED" if margin_mode.lower() in ["isolated", "fixed"] else "CROSSED"
 
     try:
-        set_position_mode(api_key, api_secret, dual_side=True)
-    except Exception:
-        pass
-
-    try:
         set_symbol_leverage(api_key, api_secret, symbol, leverage)
     except Exception as e:
-        logger.warning(f"设置杠杆失败(继续下单): {e}")
+        logger.warning(f"set leverage failed (continuing order): {e}")
 
     try:
         set_margin_type(api_key, api_secret, symbol, margin_mode)
@@ -890,28 +1111,29 @@ def place_limit_order(
     filters = get_symbol_filters(symbol)
     raw_qty = (usdt_margin * leverage) / limit_price
     if raw_qty < filters["minQty"]:
-        raise ValueError(f"数量 {raw_qty} 小于最小下单量 {filters['minQty']} (保证金: {usdt_margin})")
+        raise ValueError(f"quantity {raw_qty} is below minQty {filters['minQty']} (margin={usdt_margin})")
 
     qty_str = _format_qty(raw_qty, filters["stepSize"])
     if float(qty_str) == 0:
-        raise ValueError(f"按步长截断后数量为 0: {raw_qty}")
+        raise ValueError(f"quantity rounded to zero after stepSize adjustment: {raw_qty}")
 
     price_str = _format_price(limit_price, float(filters.get("tickSize") or 0.0), round_up=direction == "short")
-    position_side = "LONG" if direction == "long" else "SHORT"
-    side = "BUY" if direction == "long" else "SELL"
-    payload = {
-        "symbol": symbol,
-        "side": side,
-        "positionSide": position_side,
-        "type": "LIMIT",
-        "timeInForce": "GTX" if post_only else "GTC",
-        "quantity": qty_str,
-        "price": price_str,
-    }
-    if client_oid:
-        payload["newClientOrderId"] = client_oid
-
-    res = _request_with_pm_fallback(api_key, api_secret, "POST", "/fapi/v1/order", params=payload, pm_endpoints=_resolve_pm_symbol_endpoints(symbol, "/papi/v1/um/order", "/papi/v1/cm/order"))
+    logger.info("Binance limit order: %s %s qty=%s price=%s", symbol, direction.upper(), qty_str, price_str)
+    res = _submit_order_with_position_mode(
+        api_key,
+        api_secret,
+        symbol,
+        lambda position_mode: _build_open_order_payload(
+            symbol,
+            direction,
+            qty_str,
+            position_mode,
+            order_type="LIMIT",
+            client_oid=client_oid,
+            price=price_str,
+            time_in_force="GTX" if post_only else "GTC",
+        ),
+    )
     if isinstance(res, dict):
         res["_calculated_size"] = qty_str
         res["_limit_price"] = price_str
@@ -961,21 +1183,14 @@ def close_partial_position(
     direction: str,
     qty_str: str,
 ) -> dict:
-    """币安双向持仓模式市价平仓"""
+    """Close part of a Binance position using the live position mode."""
     symbol = _clean_symbol(symbol)
-    direction = direction.lower() # "long" or "short"
-    
-    position_side = "LONG" if direction == "long" else "SHORT"
-    # 平多仓则卖，平空仓则买
-    side = "SELL" if direction == "long" else "BUY"
-    
-    payload = {
-        "symbol": symbol,
-        "side": side,
-        "positionSide": position_side,
-        "type": "MARKET",
-        "quantity": qty_str,
-    }
-    
-    logger.info("币安局部平仓: %s %s POS_SIDE=%s 数量=%s", symbol, side, position_side, qty_str)
-    return _request_with_pm_fallback(api_key, api_secret, "POST", "/fapi/v1/order", params=payload, pm_endpoints=_resolve_pm_symbol_endpoints(symbol, "/papi/v1/um/order", "/papi/v1/cm/order"))
+    direction = direction.lower()
+
+    logger.info("Binance partial close: %s %s qty=%s", symbol, direction.upper(), qty_str)
+    return _submit_order_with_position_mode(
+        api_key,
+        api_secret,
+        symbol,
+        lambda position_mode: _build_close_order_payload(symbol, direction, qty_str, position_mode),
+    )

@@ -13,21 +13,44 @@ import time
 import json
 import atexit
 import sys
+import queue
+import re
+from collections import Counter, defaultdict
 from contextlib import ExitStack
 import signal
 import secrets
+from typing import Any
 
 from flask import Flask, render_template, request, jsonify, redirect, url_for, make_response, abort
+from flask_socketio import SocketIO, emit, disconnect
 
 import api_client
 import config
 import copy_engine
 import database as db
 import order_executor
+
+try:
+    import psutil
+except Exception:  # pragma: no cover - optional runtime dependency
+    psutil = None
 #  Flask 初?
 
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
+app.config['SECRET_KEY'] = os.urandom(24)
+app.config['TEMPLATES_AUTO_RELOAD'] = True
+app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
+app.jinja_env.auto_reload = True
+
+# 初始化 SocketIO
+socketio = SocketIO(
+    app, 
+    cors_allowed_origins="*",
+    async_mode='threading',
+    logger=False,
+    engineio_logger=False
+)
 
 logging.basicConfig(
     level=getattr(logging, config.LOG_LEVEL, logging.INFO),
@@ -309,13 +332,15 @@ def _extract_binance_live_wallet_metrics(balance_raw, positions=None):
             "crossWalletBalance",
             "umWalletBalance",
             "cmWalletBalance",
+            "crossMarginAsset",
         ),
     )
     live_wallet_balance = _pick_number(
         data,
         (
-            "totalMarginBalance",
+            "actualEquity",
             "accountEquity",
+            "totalMarginBalance",
             "equity",
             "marginBalance",
             "totalCrossWalletBalance",
@@ -345,7 +370,9 @@ def _extract_binance_live_wallet_metrics(balance_raw, positions=None):
             "unRealizedProfit",
             "crossUnPnl",
             "umUnrealizedPNL",
+            "umUnrealizedPnl",
             "cmUnrealizedPNL",
+            "cmUnrealizedPnl",
             "upl",
         ),
     )
@@ -382,6 +409,8 @@ def _extract_binance_live_wallet_metrics(balance_raw, positions=None):
         live_wallet_balance = base_wallet_balance + unrealized_pnl
     if live_wallet_balance is None:
         live_wallet_balance = base_wallet_balance
+    if base_wallet_balance is None and live_wallet_balance is not None and unrealized_pnl is not None:
+        base_wallet_balance = live_wallet_balance - unrealized_pnl
     if unrealized_pnl is None and live_wallet_balance is not None and base_wallet_balance is not None:
         unrealized_pnl = live_wallet_balance - base_wallet_balance
     if live_wallet_balance is None:
@@ -431,6 +460,52 @@ def _build_account_overview(api_key: str, api_secret: str, api_passphrase: str):
         "day_start_ts": start_ts * 1000 if start_ts > 0 else None,
         "day_pnl": day_pnl,
         "day_pnl_pct": day_pnl_pct,
+        "updated_at": int(time.time() * 1000),
+    }
+
+
+def _build_binance_wallet_overview_for_profile(profile: str | None, api_key: str, api_secret: str):
+    import binance_executor
+
+    runtime = _profile_runtime(profile)
+    with _profile_runtime_context(profile):
+        balance_info = binance_executor.get_account_balance(api_key, api_secret)
+        try:
+            positions = binance_executor.get_my_positions(api_key, api_secret)
+        except Exception as pos_exc:
+            logger.info(
+                "Binance positions unavailable for wallet overview; falling back to account equity: %s",
+                pos_exc,
+            )
+            positions = []
+
+    wallet_balance, available, unrealized_pnl, base_wallet_balance = _extract_binance_live_wallet_metrics(balance_info, positions)
+    if wallet_balance is None:
+        return None
+
+    wallet_balance = float(wallet_balance or 0.0)
+    available = float(available or 0.0)
+    unrealized_pnl = float(unrealized_pnl or 0.0)
+    base_wallet_balance = float(base_wallet_balance) if base_wallet_balance is not None else None
+
+    day = time.strftime("%Y-%m-%d", time.localtime())
+    daily = db.upsert_platform_daily_equity(_profile_platform_key(profile, "binance"), day, wallet_balance)
+    start_equity = _to_float_or_none(daily.get("start_equity")) or 0.0
+    day_pnl = _to_float_or_none(daily.get("day_pnl")) or 0.0
+    day_pnl_pct = (day_pnl / start_equity * 100.0) if start_equity > 0 else None
+    start_ts = int(daily.get("start_ts") or 0)
+
+    return {
+        "wallet_balance": wallet_balance,
+        "base_wallet_balance": base_wallet_balance,
+        "available_balance": available,
+        "unrealized_pnl": unrealized_pnl,
+        "day": day,
+        "day_start_equity": start_equity,
+        "day_start_ts": start_ts * 1000 if start_ts > 0 else None,
+        "day_pnl": day_pnl,
+        "day_pnl_pct": day_pnl_pct,
+        "endpoint": balance_info.get("_endpoint") or str(runtime["binance_base_url"]),
         "updated_at": int(time.time() * 1000),
     }
 
@@ -579,9 +654,28 @@ def _looks_like_network_error(message: str) -> bool:
 
 #  页面跔 
 
+def _home_copy_api_routes() -> dict[str, str]:
+    return {
+        "mode_label": "实盘",
+        "settings_url": "/api/live/copy/settings",
+        "toggle_url": "/api/live/toggle_copy",
+        "add_url": "/api/live/add_binance_trader",
+        "remove_url": "/api/live/remove_binance_trader",
+    }
+
+
 @app.route("/")
 def index():
-    return render_template("index.html", api_configured=_api_configured())
+    routes = _home_copy_api_routes()
+    return render_template(
+        "index.html",
+        api_configured=_api_configured(),
+        home_copy_mode_label=routes["mode_label"],
+        home_copy_settings_url=routes["settings_url"],
+        home_copy_toggle_url=routes["toggle_url"],
+        home_copy_add_url=routes["add_url"],
+        home_copy_remove_url=routes["remove_url"],
+    )
 
 
 @app.route("/settings", methods=["GET", "POST"])
@@ -796,6 +890,7 @@ def api_scan_start():
         "min_sharp_ratio": float(payload.get("min_sharp_ratio", 0)),
         "min_trades": int(payload.get("min_trades", 5)),
         "min_win_rate": float(payload.get("min_win_rate", 0)),
+        "active_days": int(payload.get("active_days", config.FILTER.get("active_days", 7))),
         "sort_by": payload.get("sort_by", "copier_pnl"),
         "max_results": int(payload.get("max_results", 30)),
     }
@@ -812,15 +907,16 @@ def api_scan_status():
     status = binance_scanner.get_scan_status()
     # 不返回完整结果（夤），叿回状态信?
     return jsonify({
-        "running": status["running"],
-        "phase": status["phase"],
-        "progress": status["progress"],
-        "total_found": status["total_found"],
-        "analyzed": status["analyzed"],
-        "result_count": len(status.get("results", [])),
-        "error": status["error"],
-        "started_at": status["started_at"],
-        "finished_at": status["finished_at"],
+        "running":       status["running"],
+        "phase":         status["phase"],
+        "progress":      status["progress"],
+        "total_found":   status["total_found"],
+        "analyzed":      status["analyzed"],
+        "passed_round1": status.get("passed_round1", 0),
+        "result_count":  len(status.get("results", [])),
+        "error":         status["error"],
+        "started_at":    status["started_at"],
+        "finished_at":   status["finished_at"],
     })
 
 
@@ -898,7 +994,7 @@ def api_copy_settings():
         return jsonify({"ok": True})
 
     settings = _normalize_copy_settings(db.get_copy_settings())
-    safe_settings = dict(settings)
+    safe_settings = _enrich_copy_settings_with_allocations(settings, 'sim')
     for field in ("api_secret", "api_passphrase", "binance_api_secret"):
         safe_settings[field] = _mask_secret(str(safe_settings.get(field) or ""))
     return jsonify(safe_settings)
@@ -962,43 +1058,19 @@ def api_copy_test_api():
 
 @app.route("/api/binance/balance")
 def api_binance_balance():
-    """Get Binance futures balance and day pnl."""
-    import binance_executor
-    import binance_scraper
-
+    """Get Binance wallet overview using the same day-baseline logic as Bitget."""
     settings = _normalize_copy_settings(db.get_copy_settings())
     api_key = settings.get("binance_api_key") or ""
     api_secret = settings.get("binance_api_secret") or ""
     if not api_key or not api_secret:
         return jsonify({"error": "Binance API not configured"}), 400
     try:
-        balance_info = binance_executor.get_account_balance(api_key, api_secret)
-        try:
-            positions = binance_executor.get_my_positions(api_key, api_secret)
-        except Exception as pos_exc:
-            logger.info("读取 Binance 持仓浮盈失败，回退到账户权益字段: %s", pos_exc)
-            positions = []
-
-        wallet_balance, available, unrealized_pnl, base_wallet_balance = _extract_binance_live_wallet_metrics(balance_info, positions)
-        wallet_balance = float(wallet_balance or 0)
-        available = float(available or 0)
-        unrealized_pnl = float(unrealized_pnl or 0)
-        base_wallet_balance = float(base_wallet_balance) if base_wallet_balance is not None else None
-        day_pnl = float(binance_scraper.get_binance_futures_income_today(api_key, api_secret) or 0)
-        day_pnl_pct = (day_pnl / wallet_balance * 100.0) if wallet_balance > 0 else 0.0
-        return jsonify({
-            "ok": True,
-            "wallet_balance": wallet_balance,
-            "base_wallet_balance": base_wallet_balance,
-            "available_balance": available,
-            "unrealized_pnl": unrealized_pnl,
-            "day_pnl": day_pnl,
-            "day_pnl_pct": day_pnl_pct,
-            "endpoint": balance_info.get("_endpoint") or config.BINANCE_BASE_URL,
-            "updated_at": int(time.time() * 1000),
-        })
+        overview = _build_binance_wallet_overview_for_profile("sim", api_key, api_secret)
+        if not overview:
+            return jsonify({"error": "Binance wallet unavailable"}), 400
+        return jsonify({"ok": True, **overview})
     except Exception as exc:
-        logger.warning("查询 Binance 余额失败: %s", exc)
+        logger.warning("Failed to query Binance wallet overview: %s", exc)
         return jsonify({"error": f"Query failed: {exc}"}), 400
 
 
@@ -1037,6 +1109,11 @@ def api_copy_start():
 
     db.set_engine_enabled(True)
     copy_engine.start_engine()
+    # WebSocket实时推送状态变化
+    try:
+        _broadcast_state_update('engine_started')
+    except:
+        pass
     return jsonify({"ok": True, "msg": f"Binance  {len(bn_enabled)} Ա"})
 
 
@@ -1044,6 +1121,11 @@ def api_copy_start():
 def api_copy_stop():
     db.set_engine_enabled(False)
     copy_engine.stop_engine()
+    # WebSocket实时推送状态变化
+    try:
+        _broadcast_state_update('engine_stopped')
+    except:
+        pass
     return jsonify({"ok": True, "msg": "ֹͣ"})
 
 
@@ -1348,6 +1430,114 @@ def _normalize_copy_settings_for_profile(raw: dict, profile: str | None = 'sim')
     return settings
 
 
+def _tier_sort_key(tier: str | None) -> int:
+    return {'core': 0, 'enhanced': 1, 'watch': 2}.get(str(tier or '').strip().lower(), 99)
+
+
+def _build_tier_allocation_summary(trader_allocations: dict[str, dict] | None) -> list[dict]:
+    buckets: dict[str, dict] = {}
+    for trader in (trader_allocations or {}).values():
+        if not isinstance(trader, dict) or trader.get('copy_enabled') is not True:
+            continue
+        tier = str(trader.get('tier') or 'manual').strip().lower() or 'manual'
+        bucket = buckets.setdefault(
+            tier,
+            {
+                'tier': tier,
+                'tier_label': trader.get('tier_label') or trader.get('tier') or '未分类',
+                'enabled_count': 0,
+                'allocation_pool': 0.0,
+                'fallback_margin_cap': 0.0,
+                'available_margin_cap': 0.0,
+                'effective_margin_cap': 0.0,
+            },
+        )
+        bucket['enabled_count'] += 1
+        bucket['allocation_pool'] += float(trader.get('allocation_pool') or 0.0)
+        bucket['fallback_margin_cap'] += float(trader.get('fallback_margin_cap') or 0.0)
+        bucket['available_margin_cap'] += float(trader.get('available_margin_cap') or 0.0)
+        bucket['effective_margin_cap'] += float(trader.get('effective_margin_cap') or 0.0)
+    return sorted(buckets.values(), key=lambda item: (_tier_sort_key(item.get('tier')), str(item.get('tier_label') or '')))
+
+
+def _enrich_copy_settings_with_allocations(settings: dict, profile: str | None = 'sim') -> dict:
+    safe_settings = dict(settings or {})
+    trader_map = safe_settings.get('binance_traders') or {}
+    if isinstance(trader_map, str):
+        try:
+            trader_map = json.loads(trader_map)
+        except Exception:
+            trader_map = {}
+    if not isinstance(trader_map, dict):
+        trader_map = {}
+
+    profile_key = _normalize_profile_name(profile)
+    bitget_available = 0.0
+    binance_available = 0.0
+
+    bg_api_key = safe_settings.get('api_key') or ''
+    bg_api_secret = safe_settings.get('api_secret') or ''
+    bg_api_passphrase = safe_settings.get('api_passphrase') or ''
+    if bg_api_key and bg_api_secret and bg_api_passphrase:
+        try:
+            overview = _build_account_overview_for_profile(profile_key, bg_api_key, bg_api_secret, bg_api_passphrase)
+            bitget_available = float((overview or {}).get('available_balance') or 0.0)
+        except Exception as exc:
+            logger.info('Skip Bitget allocation overview for %s: %s', profile_key, exc)
+
+    bn_api_key = safe_settings.get('binance_api_key') or ''
+    bn_api_secret = safe_settings.get('binance_api_secret') or ''
+    if bn_api_key and bn_api_secret:
+        try:
+            overview = _build_binance_wallet_overview_for_profile(profile_key, bn_api_key, bn_api_secret)
+            binance_available = float((overview or {}).get('available_balance') or 0.0)
+        except Exception as exc:
+            logger.info('Skip Binance allocation overview for %s: %s', profile_key, exc)
+
+    bitget_allocation = copy_engine.build_platform_allocation_details(
+        safe_settings,
+        'bitget',
+        trader_map,
+        bitget_available,
+    )
+    binance_allocation = copy_engine.build_platform_allocation_details(
+        safe_settings,
+        'binance',
+        trader_map,
+        binance_available,
+    )
+    bitget_allocation['tiers'] = _build_tier_allocation_summary(bitget_allocation.get('traders'))
+    binance_allocation['tiers'] = _build_tier_allocation_summary(binance_allocation.get('traders'))
+
+    enriched_traders: dict[str, dict] = {}
+    for pid, trader in trader_map.items():
+        row = dict(trader) if isinstance(trader, dict) else {}
+        bg_trader = (bitget_allocation.get('traders') or {}).get(str(pid), {})
+        bn_trader = (binance_allocation.get('traders') or {}).get(str(pid), {})
+        enriched_traders[str(pid)] = {
+            **row,
+            'bitget_effective_follow_ratio': float(bg_trader.get('effective_follow_ratio') or 0.0),
+            'binance_effective_follow_ratio': float(bn_trader.get('effective_follow_ratio') or 0.0),
+            'bitget_allocation_pool': float(bg_trader.get('allocation_pool') or 0.0),
+            'binance_allocation_pool': float(bn_trader.get('allocation_pool') or 0.0),
+            'bitget_fallback_margin_cap': float(bg_trader.get('fallback_margin_cap') or 0.0),
+            'binance_fallback_margin_cap': float(bn_trader.get('fallback_margin_cap') or 0.0),
+            'bitget_available_margin_cap': float(bg_trader.get('available_margin_cap') or 0.0),
+            'binance_available_margin_cap': float(bn_trader.get('available_margin_cap') or 0.0),
+            'bitget_effective_margin_cap': float(bg_trader.get('effective_margin_cap') or 0.0),
+            'binance_effective_margin_cap': float(bn_trader.get('effective_margin_cap') or 0.0),
+            'bitget_sizing_mode': bg_trader.get('sizing_mode') or 'global_ratio',
+            'binance_sizing_mode': bn_trader.get('sizing_mode') or 'global_ratio',
+        }
+
+    safe_settings['binance_traders'] = enriched_traders
+    safe_settings['allocation_summary'] = {
+        'bitget': bitget_allocation,
+        'binance': binance_allocation,
+    }
+    return safe_settings
+
+
 def _write_profile_env(profile: str | None, *, api_key: str, api_secret: str, api_passphrase: str, binance_api_key: str, binance_api_secret: str) -> None:
     profile_key = _normalize_profile_name(profile)
     runtime = _profile_runtime(profile_key)
@@ -1415,6 +1605,7 @@ def _tcp_probe(host: str, port: int = 443, timeout: float = 2.5) -> tuple[bool, 
 def _live_diagnostics_payload() -> dict:
     settings = _normalize_copy_settings_for_profile(db.get_copy_settings_profile('live'), 'live')
     runtime = _profile_runtime('live')
+    engine_running = copy_engine.is_engine_running('live')
     bn_raw = settings.get('binance_traders') or {}
     if isinstance(bn_raw, str):
         try:
@@ -1427,6 +1618,7 @@ def _live_diagnostics_payload() -> dict:
     enabled_pids = [pid for pid, info in bn_raw.items() if isinstance(info, dict) and info.get('copy_enabled') is True]
     latest_orders = db.get_copy_orders(limit=10, platforms=_profile_platform_keys('live'))
     latest_open = next((dict(row) for row in latest_orders if dict(row).get('action') == 'open'), None)
+    trader_diag_map = (copy_engine.get_engine_diagnostics('live') or {}).get('binance_traders') or {}
 
     copytrade_ok, copytrade_msg = _tcp_probe('www.binance.com')
     fapi_ok, fapi_msg = _tcp_probe('fapi.binance.com')
@@ -1435,61 +1627,128 @@ def _live_diagnostics_payload() -> dict:
     checks = [
         {
             'key': 'engine',
-            'label': '引擎状态',
-            'status': 'pass' if settings.get('engine_enabled') else 'blocker',
-            'detail': '实盘引擎已开启' if settings.get('engine_enabled') else '实盘引擎未开启',
+            'label': '\u5f15\u64ce\u72b6\u6001',
+            'status': 'pass' if engine_running else ('warning' if settings.get('engine_enabled') else 'blocker'),
+            'detail': '\u5b9e\u76d8\u5f15\u64ce\u5df2\u5f00\u542f\u5e76\u8fd0\u884c' if engine_running else ('\u5b9e\u76d8\u5f15\u64ce\u914d\u7f6e\u4e3a\u5f00\u542f\uff0c\u4f46\u5f53\u524d\u672a\u8fd0\u884c' if settings.get('engine_enabled') else '\u5b9e\u76d8\u5f15\u64ce\u672a\u5f00\u542f'),
         },
         {
             'key': 'traders',
-            'label': '跟单对象',
+            'label': '\u8ddf\u5355\u5bf9\u8c61',
             'status': 'pass' if enabled_pids else 'blocker',
-            'detail': f'已启用 {len(enabled_pids)} 个 Binance 跟单对象',
+            'detail': f'\u5df2\u542f\u7528 {len(enabled_pids)} \u4e2a Binance \u8ddf\u5355\u5bf9\u8c61',
         },
         {
             'key': 'binance_api',
-            'label': 'Binance 实盘 API',
+            'label': 'Binance \u5b9e\u76d8 API',
             'status': 'pass' if settings.get('binance_api_key') and settings.get('binance_api_secret') else 'blocker',
-            'detail': 'Binance API Key/Secret 已配置' if settings.get('binance_api_key') and settings.get('binance_api_secret') else 'Binance API Key/Secret 未配置完整',
+            'detail': 'Binance API Key/Secret \u5df2\u914d\u7f6e' if settings.get('binance_api_key') and settings.get('binance_api_secret') else 'Binance API Key/Secret \u672a\u914d\u7f6e\u5b8c\u6574',
         },
         {
             'key': 'copytrade_network',
-            'label': '跟单源网络',
+            'label': '\u8ddf\u5355\u6e90\u7f51\u7edc',
             'status': 'pass' if copytrade_ok else 'blocker',
             'detail': copytrade_msg,
         },
         {
             'key': 'fapi_network',
-            'label': 'Binance 执行网络',
+            'label': 'Binance \u6267\u884c\u7f51\u7edc',
             'status': 'pass' if fapi_ok else 'blocker',
             'detail': fapi_msg,
         },
         {
             'key': 'papi_network',
-            'label': '统一账户网络',
+            'label': '\u7edf\u4e00\u8d26\u6237\u7f51\u7edc',
             'status': 'pass' if papi_ok else 'warning',
             'detail': papi_msg,
         },
         {
             'key': 'entry_mode',
-            'label': '下单模式',
+            'label': '\u4e0b\u5355\u6a21\u5f0f',
             'status': 'pass',
-            'detail': f"当前模式: {settings.get('entry_order_mode') or config.DEFAULT_ENTRY_ORDER_MODE}",
+            'detail': f"\u5f53\u524d\u6a21\u5f0f: {settings.get('entry_order_mode') or config.DEFAULT_ENTRY_ORDER_MODE}",
         },
     ]
 
     if latest_open:
         checks.append({
             'key': 'latest_open',
-            'label': '最近开仓结果',
+            'label': '\u6700\u8fd1\u5f00\u4ed3\u7ed3\u679c',
             'status': 'pass' if latest_open.get('status') == 'filled' else 'warning',
             'detail': f"{latest_open.get('symbol') or '-'} / {latest_open.get('platform') or '-'} / {latest_open.get('status') or '-'}",
         })
     else:
         checks.append({
             'key': 'latest_open',
-            'label': '最近开仓结果',
+            'label': '\u6700\u8fd1\u5f00\u4ed3\u7ed3\u679c',
             'status': 'warning',
-            'detail': '暂无实盘开仓记录',
+            'detail': '\u6682\u65e0\u5b9e\u76d8\u5f00\u4ed3\u8bb0\u5f55',
+        })
+
+    now_ms = int(time.time() * 1000)
+    trader_polling = []
+    poll_warning_count = 0
+    for pid in enabled_pids:
+        trader_info = bn_raw.get(pid) if isinstance(bn_raw.get(pid), dict) else {}
+        diag = trader_diag_map.get(pid) if isinstance(trader_diag_map.get(pid), dict) else {}
+        with db.get_conn() as conn:
+            latest_source_row = conn.execute(
+                "SELECT source_order_id, symbol, action, order_time FROM source_trader_events WHERE trader_uid = ? ORDER BY order_time DESC, id DESC LIMIT 1",
+                (pid,),
+            ).fetchone()
+        latest_source = dict(latest_source_row) if latest_source_row else {}
+        last_poll_finished = int(diag.get('last_poll_finished_at_ms') or 0)
+        last_poll_started = int(diag.get('last_poll_started_at_ms') or 0)
+        cursor_order_time = int(diag.get('cursor_order_time') or 0)
+        remote_order_time = int(diag.get('last_remote_order_time') or 0)
+        db_order_time = int((latest_source or {}).get('order_time') or 0)
+        poll_age_sec = round(max(0, now_ms - last_poll_finished) / 1000, 1) if last_poll_finished else None
+        catchup_lag_sec = None
+        if remote_order_time and cursor_order_time:
+            catchup_lag_sec = round(max(0, remote_order_time - cursor_order_time) / 1000, 1)
+        elif remote_order_time and not cursor_order_time:
+            catchup_lag_sec = round(remote_order_time / 1000, 1)
+
+        status = 'pass'
+        if diag.get('last_poll_ok') is False:
+            status = 'warning'
+        elif poll_age_sec is None or poll_age_sec > 12:
+            status = 'warning'
+        elif catchup_lag_sec and catchup_lag_sec > 0:
+            status = 'warning'
+        if status != 'pass':
+            poll_warning_count += 1
+
+        trader_polling.append({
+            'trader_uid': pid,
+            'nickname': trader_info.get('nickname') or pid,
+            'status': status,
+            'last_poll_started_at_ms': last_poll_started or None,
+            'last_poll_finished_at_ms': last_poll_finished or None,
+            'poll_age_sec': poll_age_sec,
+            'last_poll_ok': diag.get('last_poll_ok'),
+            'last_poll_error': diag.get('last_poll_error') or '',
+            'last_new_order_count': int(diag.get('last_new_order_count') or 0),
+            'warmup_status': diag.get('warmup_status') or '',
+            'warmup_seed_count': int(diag.get('warmup_seed_count') or 0),
+            'cursor_order_time': cursor_order_time or None,
+            'cursor_order_id': diag.get('cursor_order_id') or '',
+            'remote_order_time': remote_order_time or None,
+            'remote_order_id': diag.get('last_remote_order_id') or '',
+            'remote_symbol': diag.get('last_remote_symbol') or '',
+            'remote_action': diag.get('last_remote_action') or '',
+            'db_order_time': db_order_time or None,
+            'db_order_id': (latest_source or {}).get('source_order_id') or '',
+            'db_symbol': (latest_source or {}).get('symbol') or '',
+            'db_action': (latest_source or {}).get('action') or '',
+            'catchup_lag_sec': catchup_lag_sec,
+        })
+
+    if enabled_pids:
+        checks.append({
+            'key': 'trader_polling',
+            'label': '\u8f6e\u8be2\u5065\u5eb7',
+            'status': 'pass' if poll_warning_count == 0 else 'warning',
+            'detail': '\u6240\u6709 trader \u8f6e\u8be2\u6b63\u5e38' if poll_warning_count == 0 else f'{poll_warning_count} \u4e2a trader \u8f6e\u8be2\u9700\u8981\u5173\u6ce8',
         })
 
     blockers = sum(1 for item in checks if item['status'] == 'blocker')
@@ -1502,11 +1761,434 @@ def _live_diagnostics_payload() -> dict:
 
     return {
         'overall': overall,
-        'engine_running': copy_engine.is_engine_running('live'),
-        'generated_at': int(time.time() * 1000),
+        'engine_running': engine_running,
+        'generated_at': now_ms,
         'binance_base_url': str(runtime['binance_base_url']),
         'enabled_trader_count': len(enabled_pids),
         'checks': checks,
+        'trader_polling': trader_polling,
+    }
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _short_text(value: Any, limit: int = 180) -> str:
+    text = str(value or '').replace('\r', ' ').replace('\n', ' ').strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)] + '...'
+
+
+def _display_direction_label(direction: Any) -> str:
+    value = str(direction or '').strip().lower()
+    if value == 'long':
+        return '做多'
+    if value == 'short':
+        return '做空'
+    return value or '--'
+
+
+def _display_action_label(action: Any) -> str:
+    value = str(action or '').strip().lower()
+    if value == 'open':
+        return '开仓'
+    if value == 'close':
+        return '平仓'
+    return value or '--'
+
+
+def _display_status_label(status: Any) -> str:
+    value = str(status or '').strip().lower()
+    mapping = {
+        'filled': '已成交',
+        'failed': '失败',
+        'skipped': '已跳过',
+        'warning': '警告',
+        'blocker': '阻塞',
+        'pass': '正常',
+        'healthy': '正常',
+    }
+    return mapping.get(value, value or '--')
+
+
+def _humanize_copy_note(note: Any) -> str:
+    text = _short_text(note, 500)
+    if not text:
+        return ''
+
+    m = re.search(
+        r"Source has open\s+([A-Z0-9_]+)\s+(long|short)\s+qty=([0-9.]+), but no local open position was found\.?",
+        text,
+        re.IGNORECASE,
+    )
+    if m:
+        symbol, direction, qty = m.groups()
+        return f"交易员当前持有 {symbol} { _display_direction_label(direction) } 单，数量 {qty}，但你这边没有对应仓位。通常是之前没跟上，或本地仓位已提前结束。"
+
+    m = re.search(
+        r"Local still has\s+([A-Z0-9_]+)\s+(long|short)\s+on\s+(.+?), but source no longer shows an open position\.?",
+        text,
+        re.IGNORECASE,
+    )
+    if m:
+        symbol, direction, platform = m.groups()
+        return f"你这边在 {platform} 还有 {symbol} { _display_direction_label(direction) } 仓位，但交易员那边已经没有了，说明同步出现了缺口。"
+
+    m = re.search(
+        r"Polling is\s+(\w+)\s+\(age=([^)]*?)\s*sec,\s*error=(.*?)\)$",
+        text,
+        re.IGNORECASE,
+    )
+    if m:
+        status, age_sec, error = m.groups()
+        error_text = _short_text(error, 120) or '无'
+        age_text = age_sec if age_sec not in {'', 'None'} else '未知'
+        return f"轮询状态为{_display_status_label(status)}，已有 {age_text} 秒没有正常更新。错误信息：{error_text}。"
+
+    m = re.search(
+        r"source close ignored: no remaining local position \(opened=([0-9.]+), closed=([0-9.]+)\)",
+        text,
+        re.IGNORECASE,
+    )
+    if m:
+        opened, closed = m.groups()
+        return f"交易员发来了平仓信号，但你这边已经没有可平仓位，所以这次自动跳过了。历史开仓量 {opened}，已平量 {closed}。"
+
+    m = re.search(
+        r"price drift too large src=([0-9.]+)\s+now=([0-9.]+)\s+dev=([0-9.]+)%",
+        text,
+        re.IGNORECASE,
+    )
+    if m:
+        src, now, dev = m.groups()
+        return f"价格偏差过大，交易员信号价 {src}，当前市场价 {now}，偏差 {dev}%。为避免追高或追空，这单被跳过了。"
+
+    m = re.search(
+        r"quantity\s+([0-9.eE+-]+)\s+is below minQty\s+([0-9.eE+-]+)\s+\(margin=([0-9.eE+-]+)\)",
+        text,
+        re.IGNORECASE,
+    )
+    if m:
+        qty, min_qty, margin = m.groups()
+        return f"下单数量太小，实际数量 {qty}，低于交易所最小下单量 {min_qty}。本次计划保证金约 {margin}，所以系统没有下单。"
+
+    if 'exchange already flat on managed close' in text.lower() or 'exchange already flat on close signal' in text.lower():
+        return '系统准备平仓时，交易所上已经没有这个仓位了，所以按“已处理”记录，没有继续下单。'
+
+    if text == 'Initial sync-open is still pending.':
+        return '首次持仓同步还没完成，系统还在核对交易员已有仓位。'
+
+    m = re.search(r"Latest copy order is\s+(\w+):\s*(.+)$", text, re.IGNORECASE)
+    if m:
+        status, reason = m.groups()
+        return f"最近一笔跟单结果为“{_display_status_label(status)}”：{_humanize_copy_note(reason)}"
+
+    m = re.search(r"History analytics unavailable:\s*(.+)$", text, re.IGNORECASE)
+    if m:
+        return f"历史统计暂时不可用：{_short_text(m.group(1), 120)}"
+
+    m = re.search(r"Clip rate is high at\s+([0-9.]+)%\.?", text, re.IGNORECASE)
+    if m:
+        return f"裁仓率偏高，当前约 {m.group(1)}%。说明不少单子因为资金或限制被缩小了。"
+
+    m = re.search(r"Reverse rate is high at\s+([0-9.]+)%\.?", text, re.IGNORECASE)
+    if m:
+        return f"反手率偏高，当前约 {m.group(1)}%。说明近期方向切换比较频繁。"
+
+    return text
+
+
+def _build_activity_brief(symbol: Any, action: Any, status: Any, note: Any) -> str:
+    symbol_text = str(symbol or '').strip() or '--'
+    action_text = _display_action_label(action)
+    status_text = _display_status_label(status)
+    note_text = _humanize_copy_note(note)
+    if note_text:
+        return f"{symbol_text} {action_text}{status_text}：{note_text}"
+    return f"{symbol_text} {action_text}{status_text}"
+
+
+def _recent_source_events(trader_uid: str, limit: int = 5) -> list[dict]:
+    with db.get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT source_order_id, symbol, action, direction, qty, price, leverage, order_time
+            FROM source_trader_events
+            WHERE trader_uid = ?
+            ORDER BY order_time DESC, id DESC
+            LIMIT ?
+            """,
+            (trader_uid, max(1, int(limit))),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def _recent_copy_orders_for_platforms(
+    platforms: list[str],
+    limit: int = 120,
+    trader_uid: str | None = None,
+) -> list[dict]:
+    clauses = []
+    params: list[Any] = []
+    platform_list = [str(platform).strip().lower() for platform in platforms if str(platform).strip()]
+    if platform_list:
+        placeholders = ', '.join(['?'] * len(platform_list))
+        clauses.append(f"lower(platform) IN ({placeholders})")
+        params.extend(platform_list)
+    if trader_uid:
+        clauses.append("trader_uid = ?")
+        params.append(str(trader_uid).strip())
+    sql = "SELECT * FROM copy_orders"
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+    sql += " ORDER BY timestamp DESC, id DESC LIMIT ?"
+    params.append(max(1, int(limit)))
+    with db.get_conn() as conn:
+        rows = conn.execute(sql, params).fetchall()
+    return [dict(row) for row in rows]
+
+
+def _live_transparency_payload() -> dict:
+    settings = _normalize_copy_settings_for_profile(db.get_copy_settings_profile('live'), 'live')
+    diagnostics = _live_diagnostics_payload()
+    platform_keys = _profile_platform_keys('live')
+    bn_raw = settings.get('binance_traders') or {}
+    if isinstance(bn_raw, str):
+        try:
+            bn_raw = json.loads(bn_raw)
+        except Exception:
+            bn_raw = {}
+    if not isinstance(bn_raw, dict):
+        bn_raw = {}
+
+    enabled_map: dict[str, dict[str, Any]] = {}
+    for pid, info in bn_raw.items():
+        if isinstance(info, dict) and info.get('copy_enabled') is True:
+            enabled_map[str(pid)] = dict(info)
+
+    diagnostics_map = {
+        str(item.get('trader_uid') or ''): item
+        for item in diagnostics.get('trader_polling') or []
+        if isinstance(item, dict)
+    }
+    recent_orders = _recent_copy_orders_for_platforms(platform_keys, limit=120)
+    recent_status_counts = Counter(str(item.get('status') or '').lower() for item in recent_orders)
+
+    local_positions_by_trader: dict[str, list[dict]] = defaultdict(list)
+    for row in db.get_active_copy_position_summaries():
+        item = dict(row)
+        if str(item.get('platform') or '').strip().lower() not in platform_keys:
+            continue
+        local_positions_by_trader[str(item.get('trader_uid') or '')].append(item)
+
+    total_source_open = 0
+    total_local_open = sum(len(items) for items in local_positions_by_trader.values())
+    total_gap_pairs = 0
+    attention_items: list[str] = []
+    trader_items: list[dict] = []
+
+    for trader_uid, trader_cfg in sorted(
+        enabled_map.items(),
+        key=lambda item: (str(item[1].get('nickname') or item[0]).lower(), item[0]),
+    ):
+        diag = diagnostics_map.get(trader_uid) or {}
+        source_positions = [
+            item for item in db.get_source_position_summaries(trader_uid)
+            if _safe_float(item.get('remaining_qty'), 0.0) > 1e-12
+        ]
+        total_source_open += len(source_positions)
+        local_positions = list(local_positions_by_trader.get(trader_uid) or [])
+        local_by_pair: dict[tuple[str, str], list[dict]] = defaultdict(list)
+        for item in local_positions:
+            pair = (str(item.get('symbol') or '').upper(), str(item.get('direction') or '').lower())
+            local_by_pair[pair].append(item)
+
+        issues: list[str] = []
+        gap_pairs = 0
+        pair_rows: list[dict] = []
+        seen_pairs: set[tuple[str, str]] = set()
+        for source in source_positions:
+            pair = (str(source.get('symbol') or '').upper(), str(source.get('direction') or '').lower())
+            seen_pairs.add(pair)
+            locals_for_pair = local_by_pair.get(pair, [])
+            if not locals_for_pair:
+                gap_pairs += 1
+                issues.append(_humanize_copy_note(
+                    f"Source has open {pair[0]} {pair[1]} qty={_safe_float(source.get('remaining_qty'), 0.0):.4f}, but no local open position was found."
+                ))
+            pair_rows.append({
+                'symbol': pair[0],
+                'direction': pair[1],
+                'source_remaining_qty': _safe_float(source.get('remaining_qty'), 0.0),
+                'source_remaining_margin': _safe_float(source.get('remaining_margin'), 0.0),
+                'local_positions': [
+                    {
+                        'platform': item.get('platform'),
+                        'remaining_qty': _safe_float(item.get('remaining_qty'), 0.0),
+                        'remaining_margin': _safe_float(item.get('remaining_margin'), 0.0),
+                    }
+                    for item in locals_for_pair
+                ],
+            })
+
+        for local in local_positions:
+            pair = (str(local.get('symbol') or '').upper(), str(local.get('direction') or '').lower())
+            if pair in seen_pairs:
+                continue
+            gap_pairs += 1
+            issues.append(_humanize_copy_note(
+                f"Local still has {pair[0]} {pair[1]} on {_display_platform_name(local.get('platform') or '')}, but source no longer shows an open position."
+            ))
+            pair_rows.append({
+                'symbol': pair[0],
+                'direction': pair[1],
+                'source_remaining_qty': 0.0,
+                'source_remaining_margin': 0.0,
+                'local_positions': [{
+                    'platform': local.get('platform'),
+                    'remaining_qty': _safe_float(local.get('remaining_qty'), 0.0),
+                    'remaining_margin': _safe_float(local.get('remaining_margin'), 0.0),
+                }],
+            })
+
+        total_gap_pairs += gap_pairs
+        recent_source = _recent_source_events(trader_uid, limit=5)
+        latest_source = recent_source[0] if recent_source else {}
+        recent_copy = _recent_copy_orders_for_platforms(platform_keys, limit=5, trader_uid=trader_uid)
+        latest_copy = recent_copy[0] if recent_copy else {}
+        analysis = {}
+        try:
+            analysis = db.get_trader_analysis_snapshot(trader_uid)
+        except Exception as exc:
+            issues.append(_humanize_copy_note(f"History analytics unavailable: {_short_text(exc, 120)}"))
+
+        if str(diag.get('status') or '') in {'warning', 'blocker'}:
+            issues.append(_humanize_copy_note(
+                f"Polling is {diag.get('status')} (age={diag.get('poll_age_sec')} sec, error={_short_text(diag.get('last_poll_error'), 120) or '-'})"
+            ))
+        if trader_cfg.get('sync_open_positions_pending') is True:
+            issues.append(_humanize_copy_note('Initial sync-open is still pending.'))
+        if latest_copy and str(latest_copy.get('status') or '').lower() in {'failed', 'skipped'}:
+            issues.append(_humanize_copy_note(
+                f"Latest copy order is {latest_copy.get('status')}: {_short_text(latest_copy.get('notes'), 140)}"
+            ))
+
+        clip_rate = _safe_float(analysis.get('clip_rate'), 0.0)
+        reverse_rate = _safe_float(analysis.get('reverse_rate'), 0.0)
+        if clip_rate >= 0.8:
+            issues.append(_humanize_copy_note(f"Clip rate is high at {clip_rate * 100:.1f}%."))
+        if reverse_rate >= 0.5:
+            issues.append(_humanize_copy_note(f"Reverse rate is high at {reverse_rate * 100:.1f}%."))
+
+        if issues:
+            attention_items.append(f"{trader_cfg.get('nickname') or trader_uid}: {issues[0]}")
+
+        trader_items.append({
+            'trader_uid': trader_uid,
+            'nickname': trader_cfg.get('nickname') or trader_uid,
+            'poll_status': diag.get('status') or 'unknown',
+            'poll_status_label': _display_status_label(diag.get('status') or 'unknown'),
+            'poll_age_sec': diag.get('poll_age_sec'),
+            'last_new_order_count': _safe_int(diag.get('last_new_order_count'), 0),
+            'warmup_status': diag.get('warmup_status') or '',
+            'sync_open_positions_pending': bool(trader_cfg.get('sync_open_positions_pending')),
+            'source_open_count': len(source_positions),
+            'local_open_count': len(local_positions),
+            'gap_pair_count': gap_pairs,
+            'issue_count': len(issues),
+            'issues': issues[:8],
+            'position_pairs': sorted(pair_rows, key=lambda item: (item['symbol'], item['direction']))[:10],
+            'latest_source': {
+                'symbol': latest_source.get('symbol') or '',
+                'action': latest_source.get('action') or '',
+                'action_label': _display_action_label(latest_source.get('action')),
+                'order_time': _safe_int(latest_source.get('order_time'), 0),
+            },
+            'latest_copy': {
+                'symbol': latest_copy.get('symbol') or '',
+                'action': latest_copy.get('action') or '',
+                'action_label': _display_action_label(latest_copy.get('action')),
+                'status': latest_copy.get('status') or '',
+                'status_label': _display_status_label(latest_copy.get('status')),
+                'timestamp': _safe_int(latest_copy.get('timestamp'), 0),
+                'platform': _display_platform_name(str(latest_copy.get('platform') or '')),
+                'notes': _short_text(_humanize_copy_note(latest_copy.get('notes')), 180),
+            },
+            'analysis': {
+                'total_score': round(_safe_float(analysis.get('total_score'), 0.0), 2),
+                'clip_rate': round(clip_rate, 4),
+                'reverse_rate': round(reverse_rate, 4),
+                'avg_hold_sec': _safe_int(analysis.get('avg_hold_sec'), 0),
+                'median_source_margin': round(_safe_float(analysis.get('median_source_margin'), 0.0), 2),
+            },
+        })
+
+    name_map = {
+        trader_uid: (info.get('nickname') or trader_uid)
+        for trader_uid, info in enabled_map.items()
+    }
+    recent_activity = []
+    for item in recent_orders[:18]:
+        trader_uid = str(item.get('trader_uid') or '')
+        recent_activity.append({
+            'timestamp': _safe_int(item.get('timestamp'), 0),
+            'trader_uid': trader_uid,
+            'trader_name': name_map.get(trader_uid, trader_uid or '-'),
+            'symbol': item.get('symbol') or '',
+            'direction': item.get('direction') or '',
+            'direction_label': _display_direction_label(item.get('direction')),
+            'action': item.get('action') or '',
+            'action_label': _display_action_label(item.get('action')),
+            'status': item.get('status') or '',
+            'status_label': _display_status_label(item.get('status')),
+            'platform': _display_platform_name(str(item.get('platform') or '')),
+            'notes': _short_text(_humanize_copy_note(item.get('notes')), 160),
+        })
+        if str(item.get('status') or '').lower() in {'failed', 'skipped'} and len(attention_items) < 16:
+            attention_items.append(f"{name_map.get(trader_uid, trader_uid or '-')}: {_build_activity_brief(item.get('symbol'), item.get('action'), item.get('status'), item.get('notes'))}")
+
+    unique_attention = []
+    seen_attention: set[str] = set()
+    for item in attention_items:
+        clean = _short_text(item, 220)
+        if not clean or clean in seen_attention:
+            continue
+        seen_attention.add(clean)
+        unique_attention.append(clean)
+
+    overall = 'pass'
+    if diagnostics.get('overall') == 'blocker':
+        overall = 'blocker'
+    elif diagnostics.get('overall') != 'pass' or total_gap_pairs > 0 or recent_status_counts.get('failed') or recent_status_counts.get('skipped'):
+        overall = 'warning'
+
+    trader_items.sort(key=lambda item: (-item['issue_count'], -item['gap_pair_count'], item['nickname']))
+    return {
+        'generated_at': int(time.time() * 1000),
+        'overall': overall,
+        'summary': {
+            'engine_running': bool(diagnostics.get('engine_running')),
+            'enabled_trader_count': len(enabled_map),
+            'source_open_position_count': total_source_open,
+            'local_open_position_count': total_local_open,
+            'gap_pair_count': total_gap_pairs,
+            'recent_order_status_counts': dict(sorted(recent_status_counts.items())),
+        },
+        'attention_items': unique_attention[:16],
+        'recent_activity': recent_activity,
+        'traders': trader_items,
     }
 
 
@@ -1679,6 +2361,11 @@ def api_live_diagnostics():
     return jsonify(_live_diagnostics_payload())
 
 
+@app.route('/api/live/transparency')
+def api_live_transparency():
+    return jsonify(_live_transparency_payload())
+
+
 @app.route('/api/live/toggle_copy', methods=['POST'])
 def api_live_toggle_copy():
     data = request.json or {}
@@ -1690,7 +2377,17 @@ def api_live_toggle_copy():
     raw = settings.get('binance_traders') or '{}'
     bn_traders = json.loads(raw) if isinstance(raw, str) else raw
     if uid in bn_traders:
-        bn_traders[uid]['copy_enabled'] = enabled
+        now_ts = int(time.time())
+        row = dict(bn_traders.get(uid) or {})
+        row['copy_enabled'] = enabled
+        if enabled:
+            row.setdefault('added_at', now_ts)
+            row['copy_enabled_at'] = now_ts
+            row['sync_open_positions_pending'] = True
+            row['sync_open_positions_requested_at'] = now_ts
+        else:
+            row['sync_open_positions_pending'] = False
+        bn_traders[uid] = row
         db.update_shared_copy_settings(binance_traders=json.dumps(bn_traders, ensure_ascii=False))
         return jsonify({'ok': True, 'enabled': enabled})
     return jsonify({'error': '交易员不存在'}), 404
@@ -1715,20 +2412,25 @@ def api_live_add_binance_trader():
             traders = {}
         if not isinstance(traders, dict):
             traders = {}
-        if portfolio_id not in traders:
-            traders[portfolio_id] = {
-                'nickname': info.get('nickname'),
-                'roi': info.get('roi'),
-                'win_rate': info.get('win_rate'),
-                'follower_count': info.get('follower_count'),
-                'copier_pnl': info.get('copier_pnl'),
-                'aum': info.get('aum'),
-                'avatar': info.get('avatar'),
-                'total_trades': info.get('total_trades'),
-                'copy_enabled': True,
-                'added_at': int(time.time()),
-            }
-            db.update_shared_copy_settings(binance_traders=json.dumps(traders, ensure_ascii=False))
+        now_ts = int(time.time())
+        row = dict(traders.get(portfolio_id) or {})
+        row.update({
+            'nickname': info.get('nickname') or row.get('nickname'),
+            'roi': info.get('roi'),
+            'win_rate': info.get('win_rate'),
+            'follower_count': info.get('follower_count'),
+            'copier_pnl': info.get('copier_pnl'),
+            'aum': info.get('aum'),
+            'avatar': info.get('avatar'),
+            'total_trades': info.get('total_trades'),
+            'copy_enabled': True,
+            'sync_open_positions_pending': True,
+            'sync_open_positions_requested_at': now_ts,
+        })
+        row.setdefault('added_at', now_ts)
+        row['copy_enabled_at'] = now_ts
+        traders[portfolio_id] = row
+        db.update_shared_copy_settings(binance_traders=json.dumps(traders, ensure_ascii=False))
         return jsonify({'ok': True, 'portfolio_id': portfolio_id, 'info': info})
     except Exception as exc:
         logger.error('实盘 Binance 交易员理失? %s', exc, exc_info=True)
@@ -1773,7 +2475,7 @@ def api_live_copy_settings():
         return jsonify({'ok': True})
 
     settings = _normalize_copy_settings_for_profile(db.get_copy_settings_profile('live'), 'live')
-    safe_settings = dict(settings)
+    safe_settings = _enrich_copy_settings_with_allocations(settings, 'live')
     for field in ('api_secret', 'api_passphrase', 'binance_api_secret'):
         safe_settings[field] = _mask_secret(str(safe_settings.get(field) or ''))
     safe_settings['traders'] = db.get_all_traders()
@@ -1830,51 +2532,20 @@ def api_live_copy_test_api():
 
 @app.route('/api/live/binance/balance')
 def api_live_binance_balance():
-    import binance_executor
-    import binance_scraper
-
     settings = _normalize_copy_settings_for_profile(db.get_copy_settings_profile('live'), 'live')
     api_key = settings.get('binance_api_key') or ''
     api_secret = settings.get('binance_api_secret') or ''
     if not api_key or not api_secret:
-        return jsonify({'error': '未配置 Binance API'}), 400
+        return jsonify({'error': 'Binance API not configured'}), 400
 
-    runtime = _profile_runtime('live')
     try:
-        with _profile_runtime_context('live'):
-            balance_info = binance_executor.get_account_balance(api_key, api_secret)
-            try:
-                positions = binance_executor.get_my_positions(api_key, api_secret)
-            except Exception as pos_exc:
-                logger.info('查询 Binance 持仓浮盈亏失败，回退到账户权益字段: %s', pos_exc)
-                positions = []
-        wallet_balance, available, unrealized_pnl, base_wallet_balance = _extract_binance_live_wallet_metrics(balance_info, positions)
-        wallet_balance = float(wallet_balance or 0)
-        available = float(available or 0)
-        unrealized_pnl = float(unrealized_pnl or 0)
-        base_wallet_balance = float(base_wallet_balance) if base_wallet_balance is not None else None
-
-        day_pnl = 0.0
-        try:
-            day_pnl = float(binance_scraper.get_binance_futures_income_today(api_key, api_secret, base_url=str(runtime['binance_base_url'])) or 0)
-        except Exception:
-            day_pnl = 0.0
-
-        day_pnl_pct = (day_pnl / wallet_balance * 100.0) if wallet_balance > 0 else 0.0
-        return jsonify({
-            'ok': True,
-            'wallet_balance': wallet_balance,
-            'base_wallet_balance': base_wallet_balance,
-            'available_balance': available,
-            'unrealized_pnl': unrealized_pnl,
-            'day_pnl': day_pnl,
-            'day_pnl_pct': day_pnl_pct,
-            'endpoint': balance_info.get('_endpoint') or runtime['binance_base_url'],
-            'updated_at': int(time.time() * 1000),
-        })
+        overview = _build_binance_wallet_overview_for_profile('live', api_key, api_secret)
+        if not overview:
+            return jsonify({'error': 'Binance wallet unavailable'}), 400
+        return jsonify({'ok': True, **overview})
     except Exception as exc:
-        logger.warning('查询 Binance 余额失败: %s', exc)
-        return jsonify({'error': f'查询失败: {exc}'}), 400
+        logger.warning('Failed to query live Binance wallet overview: %s', exc)
+        return jsonify({'error': f'Query failed: {exc}'}), 400
 
 
 @app.route('/api/live/copy/start', methods=['POST'])
@@ -2144,7 +2815,8 @@ def _cleanup():
     
     try:
         # 停跟单引擎
-        copy_engine.stop_engine()
+        copy_engine.stop_engine("sim")
+        copy_engine.stop_engine("live")
         time.sleep(0.5)
         
         # 数据库优?
@@ -2203,6 +2875,163 @@ def _port_in_use(port: int) -> bool:
             return False
 
 
+# ═══════════════════════════════════════════════════════════════════════
+#  WebSocket 实时推送
+# ═══════════════════════════════════════════════════════════════════════
+
+# 连接的客户端
+_ws_clients = set()
+_ws_lock = threading.Lock()
+_ws_order_events: "queue.Queue[dict]" = queue.Queue(maxsize=500)
+_ws_perf_prev_cpu_ts = 0.0
+
+
+def _queue_order_created_event(order_payload: dict) -> None:
+    payload = dict(order_payload or {})
+    payload["timestamp"] = int(payload.get("timestamp") or _now_ms())
+    payload["event_type"] = "order_created"
+    try:
+        _ws_order_events.put_nowait(payload)
+    except queue.Full:
+        try:
+            _ws_order_events.get_nowait()
+        except queue.Empty:
+            pass
+        try:
+            _ws_order_events.put_nowait(payload)
+        except queue.Full:
+            logger.warning("[WebSocket] 订单事件队列已满，丢弃最新事件")
+
+
+def _collect_performance_stats() -> dict:
+    if psutil is None:
+        return {"available": False}
+
+    global _ws_perf_prev_cpu_ts
+    now = time.time()
+    sample_interval = 0.0 if _ws_perf_prev_cpu_ts <= 0 else max(0.0, now - _ws_perf_prev_cpu_ts)
+    _ws_perf_prev_cpu_ts = now
+    process = psutil.Process(os.getpid())
+    vm = psutil.virtual_memory()
+    return {
+        "available": True,
+        "cpu_percent": round(psutil.cpu_percent(interval=None), 2),
+        "memory_percent": round(vm.percent, 2),
+        "memory_used_mb": round(vm.used / 1024 / 1024, 2),
+        "memory_total_mb": round(vm.total / 1024 / 1024, 2),
+        "process_memory_mb": round(process.memory_info().rss / 1024 / 1024, 2),
+        "sample_interval_sec": round(sample_interval, 2),
+    }
+
+@socketio.on('connect')
+def handle_connect():
+    """客户端连接"""
+    client_id = request.sid
+    with _ws_lock:
+        _ws_clients.add(client_id)
+    logger.info(f"[WebSocket] 客户端连接: {client_id} (总数: {len(_ws_clients)})")
+    
+    # 立即发送当前状态
+    try:
+        emit('initial_state', _get_current_state())
+    except Exception as e:
+        logger.error(f"[WebSocket] 发送初始状态失败: {e}")
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    """客户端断开"""
+    client_id = request.sid
+    with _ws_lock:
+        _ws_clients.discard(client_id)
+    logger.info(f"[WebSocket] 客户端断开: {client_id} (剩余: {len(_ws_clients)})")
+
+@socketio.on('ping')
+def handle_ping():
+    """心跳检测"""
+    emit('pong', {'timestamp': _now_ms()})
+
+def _get_current_state():
+    """获取当前系统状态"""
+    try:
+        # 引擎状态
+        sim_running = copy_engine.is_engine_running('sim')
+        live_running = copy_engine.is_engine_running('live')
+        
+        # API配置状态
+        api_configured = _api_configured()
+        
+        return {
+            'timestamp': _now_ms(),
+            'engine': {
+                'sim_running': sim_running,
+                'live_running': live_running,
+                'any_running': sim_running or live_running,
+            },
+            'api_configured': api_configured,
+            'performance': _collect_performance_stats(),
+        }
+    except Exception as e:
+        logger.error(f"[WebSocket] 获取状态失败: {e}")
+        return {'error': str(e)}
+
+def _broadcast_state_update(event_type='status_update', data=None):
+    """广播状态更新到所有客户端"""
+    if not _ws_clients:
+        return
+    
+    try:
+        if data is None:
+            data = _get_current_state()
+        
+        data['event_type'] = event_type
+        data['timestamp'] = _now_ms()
+        
+        with _ws_lock:
+            client_count = len(_ws_clients)
+        
+        if client_count > 0:
+            socketio.emit(event_type, data, namespace='/')
+            logger.debug(f"[WebSocket] 广播 {event_type} 到 {client_count} 个客户端")
+    except Exception as e:
+        logger.error(f"[WebSocket] 广播失败: {e}")
+
+def _ws_broadcast_thread():
+    """WebSocket 定期广播线程"""
+    logger.info("[WebSocket] 广播线程启动")
+    last_state = None
+    next_status_push_at = time.time()
+    
+    while True:
+        try:
+            with _ws_lock:
+                if not _ws_clients:
+                    time.sleep(0.5)
+                    continue
+
+            now = time.time()
+            if now >= next_status_push_at:
+                current_state = _get_current_state()
+                if current_state != last_state:
+                    _broadcast_state_update('status_update', current_state)
+                    last_state = current_state.copy()
+                next_status_push_at = now + 2.0
+
+            try:
+                order_event = _ws_order_events.get(timeout=0.25)
+                _broadcast_state_update('order_created', order_event)
+            except queue.Empty:
+                pass
+                
+        except Exception as e:
+            logger.error(f"[WebSocket] 广播线程错误: {e}")
+            time.sleep(5)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  主函数
+# ═══════════════════════════════════════════════════════════════════════
+
+
 def main():
     port = int(os.getenv("PORT", "8080"))
     url = f"http://127.0.0.1:{port}"
@@ -2216,6 +3045,7 @@ def main():
 
     db.init_db()
     _migrate_plaintext_secrets_out_of_db()
+    copy_engine.set_order_created_callback(_queue_order_created_event)
 
     # 迁移币安交易员格?
     _migrate_binance_format()
@@ -2224,11 +3054,15 @@ def main():
 
     # 吊心跳监控线程
     threading.Thread(target=_heartbeat_monitor, daemon=True).start()
+    
+    # 启动WebSocket广播线程
+    threading.Thread(target=_ws_broadcast_thread, daemon=True).start()
 
-    # 延迟吊跟单引擎
-    threading.Timer(3.0, _auto_start_copy_engine).start()
+    # 启动服务时同步恢复已启用的跟单引擎，避免定时器在某些环境下失效
+    _auto_start_copy_engine()
     try:
-        app.run(host="127.0.0.1", port=port, debug=False)
+        # 使用socketio.run替代app.run以支持WebSocket
+        socketio.run(app, host="127.0.0.1", port=port, debug=False, allow_unsafe_werkzeug=True)
     except OSError as e:
         if "Address already in use" in str(e) or getattr(e, "errno", 0) == 48:
             logger.info("竏 %d 已占用，直接打开浏? %s", port, url)
@@ -2239,10 +3073,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-

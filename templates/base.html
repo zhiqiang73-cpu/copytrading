@@ -22,7 +22,7 @@
         }
     </script>
     <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-size: 15px; }
         .fade-in { animation: fadeIn 0.3s ease-in; }
         @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
         .spinner { border: 3px solid #2a2d3a; border-top-color: #3b82f6; border-radius: 50%; width: 20px; height: 20px; animation: spin 0.6s linear infinite; display: inline-block; }
@@ -31,6 +31,8 @@
         ::-webkit-scrollbar-track { background: #1a1d29; }
         ::-webkit-scrollbar-thumb { background: #3a3d4a; border-radius: 3px; }
     </style>
+    <!-- Socket.IO 客户端 -->
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js" crossorigin="anonymous"></script>
 </head>
 <body class="bg-dark-bg text-gray-200 min-h-screen">
 
@@ -41,30 +43,38 @@
                 <div class="flex items-center space-x-8">
                     <a href="/" class="flex items-center space-x-2 shrink-0">
                         <span class="text-xl font-bold text-white tracking-tight">Bitget<span class="text-blue-500">Follow</span></span>
-                        <span class="text-[10px] bg-blue-600/20 text-blue-400 px-1.5 py-0.5 rounded font-bold uppercase tracking-wider">Pro</span>
                     </a>
                     
                     <div class="hidden md:flex items-center space-x-1 h-16">
                         <a href="/" class="px-4 h-full flex items-center text-sm font-medium transition-all border-b-2 {% if request.path == '/' %}border-blue-500 text-blue-500 bg-blue-500/5{% else %}border-transparent text-gray-400 hover:text-gray-200 hover:bg-white/5{% endif %}">
-                            <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
-                            交易员发现
-                        </a>
-                        <a href="/my-positions" class="px-4 h-full flex items-center text-sm font-medium transition-all border-b-2 {% if request.path == '/my-positions' %}border-blue-500 text-blue-500 bg-blue-500/5{% else %}border-transparent text-gray-400 hover:text-gray-200 hover:bg-white/5{% endif %}">
-                            <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
-                            跟单管理
+                            发现
                         </a>
 
                         <a href="/live-positions" class="px-4 h-full flex items-center text-sm font-medium transition-all border-b-2 {% if request.path == '/live-positions' %}border-emerald-500 text-emerald-400 bg-emerald-500/5{% else %}border-transparent text-gray-400 hover:text-gray-200 hover:bg-white/5{% endif %}">
-                            <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 11c0-1.657 1.343-3 3-3h2a2 2 0 012 2v6a2 2 0 01-2 2h-2a3 3 0 01-3-3m0-4V7m0 4H7a2 2 0 00-2 2v3a2 2 0 002 2h5m0-7V5m0 13v1"/></svg>
-                            实盘管理
+                            实盘
                         </a>
                     </div>
                 </div>
 
                 <div class="flex items-center space-x-4">
+                    <!-- 引擎状态 -->
+                    <div id="engine-status" class="hidden items-center space-x-2 px-3 py-1.5 rounded-full bg-dark-bg border border-dark-border text-xs font-medium transition-all">
+                        <span class="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></span>
+                        <span class="text-green-400">引擎运行中</span>
+                    </div>
+                    
+                    <!-- 连接状态 -->
                     <div id="status-dot" class="flex items-center space-x-2 px-3 py-1.5 rounded-full bg-dark-bg border border-dark-border text-xs font-medium transition-all">
                         <span class="w-1.5 h-1.5 rounded-full bg-gray-500"></span>
                         <span class="text-gray-400">正在检查...</span>
+                    </div>
+                    
+                    <!-- 心跳指示器 -->
+                    <div id="heartbeat-indicator" class="flex items-center space-x-2 px-3 py-1.5 rounded-full bg-dark-bg border border-dark-border text-xs font-medium transition-all" title="与服务器的连接状态">
+                        <svg id="heartbeat-icon" class="w-3 h-3 text-green-400" fill="currentColor" viewBox="0 0 20 20">
+                            <path fill-rule="evenodd" d="M3.172 5.172a4 4 0 015.656 0L10 6.343l1.172-1.171a4 4 0 115.656 5.656L10 17.657l-6.828-6.829a4 4 0 010-5.656z" clip-rule="evenodd"/>
+                        </svg>
+                        <span id="heartbeat-text" class="text-green-400">在线</span>
                     </div>
                     
                     <a href="/settings" class="p-2 text-gray-400 hover:text-white hover:bg-white/5 rounded-lg transition-all {% if request.path == '/settings' %}text-blue-500 bg-blue-500/10{% endif %}" title="系统设置">
@@ -79,17 +89,183 @@
     </nav>
 
     <!-- 主内容 -->
-    <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 fade-in">
+    <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
         {% block content %}{% endblock %}
     </main>
 
     <!-- 通用 JS -->
     <script>
+        // ========== WebSocket 实时连接 ==========
+        let socket = null;
+        let wsReconnectAttempts = 0;
+        const MAX_RECONNECT_ATTEMPTS = 5;
+        
+        function initWebSocket() {
+            try {
+                socket = io({
+                    transports: ['websocket', 'polling'],
+                    reconnection: true,
+                    reconnectionDelay: 1000,
+                    reconnectionDelayMax: 5000,
+                    reconnectionAttempts: MAX_RECONNECT_ATTEMPTS
+                });
+                
+                socket.on('connect', () => {
+                    console.log('[WebSocket] 已连接');
+                    wsReconnectAttempts = 0;
+                    // 连接成功后立即更新状态
+                    updateConnectionStatus('connected');
+                });
+                
+                socket.on('disconnect', (reason) => {
+                    console.log('[WebSocket] 断开:', reason);
+                    updateConnectionStatus('disconnected');
+                });
+                
+                socket.on('connect_error', (error) => {
+                    wsReconnectAttempts++;
+                    console.log(`[WebSocket] 连接错误 (${wsReconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}):`, error.message);
+                    if (wsReconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+                        updateConnectionStatus('error');
+                    }
+                });
+                
+                // 监听初始状态
+                socket.on('initial_state', (data) => {
+                    console.log('[WebSocket] 收到初始状态:', data);
+                    updateUIFromState(data);
+                });
+                
+                // 监听状态更新
+                socket.on('status_update', (data) => {
+                    console.log('[WebSocket] 状态更新:', data);
+                    updateUIFromState(data);
+                });
+
+                // 监听订单创建事件，转发给具体页面处理
+                socket.on('order_created', (data) => {
+                    console.log('[WebSocket] 新订单事件:', data);
+                    window.dispatchEvent(new CustomEvent('ws_order_created', { detail: data || {} }));
+                });
+                
+                // 监听引擎启动事件
+                socket.on('engine_started', (data) => {
+                    console.log('[WebSocket] 引擎已启动');
+                    updateUIFromState(data);
+                    showNotification('引擎已启动', 'success');
+                });
+                
+                // 监听引擎停止事件
+                socket.on('engine_stopped', (data) => {
+                    console.log('[WebSocket] 引擎已停止');
+                    updateUIFromState(data);
+                    showNotification('引擎已停止', 'info');
+                });
+                
+                // 心跳
+                socket.on('pong', (data) => {
+                    // console.log('[WebSocket] pong');
+                });
+                
+            } catch (error) {
+                console.error('[WebSocket] 初始化失败:', error);
+            }
+        }
+        
+        function updateConnectionStatus(status) {
+            const heartbeatIcon = document.getElementById('heartbeat-icon');
+            const heartbeatText = document.getElementById('heartbeat-text');
+            const heartbeatIndicator = document.getElementById('heartbeat-indicator');
+            
+            if (!heartbeatIcon || !heartbeatText) return;
+            
+            if (status === 'connected') {
+                heartbeatIcon.classList.remove('text-red-400', 'text-yellow-400');
+                heartbeatIcon.classList.add('text-green-400');
+                heartbeatText.classList.remove('text-red-400', 'text-yellow-400');
+                heartbeatText.classList.add('text-green-400');
+                heartbeatText.textContent = '实时';
+                if (heartbeatIndicator) {
+                    heartbeatIndicator.classList.remove('border-red-500', 'border-yellow-500');
+                    heartbeatIndicator.classList.add('border-green-500');
+                }
+            } else if (status === 'disconnected') {
+                heartbeatIcon.classList.remove('text-green-400', 'text-red-400');
+                heartbeatIcon.classList.add('text-yellow-400');
+                heartbeatText.classList.remove('text-green-400', 'text-red-400');
+                heartbeatText.classList.add('text-yellow-400');
+                heartbeatText.textContent = '重连中';
+                if (heartbeatIndicator) {
+                    heartbeatIndicator.classList.remove('border-green-500', 'border-red-500');
+                    heartbeatIndicator.classList.add('border-yellow-500');
+                }
+            } else if (status === 'error') {
+                heartbeatIcon.classList.remove('text-green-400', 'text-yellow-400');
+                heartbeatIcon.classList.add('text-red-400');
+                heartbeatText.classList.remove('text-green-400', 'text-yellow-400');
+                heartbeatText.classList.add('text-red-400');
+                heartbeatText.textContent = '离线';
+                if (heartbeatIndicator) {
+                    heartbeatIndicator.classList.remove('border-green-500', 'border-yellow-500');
+                    heartbeatIndicator.classList.add('border-red-500');
+                }
+            }
+        }
+        
+        function updateUIFromState(data) {
+            if (!data || data.error) return;
+            
+            const engineStatus = document.getElementById('engine-status');
+            const dot = document.getElementById('status-dot');
+            
+            // 更新引擎状态
+            if (data.engine) {
+                const anyRunning = data.engine.any_running || data.engine.sim_running || data.engine.live_running;
+                if (engineStatus) {
+                    if (anyRunning) {
+                        engineStatus.classList.remove('hidden');
+                        engineStatus.classList.add('flex');
+                    } else {
+                        engineStatus.classList.add('hidden');
+                        engineStatus.classList.remove('flex');
+                    }
+                }
+            }
+            
+            // 更新API配置状态
+            if (dot && typeof data.api_configured !== 'undefined') {
+                if (data.api_configured) {
+                    dot.innerHTML = '<span class="w-2 h-2 rounded-full bg-yellow-500"></span><span class="text-yellow-400">就绪</span>';
+                } else {
+                    dot.innerHTML = '<span class="w-2 h-2 rounded-full bg-gray-500"></span><span class="text-gray-400">未配置</span>';
+                }
+            }
+            
+            // 触发自定义事件，让其他页面可以监听
+            window.dispatchEvent(new CustomEvent('ws_state_update', { detail: data }));
+        }
+        
+        function showNotification(message, type = 'info') {
+            // 如果页面有 showHomeNotice 函数就调用它
+            if (typeof showHomeNotice === 'function') {
+                showHomeNotice(message, type);
+            }
+        }
+        
+        // 页面加载时初始化WebSocket
+        document.addEventListener('DOMContentLoaded', () => {
+            initWebSocket();
+        });
+        
+        // ========== 原有的状态检查（作为后备） ==========
         async function fetchStatus() {
             try {
                 const res = await fetch('/api/status');
                 const data = await res.json();
                 const dot = document.getElementById('status-dot');
+                const engineStatus = document.getElementById('engine-status');
+                
+                // 更新API配置状态
                 if (data.collector_running) {
                     dot.innerHTML = '<span class="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span><span class="text-green-400">采集中</span>';
                 } else if (data.api_configured) {
@@ -97,25 +273,100 @@
                 } else {
                     dot.innerHTML = '<span class="w-2 h-2 rounded-full bg-gray-500"></span><span class="text-gray-400">未配置</span>';
                 }
-            } catch(e) {}
+                
+                // 更新引擎状态
+                const engineRunning = data.copy_engine_running || data.sim_copy_engine_running || data.live_copy_engine_running;
+                if (engineRunning && engineStatus) {
+                    engineStatus.classList.remove('hidden');
+                    engineStatus.classList.add('flex');
+                } else if (engineStatus) {
+                    engineStatus.classList.add('hidden');
+                    engineStatus.classList.remove('flex');
+                }
+            } catch(e) {
+                console.error('Status fetch failed:', e);
+            }
         }
 
         // 心跳机制：告诉后端网页还开着，防止后端自动关闭
         const APP_TOKEN = document.querySelector('meta[name="app-token"]')?.content || "";
+        let heartbeatFailCount = 0;
+        let lastHeartbeatTime = Date.now();
 
         async function sendHeartbeat() {
+            const heartbeatIcon = document.getElementById('heartbeat-icon');
+            const heartbeatText = document.getElementById('heartbeat-text');
+            const heartbeatIndicator = document.getElementById('heartbeat-indicator');
+            
             try {
-                await fetch('/api/heartbeat', { method: 'POST', headers: {'X-App-Token': APP_TOKEN} });
+                const response = await fetch('/api/heartbeat', { 
+                    method: 'POST', 
+                    headers: {'X-App-Token': APP_TOKEN},
+                    signal: AbortSignal.timeout(3000)
+                });
+                
+                if (response.ok) {
+                    // 心跳成功
+                    heartbeatFailCount = 0;
+                    lastHeartbeatTime = Date.now();
+                    heartbeatIcon.classList.remove('text-red-400', 'text-yellow-400');
+                    heartbeatIcon.classList.add('text-green-400');
+                    heartbeatText.classList.remove('text-red-400', 'text-yellow-400');
+                    heartbeatText.classList.add('text-green-400');
+                    heartbeatText.textContent = '在线';
+                    heartbeatIndicator.classList.remove('border-red-500', 'border-yellow-500');
+                    heartbeatIndicator.classList.add('border-dark-border');
+                    
+                    // 添加心跳动画
+                    heartbeatIcon.classList.add('animate-pulse');
+                    setTimeout(() => heartbeatIcon.classList.remove('animate-pulse'), 300);
+                } else {
+                    throw new Error('Heartbeat response not ok');
+                }
             } catch (e) {
-                // 如果后端已经关闭，心跳会失败
-                console.log('Heartbeat failed, backend might be offline.');
+                heartbeatFailCount++;
+                console.log(`Heartbeat failed (${heartbeatFailCount}):`, e.message);
+                
+                if (heartbeatFailCount >= 3) {
+                    // 连续3次失败，标记为离线
+                    heartbeatIcon.classList.remove('text-green-400', 'text-yellow-400');
+                    heartbeatIcon.classList.add('text-red-400');
+                    heartbeatText.classList.remove('text-green-400', 'text-yellow-400');
+                    heartbeatText.classList.add('text-red-400');
+                    heartbeatText.textContent = '离线';
+                    heartbeatIndicator.classList.remove('border-dark-border', 'border-yellow-500');
+                    heartbeatIndicator.classList.add('border-red-500');
+                } else if (heartbeatFailCount >= 1) {
+                    // 1-2次失败，标记为不稳定
+                    heartbeatIcon.classList.remove('text-green-400', 'text-red-400');
+                    heartbeatIcon.classList.add('text-yellow-400');
+                    heartbeatText.classList.remove('text-green-400', 'text-red-400');
+                    heartbeatText.classList.add('text-yellow-400');
+                    heartbeatText.textContent = '不稳定';
+                    heartbeatIndicator.classList.remove('border-dark-border', 'border-red-500');
+                    heartbeatIndicator.classList.add('border-yellow-500');
+                }
             }
         }
 
         fetchStatus();
         sendHeartbeat();
-        setInterval(fetchStatus, 5000);
-        setInterval(sendHeartbeat, 5000);
+        setInterval(fetchStatus, 30000);  // WebSocket实时更新，降低轮询频率到30秒
+        setInterval(sendHeartbeat, 3000);  // 每3秒发送一次心跳
+        
+        // 检测长时间无响应
+        setInterval(() => {
+            const timeSinceLastHeartbeat = Date.now() - lastHeartbeatTime;
+            if (timeSinceLastHeartbeat > 15000) {  // 超过15秒无响应
+                const heartbeatText = document.getElementById('heartbeat-text');
+                const heartbeatIcon = document.getElementById('heartbeat-icon');
+                heartbeatIcon.classList.remove('text-green-400', 'text-yellow-400');
+                heartbeatIcon.classList.add('text-red-400');
+                heartbeatText.classList.remove('text-green-400', 'text-yellow-400');
+                heartbeatText.classList.add('text-red-400');
+                heartbeatText.textContent = '超时';
+            }
+        }, 5000);
 
         async function apiPost(url, body) {
             const res = await fetch(url, {

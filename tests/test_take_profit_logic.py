@@ -19,8 +19,31 @@ import database as db
 from copy_engine import _decide_take_profit_action, _estimate_position_pnl_roi, _pick_maker_limit_price
 
 
-class CopyPositionSummaryTests(unittest.TestCase):
+class StubModuleIsolationTestCase(unittest.TestCase):
+    _stub_module_names = ("order_executor", "binance_scraper", "binance_executor")
+
     def setUp(self):
+        super().setUp()
+        self._stub_module_snapshots = {
+            name: dict(sys.modules[name].__dict__)
+            for name in self._stub_module_names
+            if name in sys.modules
+        }
+
+    def tearDown(self):
+        for name, snapshot in self._stub_module_snapshots.items():
+            module = sys.modules.get(name)
+            if module is None:
+                module = types.ModuleType(name)
+                sys.modules[name] = module
+            module.__dict__.clear()
+            module.__dict__.update(snapshot)
+        super().tearDown()
+
+
+class CopyPositionSummaryTests(StubModuleIsolationTestCase):
+    def setUp(self):
+        super().setUp()
         self._tmpdir = os.path.join(os.path.dirname(__file__), "_tmp")
         os.makedirs(self._tmpdir, exist_ok=True)
         self._db_file = os.path.join(self._tmpdir, f"tracker_{time.time_ns()}.db")
@@ -32,6 +55,7 @@ class CopyPositionSummaryTests(unittest.TestCase):
         config.DB_PATH = self._old_db_path
         if os.path.exists(self._db_file):
             os.remove(self._db_file)
+        super().tearDown()
 
     def _insert_order(self, **kwargs):
         payload = {
@@ -239,8 +263,9 @@ class CopyPositionSummaryTests(unittest.TestCase):
         self.assertTrue(all(s.get("engine_enabled") == 1 for s in seen_settings))
 
 
-class TakeProfitDecisionTests(unittest.TestCase):
+class TakeProfitDecisionTests(StubModuleIsolationTestCase):
     def setUp(self):
+        super().setUp()
         self.settings = {
             "stop_loss_pct": 0.06,
             "tp1_roi_pct": 0.08,
@@ -306,7 +331,7 @@ class TakeProfitDecisionTests(unittest.TestCase):
         self.assertEqual("close_all", decision["action"]["kind"])
 
 
-class MakerEntryDecisionTests(unittest.TestCase):
+class MakerEntryDecisionTests(StubModuleIsolationTestCase):
     def test_long_keeps_bid_when_spread_is_one_tick(self):
         price = _pick_maker_limit_price("long", 100.0, 100.1, 100.05, 0.1, 1)
         self.assertAlmostEqual(100.0, price, places=6)
@@ -323,9 +348,51 @@ class MakerEntryDecisionTests(unittest.TestCase):
         price = _pick_maker_limit_price("long", 0.0, 0.0, 100.0, 0.0, 1)
         self.assertAlmostEqual(99.95, price, places=6)
 
+    def test_binance_post_only_rejection_returns_unfilled_for_fallback(self):
+        import copy_engine
+
+        binance_executor_stub = sys.modules["binance_executor"]
+
+        class _Ctx:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        def _raise_post_only(*args, **kwargs):
+            raise ValueError(
+                "HTTP 400 | code=-5022 | Due to the order could not be executed as maker, the Post Only order will be rejected."
+            )
+
+        binance_executor_stub.use_runtime = lambda base_url=None: _Ctx()
+        binance_executor_stub.get_book_ticker = lambda symbol: {"bidPrice": "100.0", "askPrice": "100.2"}
+        binance_executor_stub.get_symbol_filters = lambda symbol: {"tickSize": 0.1}
+        binance_executor_stub.place_limit_order = _raise_post_only
+
+        engine = copy_engine.CopyEngine("live")
+        result = engine._try_entry_maker_first(
+            platform="live_binance",
+            api_creds=("ak", "sk", ""),
+            symbol="ETHUSDT",
+            direction="long",
+            leverage=1,
+            margin=25.0,
+            signal_price=100.0,
+            current_price=100.0,
+            tol=0.05,
+            client_oid="cid",
+            timeout_sec=10,
+            maker_levels=1,
+        )
+
+        self.assertEqual("unfilled", result["status"])
+        self.assertAlmostEqual(25.0, result["remaining_margin"], places=6)
+        self.assertIn("maker_rejected_post_only", result["note"])
+        self.assertIn("[MakerPriority] limit=100.10000000 wait=10s", result["note"])
 
 
-class BinanceWalletMetricTests(unittest.TestCase):
+class BinanceWalletMetricTests(StubModuleIsolationTestCase):
     def test_extract_binance_live_wallet_metrics_falls_back_to_positions_unrealized(self):
         import web
 
@@ -343,5 +410,63 @@ class BinanceWalletMetricTests(unittest.TestCase):
         self.assertAlmostEqual(120.0, available_balance, places=6)
         self.assertAlmostEqual(-1.5256, unrealized_pnl, places=4)
         self.assertAlmostEqual(226.42, base_wallet_balance, places=6)
+
+
+class BinanceWalletOverviewTests(StubModuleIsolationTestCase):
+    def setUp(self):
+        super().setUp()
+        self._tmpdir = os.path.join(os.path.dirname(__file__), "_tmp")
+        os.makedirs(self._tmpdir, exist_ok=True)
+        self._db_file = os.path.join(self._tmpdir, f"binance_wallet_{time.time_ns()}.db")
+        self._old_db_path = config.DB_PATH
+        config.DB_PATH = self._db_file
+        db.init_db()
+
+    def tearDown(self):
+        config.DB_PATH = self._old_db_path
+        if os.path.exists(self._db_file):
+            os.remove(self._db_file)
+        super().tearDown()
+
+    def test_binance_wallet_overview_uses_platform_daily_baseline_per_profile(self):
+        import web
+
+        order_executor_stub = sys.modules["order_executor"]
+        binance_executor_stub = sys.modules["binance_executor"]
+
+        class _Ctx:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        balances = iter([
+            {"totalMarginBalance": "100.0", "availableBalance": "80.0", "_endpoint": "/fapi/v2/account"},
+            {"totalMarginBalance": "250.0", "availableBalance": "180.0", "_endpoint": "/fapi/v2/account"},
+            {"totalMarginBalance": "110.0", "availableBalance": "90.0", "_endpoint": "/fapi/v2/account"},
+        ])
+
+        order_executor_stub.use_runtime = lambda simulated=None: _Ctx()
+        binance_executor_stub.use_runtime = lambda base_url=None: _Ctx()
+        binance_executor_stub.get_account_balance = lambda *args, **kwargs: next(balances)
+        binance_executor_stub.get_my_positions = lambda *args, **kwargs: []
+
+        sim_first = web._build_binance_wallet_overview_for_profile("sim", "ak", "sk")
+        live_first = web._build_binance_wallet_overview_for_profile("live", "ak", "sk")
+        sim_second = web._build_binance_wallet_overview_for_profile("sim", "ak", "sk")
+
+        self.assertAlmostEqual(100.0, sim_first["wallet_balance"], places=6)
+        self.assertAlmostEqual(100.0, sim_first["day_start_equity"], places=6)
+        self.assertAlmostEqual(0.0, sim_first["day_pnl"], places=6)
+
+        self.assertAlmostEqual(250.0, live_first["wallet_balance"], places=6)
+        self.assertAlmostEqual(250.0, live_first["day_start_equity"], places=6)
+        self.assertAlmostEqual(0.0, live_first["day_pnl"], places=6)
+
+        self.assertAlmostEqual(110.0, sim_second["wallet_balance"], places=6)
+        self.assertAlmostEqual(100.0, sim_second["day_start_equity"], places=6)
+        self.assertAlmostEqual(10.0, sim_second["day_pnl"], places=6)
+        self.assertAlmostEqual(10.0, sim_second["day_pnl_pct"], places=6)
 if __name__ == "__main__":
     unittest.main()

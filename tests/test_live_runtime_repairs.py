@@ -72,9 +72,11 @@ class LivePlatformBaselineRepairTests(unittest.TestCase):
 class BinancePmFallbackTests(unittest.TestCase):
     def setUp(self):
         binance_executor._API_MODE_BY_KEY.clear()
+        binance_executor._POSITION_MODE_BY_KEY.clear()
 
     def tearDown(self):
         binance_executor._API_MODE_BY_KEY.clear()
+        binance_executor._POSITION_MODE_BY_KEY.clear()
 
     def test_set_position_mode_falls_back_to_papi_um_endpoint(self):
         calls = []
@@ -110,7 +112,7 @@ class BinancePmFallbackTests(unittest.TestCase):
 
         with mock.patch.object(binance_executor, "_request", side_effect=fake_request), \
              mock.patch.object(binance_executor, "_resolve_pm_base_candidates", return_value=["https://papi.binance.com"]), \
-             mock.patch.object(binance_executor, "set_position_mode", return_value={}), \
+             mock.patch.object(binance_executor, "get_position_mode", return_value={"mode": "hedge", "dualSidePosition": True}), \
              mock.patch.object(binance_executor, "set_symbol_leverage", return_value={}), \
              mock.patch.object(binance_executor, "set_margin_type", return_value={}), \
              mock.patch.object(binance_executor, "get_ticker_price", return_value=100.0), \
@@ -126,12 +128,90 @@ class BinancePmFallbackTests(unittest.TestCase):
         self.assertEqual("https://papi.binance.com", calls[1][2])
 
 
-class BinancePmPreferenceTests(unittest.TestCase):
+class BinancePositionModeOrderTests(unittest.TestCase):
     def setUp(self):
         binance_executor._API_MODE_BY_KEY.clear()
+        binance_executor._POSITION_MODE_BY_KEY.clear()
 
     def tearDown(self):
         binance_executor._API_MODE_BY_KEY.clear()
+        binance_executor._POSITION_MODE_BY_KEY.clear()
+
+    def test_get_position_mode_normalizes_dual_side_response(self):
+        with mock.patch.object(binance_executor, "_request_with_pm_fallback", return_value={"dualSidePosition": "false"}):
+            result = binance_executor.get_position_mode("ak", "sk", force_refresh=True)
+
+        self.assertEqual("oneway", result["mode"])
+        self.assertFalse(result["dualSidePosition"])
+        self.assertEqual("oneway", binance_executor._get_cached_position_mode("ak"))
+
+    def test_place_market_order_omits_position_side_in_oneway_mode(self):
+        calls = []
+
+        def fake_request_with_pm_fallback(api_key, api_secret, method, endpoint, params=None, pm_endpoints=(), max_retries=3):
+            calls.append((method, endpoint, dict(params or {}), tuple(pm_endpoints), max_retries))
+            return {"orderId": 123}
+
+        with mock.patch.object(binance_executor, "_request_with_pm_fallback", side_effect=fake_request_with_pm_fallback),              mock.patch.object(binance_executor, "get_position_mode", return_value={"mode": "oneway", "dualSidePosition": False}),              mock.patch.object(binance_executor, "set_symbol_leverage", return_value={}),              mock.patch.object(binance_executor, "set_margin_type", return_value={}),              mock.patch.object(binance_executor, "get_symbol_filters", return_value={"minQty": 0.001, "stepSize": 0.001, "tickSize": 0.1}):
+            result = binance_executor.place_market_order(
+                "ak", "sk", "BTCUSDT", "long", 5, "isolated", 50.0, current_price=100.0
+            )
+
+        self.assertEqual(123, result["orderId"])
+        params = calls[0][2]
+        self.assertEqual("BUY", params["side"])
+        self.assertNotIn("positionSide", params)
+        self.assertNotIn("reduceOnly", params)
+
+    def test_close_partial_position_uses_reduce_only_in_oneway_mode(self):
+        calls = []
+
+        def fake_request_with_pm_fallback(api_key, api_secret, method, endpoint, params=None, pm_endpoints=(), max_retries=3):
+            calls.append(dict(params or {}))
+            return {"orderId": 456}
+
+        with mock.patch.object(binance_executor, "_request_with_pm_fallback", side_effect=fake_request_with_pm_fallback),              mock.patch.object(binance_executor, "get_position_mode", return_value={"mode": "oneway", "dualSidePosition": False}):
+            result = binance_executor.close_partial_position("ak", "sk", "BTCUSDT", "long", "1.250")
+
+        self.assertEqual(456, result["orderId"])
+        params = calls[0]
+        self.assertEqual("SELL", params["side"])
+        self.assertEqual("true", params["reduceOnly"])
+        self.assertNotIn("positionSide", params)
+
+    def test_place_market_order_refreshes_mode_after_4061(self):
+        calls = []
+
+        def fake_request_with_pm_fallback(api_key, api_secret, method, endpoint, params=None, pm_endpoints=(), max_retries=3):
+            calls.append((dict(params or {}), max_retries))
+            if len(calls) == 1:
+                raise ValueError("HTTP 400 | code=-4061 | Order's position side does not match user's setting")
+            return {"orderId": 789}
+
+        with mock.patch.object(binance_executor, "_request_with_pm_fallback", side_effect=fake_request_with_pm_fallback),              mock.patch.object(binance_executor, "get_position_mode", side_effect=[
+                 {"mode": "hedge", "dualSidePosition": True},
+                 {"mode": "oneway", "dualSidePosition": False},
+             ]),              mock.patch.object(binance_executor, "set_symbol_leverage", return_value={}),              mock.patch.object(binance_executor, "set_margin_type", return_value={}),              mock.patch.object(binance_executor, "get_symbol_filters", return_value={"minQty": 0.001, "stepSize": 0.001, "tickSize": 0.1}):
+            result = binance_executor.place_market_order(
+                "ak", "sk", "BTCUSDT", "long", 5, "isolated", 50.0, current_price=100.0
+            )
+
+        self.assertEqual(789, result["orderId"])
+        first_payload, first_retries = calls[0]
+        second_payload, second_retries = calls[1]
+        self.assertEqual("LONG", first_payload["positionSide"])
+        self.assertNotIn("positionSide", second_payload)
+        self.assertEqual(1, second_retries)
+
+
+class BinancePmPreferenceTests(unittest.TestCase):
+    def setUp(self):
+        binance_executor._API_MODE_BY_KEY.clear()
+        binance_executor._POSITION_MODE_BY_KEY.clear()
+
+    def tearDown(self):
+        binance_executor._API_MODE_BY_KEY.clear()
+        binance_executor._POSITION_MODE_BY_KEY.clear()
 
     def test_account_balance_marks_pm_mode_when_papi_account_succeeds(self):
         calls = []
@@ -169,7 +249,7 @@ class BinancePmPreferenceTests(unittest.TestCase):
 
         with mock.patch.object(binance_executor, "_request", side_effect=fake_request), \
              mock.patch.object(binance_executor, "_resolve_pm_base_candidates", return_value=["https://papi.binance.com"]), \
-             mock.patch.object(binance_executor, "set_position_mode", return_value={}), \
+             mock.patch.object(binance_executor, "get_position_mode", return_value={"mode": "hedge", "dualSidePosition": True}), \
              mock.patch.object(binance_executor, "set_symbol_leverage", return_value={}), \
              mock.patch.object(binance_executor, "set_margin_type", return_value={}), \
              mock.patch.object(binance_executor, "get_ticker_price", return_value=100.0), \
@@ -186,9 +266,11 @@ class BinancePmPreferenceTests(unittest.TestCase):
 class BinanceBalanceNormalizationTests(unittest.TestCase):
     def setUp(self):
         binance_executor._API_MODE_BY_KEY.clear()
+        binance_executor._POSITION_MODE_BY_KEY.clear()
 
     def tearDown(self):
         binance_executor._API_MODE_BY_KEY.clear()
+        binance_executor._POSITION_MODE_BY_KEY.clear()
 
     def test_account_balance_prefers_total_margin_balance_for_realtime_equity(self):
         def fake_request(api_key, api_secret, method, endpoint, params=None, base_url=None, max_retries=3):

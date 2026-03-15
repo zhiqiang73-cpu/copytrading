@@ -1,4 +1,4 @@
-﻿"""
+"""
 binance_scraper.py — 实时监控币安跟单交易员的操作记录
 无需登录，通过公开的 order-history 接口轮询识别开仓/平仓信号
 
@@ -21,7 +21,7 @@ import config
 
 logger = logging.getLogger(__name__)
 
-_BN_BASE = "https://www.binance.com"
+_BN_BASE = config.BINANCE_COPYTRADE_BASE
 _BN_FAPI_BASE = config.BINANCE_BASE_URL
 
 
@@ -32,11 +32,7 @@ _BN_TIME_OFFSET_MS = 0
 _BN_TIME_OFFSET_AT = 0.0
 _BN_TIME_OFFSET_TTL_SEC = 60
 _HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/121.0.0.0 Safari/537.36"
-    ),
+    "User-Agent": config.BINANCE_COPYTRADE_USER_AGENT,
     "Content-Type": "application/json",
     "clienttype": "web",
     "lang": "zh-CN",
@@ -74,6 +70,36 @@ def _build_record_id(row: dict) -> str:
     )
     digest = hashlib.md5(signature.encode("utf-8")).hexdigest()[:24]
     return f"bnsig_{digest}"
+
+
+def _post_with_status(path: str, body: dict) -> tuple[Optional[dict], Optional[str]]:
+    """POST 到币安公开接口，返回 (data, error)。"""
+    try:
+        resp = requests.post(
+            _BN_BASE + path,
+            json=body,
+            headers=_HEADERS,
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("code") == "000000" or "data" in data:
+            return data.get("data"), None
+        error_msg = data.get("msg", "")
+        logger.warning("Binance API %s returned error: code=%s msg=%s", path, data.get("code"), error_msg[:200])
+        return None, f"api_error:{data.get('code')}:{error_msg[:200]}"
+    except requests.exceptions.Timeout:
+        logger.error("Binance API %s timeout (10s) - 网络可能有问题", path)
+        return None, "timeout"
+    except requests.exceptions.ConnectionError:
+        logger.error("Binance API %s 连接失败 - 检查网络", path)
+        return None, "connection_error"
+    except requests.exceptions.HTTPError as e:
+        logger.error("Binance API %s HTTP 错误 %s: %s", path, e.response.status_code, e.response.text[:200])
+        return None, f"http_error:{e.response.status_code}"
+    except Exception as e:
+        logger.error("Binance API %s 未知错误: %s", path, str(e)[:200])
+        return None, f"unknown_error:{str(e)[:200]}"
 
 
 def _post(path: str, body: dict) -> Optional[dict]:
@@ -191,14 +217,126 @@ def fetch_operation_records(portfolio_id: str, page_size: int = 20) -> list[dict
     return result
 
 
-def fetch_latest_orders(portfolio_id: str, since_ms: int = 0, limit: int = 50) -> list[dict]:
+def fetch_operation_records_with_status(
+    portfolio_id: str,
+    page_size: int = 20,
+    start_ms: int | None = None,
+    end_ms: int | None = None,
+) -> tuple[list[dict], Optional[str]]:
+    """
+    拉取交易员在指定时间窗口内的操作记录。
+    返回 (records, error)，其中 error 为 None 表示请求成功。
+    """
+    end_ms = int(end_ms or time.time() * 1000)
+    start_ms = int(start_ms or (end_ms - 7 * 24 * 3600 * 1000))
+
+    data, error = _post_with_status(
+        "/bapi/futures/v1/friendly/future/copy-trade/lead-portfolio/order-history",
+        {
+            "portfolioId": portfolio_id,
+            "startTime": start_ms,
+            "endTime": end_ms,
+            "pageSize": page_size,
+        },
+    )
+    if error:
+        return [], error
+
+    rows = []
+    if isinstance(data, list):
+        rows = data
+    elif isinstance(data, dict):
+        for key in ("list", "rows", "orders", "data"):
+            if isinstance(data.get(key), list):
+                rows = data[key]
+                break
+
+    result = []
+    for r in rows:
+        try:
+            side = (r.get("side") or "").upper()
+            pos_side = (r.get("positionSide") or "").upper()
+
+            if pos_side == "BOTH":
+                reduce_only = r.get("reduceOnly", False)
+                if side == "BUY":
+                    action = "close_short" if reduce_only else "open_long"
+                    direction = "short" if reduce_only else "long"
+                else:
+                    action = "close_long" if reduce_only else "open_short"
+                    direction = "long" if reduce_only else "short"
+            else:
+                if side == "BUY" and pos_side == "LONG":
+                    action, direction = "open_long", "long"
+                elif side == "SELL" and pos_side == "LONG":
+                    action, direction = "close_long", "long"
+                elif side == "SELL" and pos_side == "SHORT":
+                    action, direction = "open_short", "short"
+                elif side == "BUY" and pos_side == "SHORT":
+                    action, direction = "close_short", "short"
+                else:
+                    continue
+
+            result.append({
+                "order_id": _build_record_id(r),
+                "symbol": r.get("symbol", ""),
+                "action": action,
+                "direction": direction,
+                "qty": float(r.get("executedQty") or r.get("qty") or 0),
+                "price": float(r.get("avgPrice") or r.get("price") or 0),
+                "order_time": int(r.get("orderTime") or r.get("time") or 0),
+                "pnl": float(r.get("totalPnl") or r.get("pnl") or 0),
+                "leverage": int(r.get("leverage") or 1),
+                "_raw": r,
+            })
+        except Exception as exc:
+            logger.warning("解析操作记录异常: %s | row=%s", exc, str(r)[:200])
+
+    return result, None
+
+
+def fetch_latest_orders(
+    portfolio_id: str,
+    since_ms: int = 0,
+    since_order_id: str = "",
+    limit: int = 50
+) -> list[dict]:
     """
     只返回比 since_ms 更新的操作记录（用于实时轮询）。
+    支持同毫秒去重：当 since_ms 有多个订单时，用 since_order_id 过滤。
     """
     records = fetch_operation_records(portfolio_id, page_size=limit)
     if since_ms <= 0:
         return records
-    return [r for r in records if r["order_time"] > since_ms]
+    
+    return filter_records_after_cursor(records, since_ms=since_ms, since_order_id=since_order_id)
+
+
+def filter_records_after_cursor(
+    records: list[dict],
+    since_ms: int,
+    since_order_id: str = ""
+) -> list[dict]:
+    """
+    过滤出比游标更新的记录。
+    
+    逻辑：
+    - 保留 order_time > since_ms 的记录
+    - 保留 order_time == since_ms 但 order_id > since_order_id 的记录（字典序）
+    
+    用于同毫秒去重场景。
+    """
+    result = []
+    for r in records:
+        order_time = r.get("order_time", 0)
+        order_id = str(r.get("order_id", ""))
+        
+        if order_time > since_ms:
+            result.append(r)
+        elif order_time == since_ms and since_order_id and order_id > since_order_id:
+            result.append(r)
+    
+    return result
 
 
 def parse_binance_url(url: str) -> Optional[str]:
